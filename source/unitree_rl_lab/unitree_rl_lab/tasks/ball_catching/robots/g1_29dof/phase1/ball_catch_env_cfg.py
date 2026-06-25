@@ -86,9 +86,8 @@ class CommandsCfg:
 
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
-        # TODO: replace with your catching motion csv and regenerate npz
-        # python scripts/mimic/csv_to_npz.py -f path/to/your_catching_motion.csv --input_fps 60
-        motion_file=f"{os.path.dirname(__file__)}/gangnam_standin.bvh_60hz.npz",
+        # TODO: replace with your catching motion npz after recording mocap
+        motion_file=f"{os.path.dirname(__file__)}/../../../../mimic/robots/g1_29dof/gangnanm_style/G1_gangnam_style_V01.bvh_60hz.npz",
         anchor_body_name="torso_link",
         resampling_time_range=(1.0e9, 1.0e9),
         debug_vis=True,

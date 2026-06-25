@@ -1,6 +1,7 @@
 """This sub-module contains the functions that are specific to the ball catching environments."""
 
 from isaaclab.envs.mdp import *  # noqa: F401, F403
+from isaaclab_tasks.manager_based.locomotion.velocity.mdp import *  # noqa: F401, F403
 
 from unitree_rl_lab.tasks.ball_catching.mdp import *  # noqa: F401, F403
 
