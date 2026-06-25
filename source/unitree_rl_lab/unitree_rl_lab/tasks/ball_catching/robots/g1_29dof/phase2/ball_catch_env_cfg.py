@@ -1,7 +1,7 @@
 import math
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -52,7 +52,34 @@ class RobotSceneCfg(InteractiveSceneCfg):
     )
     # sensors
     contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True
+        prim_path="{ENV_REGEX_NS}/.*", history_length=3, track_air_time=True
+    )
+    # ball — physics-simulated rigid object thrown toward the robot
+    ball = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Ball",
+        spawn=sim_utils.SphereCfg(
+            radius=0.05,                  # [BALL SIZE] radius in meters (∅10cm)
+            mass_props=sim_utils.MassPropertiesCfg(
+                mass=0.15,                # [BALL MASS] kg
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,    # ball flies under gravity
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,   # ball collides with robot and ground
+            ),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.5,      # [BALL FRICTION] with hands/ground
+                dynamic_friction=0.5,
+                restitution=0.6,          # [BALL BOUNCINESS] 0=clay, 1=superball
+            ),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 0.3, 0.0),   # [BALL COLOR] orange-red
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 5.0),         # [BALL START POS] far away; BallCommand repositions
+        ),
     )
 
 
