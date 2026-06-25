@@ -159,17 +159,10 @@ class EventCfg:
 class CommandsCfg:
     """Command specifications for the MDP."""
 
-    # TODO: replace with BallCommand that generates throw trajectories
-    base_velocity = mdp.UniformLevelVelocityCommandCfg(
-        asset_name="robot",
-        resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.02,
-        rel_heading_envs=1.0,
-        heading_command=False,
-        debug_vis=True,
-        ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.1, 0.1), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.1, 0.1)
-        ),
+    ball_throw = mdp.BallCommandCfg(
+        asset_name="ball",
+        resampling_time_range=(1.0e9, 1.0e9),  # never auto-resample; triggered by ball state
+        debug_vis=False,
     )
 
 
