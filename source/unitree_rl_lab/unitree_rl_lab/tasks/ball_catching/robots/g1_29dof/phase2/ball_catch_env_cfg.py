@@ -50,9 +50,9 @@ class RobotSceneCfg(InteractiveSceneCfg):
         prim_path="/World/skyLight",
         spawn=sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0),
     )
-    # sensors
+    # sensors (robot only — ball contact sensing added later for catch detection)
     contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/.*", history_length=3, track_air_time=True
+        prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True
     )
     # ball — physics-simulated rigid object thrown toward the robot
     ball = RigidObjectCfg(
@@ -68,6 +68,7 @@ class RobotSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True,   # ball collides with robot and ground
             ),
+            activate_contact_sensors=True,  # needed by ContactSensorCfg prim_path=".*"
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.5,      # [BALL FRICTION] with hands/ground
                 dynamic_friction=0.5,
@@ -184,9 +185,11 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # TODO: add ball-specific observations (ball_pos, ball_vel, hand_pos, etc.)
+        # TEMP: switched command_name to ball_throw for smoke test.
+        # Replace with proper ball observations (ball_pos, ball_vel from BallCommand).
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, noise=Unoise(n_min=-1.5, n_max=1.5))
         last_action = ObsTerm(func=mdp.last_action)
@@ -202,10 +205,12 @@ class ObservationsCfg:
     class CriticCfg(ObsGroup):
         """Observations for critic group."""
 
+        # TEMP: switched command_name to ball_throw for smoke test.
+        # Replace with proper critic ball observations.
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         last_action = ObsTerm(func=mdp.last_action)
@@ -222,15 +227,11 @@ class RewardsCfg:
 
     # TODO: add ball catching rewards (hand_to_ball_distance, catch_success, etc.)
 
+    # TEMP: removed velocity tracking rewards — they depend on base_velocity command.
+    # Re-add catching-specific tracking rewards here (hand_to_ball_distance, catch_success, ball_height).
     # -- task
-    track_lin_vel_xy = RewTerm(
-        func=mdp.track_lin_vel_xy_yaw_frame_exp,
-        weight=1.0,
-        params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
-    )
-    track_ang_vel_z = RewTerm(
-        func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
-    )
+    # track_lin_vel_xy = RewTerm(...)
+    # track_ang_vel_z = RewTerm(...)
     alive = RewTerm(func=mdp.is_alive, weight=0.15)
 
     # -- regularization
@@ -277,17 +278,9 @@ class RewardsCfg:
     base_height = RewTerm(func=mdp.base_height_l2, weight=-10, params={"target_height": 0.76})
 
     # -- feet
-    gait = RewTerm(
-        func=mdp.feet_gait,
-        weight=0.5,
-        params={
-            "period": 0.8,
-            "offset": [0.0, 0.5],
-            "threshold": 0.55,
-            "command_name": "base_velocity",
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
-        },
-    )
+    # TEMP: removed gait reward — depends on base_velocity command.
+    # Re-add or adapt for catching footwork.
+    # gait = RewTerm(...)
     feet_slide = RewTerm(
         func=mdp.feet_slide,
         weight=-0.2,
@@ -296,16 +289,9 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
         },
     )
-    feet_clearance = RewTerm(
-        func=mdp.foot_clearance_reward,
-        weight=1.0,
-        params={
-            "std": 0.05,
-            "tanh_mult": 2.0,
-            "target_height": 0.1,
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
-        },
-    )
+    # TEMP: removed foot_clearance_reward — only in locomotion MDP, not ball_catching.
+    # Add back or replace with catching-specific foot reward.
+    # feet_clearance = RewTerm(func=mdp.foot_clearance_reward, ...)
 
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
