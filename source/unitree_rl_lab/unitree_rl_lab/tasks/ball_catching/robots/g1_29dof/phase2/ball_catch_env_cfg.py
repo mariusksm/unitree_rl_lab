@@ -343,6 +343,14 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_height = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.2})
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 0.8})
+    ball_dropped = DoneTerm(
+        func=mdp.ball_below_height,
+        params={"ball_name": "ball", "min_height": 0.1},  # [TERM DROP] ball z below 10cm = dead
+    )
+    ball_missed = DoneTerm(
+        func=mdp.ball_far_from_robot,
+        params={"ball_name": "ball", "max_distance": 6.0},  # [TERM MISS] ball > 6m away horizontally
+    )
 
 
 @configclass

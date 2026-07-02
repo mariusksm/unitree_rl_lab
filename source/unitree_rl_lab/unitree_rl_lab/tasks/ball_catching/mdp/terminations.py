@@ -60,3 +60,21 @@ def bad_motion_body_pos_z_only(
     body_indexes = _get_body_indexes(command, body_names)
     error = torch.abs(command.body_pos_relative_w[:, body_indexes, -1] - command.robot_body_pos_w[:, body_indexes, -1])
     return torch.any(error > threshold, dim=-1)
+
+
+# ── Ball catching terminations ─────────────────────────────────────────
+
+
+def ball_below_height(env: ManagerBasedRLEnv, ball_name: str, min_height: float) -> torch.Tensor:
+    """Terminate when the ball falls below a minimum height (hit the ground or unrecoverable)."""
+    ball: RigidObject = env.scene[ball_name]
+    return ball.data.root_pos_w[:, 2] < min_height
+
+
+def ball_far_from_robot(env: ManagerBasedRLEnv, ball_name: str, max_distance: float) -> torch.Tensor:
+    """Terminate when the ball moves too far from the robot horizontally (missed)."""
+    ball: RigidObject = env.scene[ball_name]
+    robot: Articulation = env.scene["robot"]
+    ball_xy = ball.data.root_pos_w[:, :2]
+    robot_xy = robot.data.root_pos_w[:, :2]
+    return torch.norm(ball_xy - robot_xy, dim=1) > max_distance

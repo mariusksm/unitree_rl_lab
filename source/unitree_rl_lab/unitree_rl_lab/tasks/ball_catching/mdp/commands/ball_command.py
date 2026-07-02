@@ -73,6 +73,12 @@ class BallCommand(CommandTerm):
             print(f"  ball_relative     = {(ball.root_pos_w[e] - robot.root_pos_w[e]).tolist()}")
             print(f"  ball_height       = {ball.root_pos_w[e, 2]:.3f}  (dropped={ball.root_pos_w[e, 2] < 0.2})")
             print(f"  time_since_throw  = {self.time_since_throw[e]:.2f}s")
+            # termination flags for env 0
+            tm = self._env.termination_manager
+            drop_val = tm.get_term("ball_dropped")[e].item() if "ball_dropped" in tm.active_terms else -1
+            miss_val = tm.get_term("ball_missed")[e].item() if "ball_missed" in tm.active_terms else -1
+            done = tm.terminated[e].item() or tm.time_outs[e].item()
+            print(f"  terminated        = {done}  (ball_dropped={drop_val}  ball_missed={miss_val})")
             for i, name in enumerate(wrist_names):
                 bid = wrist_ids[i]
                 rel = (robot.body_pos_w[e, bid] - robot.root_pos_w[e]).tolist()
