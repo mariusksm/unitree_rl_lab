@@ -237,13 +237,33 @@ class ObservationsCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    # TODO: add ball catching rewards (hand_to_ball_distance, catch_success, etc.)
-
-    # TEMP: removed velocity tracking rewards — they depend on base_velocity command.
-    # Re-add catching-specific tracking rewards here (hand_to_ball_distance, catch_success, ball_height).
-    # -- task
-    # track_lin_vel_xy = RewTerm(...)
-    # track_ang_vel_z = RewTerm(...)
+    # -- ball catching
+    hand_to_ball = RewTerm(
+        func=mdp.hand_to_ball_distance_exp,
+        weight=2.0,
+        params={
+            "ball_name": "ball",
+            "hand_body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"],
+            "std": 0.15,            # [CATCH TOLERANCE] hands within 15cm get full reward
+        },
+    )
+    catch_success = RewTerm(
+        func=mdp.ball_caught,
+        weight=10.0,
+        params={
+            "ball_name": "ball",
+            "vel_threshold": 2.0,    # [CATCH VEL] ball speed below 2 m/s after hit
+            "min_height": 0.3,       # [CATCH HEIGHT] ball must be above ground
+        },
+    )
+    ball_height_penalty = RewTerm(
+        func=mdp.ball_height_penalty,
+        weight=-5.0,
+        params={
+            "ball_name": "ball",
+            "min_height": 0.5,       # [CATCH ZONE] penalize ball dropping below 0.5m
+        },
+    )
     alive = RewTerm(func=mdp.is_alive, weight=0.15)
 
     # -- regularization

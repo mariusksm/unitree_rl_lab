@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_error_magnitude
@@ -89,3 +89,50 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
     last_contact_time = contact_sensor.data.last_contact_time[:, sensor_cfg.body_ids]
     reward = torch.sum((last_contact_time < threshold) * first_air, dim=-1)
     return reward
+
+
+# ── Ball catching rewards ──────────────────────────────────────────────
+
+
+def hand_to_ball_distance_exp(
+    env: ManagerBasedRLEnv,
+    ball_name: str,
+    hand_body_names: list[str],
+    std: float,
+) -> torch.Tensor:
+    """Gaussian reward based on the closest hand's distance to the ball.
+
+    Returns exp(-min_distance² / std²) — saturates at 1.0 when hands are near the ball.
+    """
+    ball: RigidObject = env.scene[ball_name]
+    robot: Articulation = env.scene["robot"]
+    ball_pos = ball.data.root_pos_w.unsqueeze(1)               # (N, 1, 3)
+    hand_ids, _ = robot.find_bodies(hand_body_names, preserve_order=True)
+    hand_pos = robot.data.body_pos_w[:, hand_ids]               # (N, H, 3)
+    dist = torch.norm(hand_pos - ball_pos, dim=-1)              # (N, H)
+    min_dist = dist.min(dim=-1).values                          # (N,)
+    return torch.exp(-(min_dist**2) / std**2)
+
+
+def ball_caught(
+    env: ManagerBasedRLEnv,
+    ball_name: str,
+    vel_threshold: float,
+    min_height: float,
+) -> torch.Tensor:
+    """Binary bonus: ball speed below threshold AND ball above ground."""
+    ball: RigidObject = env.scene[ball_name]
+    speed = torch.norm(ball.data.root_lin_vel_w, dim=-1)
+    height = ball.data.root_pos_w[:, 2]
+    caught = (speed < vel_threshold) & (height > min_height)
+    return caught.float()
+
+
+def ball_height_penalty(
+    env: ManagerBasedRLEnv,
+    ball_name: str,
+    min_height: float,
+) -> torch.Tensor:
+    """Penalty when the ball falls below the catch zone."""
+    ball: RigidObject = env.scene[ball_name]
+    return (ball.data.root_pos_w[:, 2] < min_height).float()
