@@ -184,12 +184,19 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
 
-        # TODO: add ball-specific observations (ball_pos, ball_vel, hand_pos, etc.)
-        # TEMP: switched command_name to ball_throw for smoke test.
-        # Replace with proper ball observations (ball_pos, ball_vel from BallCommand).
+        # ball state in world frame (pos + vel) from BallCommand
+        ball_state = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
+        # ball position relative to robot base (for spatial reasoning)
+        ball_relative = ObsTerm(func=mdp.ball_pos_relative)
+        # wrist positions relative to robot base
+        hand_pos = ObsTerm(
+            func=mdp.hand_body_pos,
+            params={"body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"]},
+            noise=Unoise(n_min=-0.02, n_max=0.02),
+        )
+        # proprioception
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, noise=Unoise(n_min=-1.5, n_max=1.5))
         last_action = ObsTerm(func=mdp.last_action)
@@ -205,12 +212,17 @@ class ObservationsCfg:
     class CriticCfg(ObsGroup):
         """Observations for critic group."""
 
-        # TEMP: switched command_name to ball_throw for smoke test.
-        # Replace with proper critic ball observations.
+        # ball state (clean, no noise)
+        ball_state = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
+        ball_relative = ObsTerm(func=mdp.ball_pos_relative)
+        hand_pos = ObsTerm(
+            func=mdp.hand_body_pos,
+            params={"body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"]},
+        )
+        # proprioception (clean)
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         last_action = ObsTerm(func=mdp.last_action)

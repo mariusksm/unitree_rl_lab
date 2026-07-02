@@ -36,6 +36,8 @@ class BallCommand(CommandTerm):
 
         # [BALL THROW PARAMS] per-environment counters
         self.time_since_throw = torch.zeros(self.num_envs, device=self.device)
+        # debug
+        self._debug_step = 0
 
         # identity quaternion (w,x,y,z) — ball orientation doesn't matter
         self._default_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
@@ -55,6 +57,27 @@ class BallCommand(CommandTerm):
 
     def _update_metrics(self):
         self.metrics["ball_height"] = self.ball.data.root_pos_w[:, 2].clone()
+
+        # DEBUG: print relative positions every ~1000 steps (every ~20s at 50Hz)
+        self._debug_step += 1
+        if self._debug_step % 1000 == 0:
+            e = 0  # sample env 0
+            robot = self.robot.data
+            ball = self.ball.data
+            wrist_ids, wrist_names = self.robot.find_bodies(
+                ["left_wrist_yaw_link", "right_wrist_yaw_link"], preserve_order=True
+            )
+            print(f"\n[DEBUG BallCommand] env={e} step={self._debug_step}")
+            print(f"  robot_root_pos    = {robot.root_pos_w[e].tolist()}")
+            print(f"  ball_world_pos    = {ball.root_pos_w[e].tolist()}")
+            print(f"  ball_relative     = {(ball.root_pos_w[e] - robot.root_pos_w[e]).tolist()}")
+            print(f"  ball_height       = {ball.root_pos_w[e, 2]:.3f}  (dropped={ball.root_pos_w[e, 2] < 0.2})")
+            print(f"  time_since_throw  = {self.time_since_throw[e]:.2f}s")
+            for i, name in enumerate(wrist_names):
+                bid = wrist_ids[i]
+                rel = (robot.body_pos_w[e, bid] - robot.root_pos_w[e]).tolist()
+                print(f"  {name:30s} = {rel}")
+            print()
 
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
