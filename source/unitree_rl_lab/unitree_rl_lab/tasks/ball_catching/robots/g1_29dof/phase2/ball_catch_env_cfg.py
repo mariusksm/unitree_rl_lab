@@ -111,6 +111,28 @@ class EventCfg:
         },
     )
 
+    # ball randomization
+    ball_physics = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("ball"),
+            "static_friction_range": (0.3, 0.8),     # [BALL FRIC RANGE] randomized surface grip
+            "dynamic_friction_range": (0.3, 0.8),
+            "restitution_range": (0.4, 0.8),          # [BALL BOUNCE RANGE] randomized bounciness
+            "num_buckets": 16,
+        },
+    )
+    ball_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("ball"),
+            "mass_distribution_params": (-0.05, 0.05),  # [BALL MASS RANGE] ±50g around 150g default
+            "operation": "add",
+        },
+    )
+
     # reset
     base_external_force_torque = EventTerm(
         func=mdp.apply_external_force_torque,

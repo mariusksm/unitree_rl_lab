@@ -79,6 +79,10 @@ class BallCommand(CommandTerm):
             miss_val = tm.get_term("ball_missed")[e].item() if "ball_missed" in tm.active_terms else -1
             done = tm.terminated[e].item() or tm.time_outs[e].item()
             print(f"  terminated        = {done}  (ball_dropped={drop_val}  ball_missed={miss_val})")
+            # ball mass for two envs — should differ due to startup randomization
+            masses = self.ball.root_physx_view.get_masses()[:2]
+            print(f"  ball_mass (env0)  = {masses[0].item():.4f} kg")
+            print(f"  ball_mass (env1)  = {masses[1].item():.4f} kg")
             for i, name in enumerate(wrist_names):
                 bid = wrist_ids[i]
                 rel = (robot.body_pos_w[e, bid] - robot.root_pos_w[e]).tolist()
