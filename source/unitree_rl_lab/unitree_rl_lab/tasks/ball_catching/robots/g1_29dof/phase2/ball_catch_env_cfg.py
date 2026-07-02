@@ -252,8 +252,8 @@ class RewardsCfg:
         weight=10.0,
         params={
             "ball_name": "ball",
-            "vel_threshold": 2.0,    # [CATCH VEL] ball speed below 2 m/s after hit
-            "min_height": 0.3,       # [CATCH HEIGHT] ball must be above ground
+            "vel_threshold": 0.5,    # [CATCH VEL] ball speed below 0.5 m/s = hit something
+            "min_height": 0.5,       # [CATCH HEIGHT] ball must be above ground
         },
     )
     ball_height_penalty = RewTerm(
