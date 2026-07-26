@@ -108,3 +108,8 @@ def hand_body_pos(
     body_ids, _ = asset.find_bodies(body_names, preserve_order=True)
     body_pos_w = asset.data.body_pos_w[:, body_ids]
     return (body_pos_w - asset.data.root_pos_w.unsqueeze(1)).reshape(env.num_envs, -1)
+
+
+def dummy_zeros(env: ManagerBasedEnv, dim: int) -> torch.Tensor:
+    """Returns a zero tensor. Used to pad observation space for transfer learning."""
+    return torch.zeros(env.num_envs, dim, device=env.device)

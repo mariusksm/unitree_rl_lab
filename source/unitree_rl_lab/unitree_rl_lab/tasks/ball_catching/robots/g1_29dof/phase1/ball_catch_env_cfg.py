@@ -137,12 +137,19 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
 
-        # observation terms (order preserved)
+        # observation terms (order preserved — must match Phase 2 for transfer)
         motion_command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"})
+        # -- ball placeholders (zero in Phase 1, real in Phase 2) --
+        ball_state = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        ball_relative = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
+        hand_pos = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        # -- motion tracking --
         motion_anchor_ori_b = ObsTerm(
             func=mdp.motion_anchor_ori_b, params={"command_name": "motion"}, noise=Unoise(n_min=-0.05, n_max=0.05)
         )
+        # -- proprioception --
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.5, n_max=0.5))
         last_action = ObsTerm(func=mdp.last_action)
@@ -153,13 +160,21 @@ class ObservationsCfg:
 
     @configclass
     class PrivilegedCfg(ObsGroup):
+        # (order preserved — must match Phase 2 for transfer)
         command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"})
+        # -- ball placeholders (zero in Phase 1, real in Phase 2) --
+        ball_state = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        ball_relative = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
+        hand_pos = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        # -- motion tracking --
         motion_anchor_pos_b = ObsTerm(func=mdp.motion_anchor_pos_b, params={"command_name": "motion"})
         motion_anchor_ori_b = ObsTerm(func=mdp.motion_anchor_ori_b, params={"command_name": "motion"})
         body_pos = ObsTerm(func=mdp.robot_body_pos_b, params={"command_name": "motion"})
         body_ori = ObsTerm(func=mdp.robot_body_ori_b, params={"command_name": "motion"})
+        # -- proprioception --
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
         actions = ObsTerm(func=mdp.last_action)

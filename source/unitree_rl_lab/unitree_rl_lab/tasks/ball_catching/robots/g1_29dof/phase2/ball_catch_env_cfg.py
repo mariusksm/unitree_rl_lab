@@ -206,17 +206,20 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
 
-        # ball state in world frame (pos + vel) from BallCommand
+        # (order preserved — must match Phase 1 for transfer)
+        # -- motion placeholders (zero in Phase 2, real in Phase 1) --
+        motion_command = ObsTerm(func=mdp.dummy_zeros, params={"dim": 58})
+        # -- ball state --
         ball_state = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
-        # ball position relative to robot base (for spatial reasoning)
         ball_relative = ObsTerm(func=mdp.ball_pos_relative)
-        # wrist positions relative to robot base
         hand_pos = ObsTerm(
             func=mdp.hand_body_pos,
             params={"body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"]},
             noise=Unoise(n_min=-0.02, n_max=0.02),
         )
-        # proprioception
+        # -- motion placeholder --
+        motion_anchor_ori_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        # -- proprioception --
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
@@ -234,14 +237,22 @@ class ObservationsCfg:
     class CriticCfg(ObsGroup):
         """Observations for critic group."""
 
-        # ball state (clean, no noise)
+        # (order preserved — must match Phase 1 for transfer)
+        # -- motion placeholders (zero in Phase 2, real in Phase 1) --
+        command = ObsTerm(func=mdp.dummy_zeros, params={"dim": 58})
+        # -- ball state (clean, no noise) --
         ball_state = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
         ball_relative = ObsTerm(func=mdp.ball_pos_relative)
         hand_pos = ObsTerm(
             func=mdp.hand_body_pos,
             params={"body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"]},
         )
-        # proprioception (clean)
+        # -- motion placeholders --
+        motion_anchor_pos_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
+        motion_anchor_ori_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        body_pos = ObsTerm(func=mdp.dummy_zeros, params={"dim": 42})
+        body_ori = ObsTerm(func=mdp.dummy_zeros, params={"dim": 84})
+        # -- proprioception (clean) --
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
