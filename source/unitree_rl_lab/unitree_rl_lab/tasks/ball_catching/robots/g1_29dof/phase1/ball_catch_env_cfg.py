@@ -155,6 +155,7 @@ class ObservationsCfg:
         last_action = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self):
+            self.history_length = 5         # match Phase 2 for transfer learning
             self.enable_corruption = True
             self.concatenate_terms = True
 
@@ -178,6 +179,9 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
         actions = ObsTerm(func=mdp.last_action)
+
+        def __post_init__(self):
+            self.history_length = 5         # match Phase 2 for transfer learning
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
