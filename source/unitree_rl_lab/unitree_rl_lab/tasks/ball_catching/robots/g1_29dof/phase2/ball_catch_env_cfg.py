@@ -1,6 +1,7 @@
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -89,15 +90,15 @@ class RobotSceneCfg(InteractiveSceneCfg):
 class EventCfg:
     """Configuration for events."""
 
-    # startup
+    # startup (robot DR mirrored with Phase 1 for transfer integrity)
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.3, 1.0),
-            "dynamic_friction_range": (0.3, 1.0),
-            "restitution_range": (0.0, 0.0),
+            "static_friction_range": (0.3, 1.6),
+            "dynamic_friction_range": (0.3, 1.2),
+            "restitution_range": (0.0, 0.5),
             "num_buckets": 64,
         },
     )
@@ -109,6 +110,25 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
             "mass_distribution_params": (-1.0, 3.0),
             "operation": "add",
+        },
+    )
+
+    add_joint_default_pos = EventTerm(
+        func=mdp.randomize_joint_default_pos,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "pos_distribution_params": (-0.01, 0.01),
+            "operation": "add",
+        },
+    )
+
+    base_com = EventTerm(
+        func=mdp.randomize_rigid_body_com,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+            "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
         },
     )
 
@@ -224,6 +244,8 @@ class ObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
             noise=Unoise(n_min=-0.02, n_max=0.02),
         )
+        # -- ballistic interception prediction (zeros in Phase 1) --
+        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.35})
         # -- motion placeholder --
         motion_anchor_ori_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
         # -- proprioception --
@@ -257,6 +279,8 @@ class ObservationsCfg:
             func=mdp.hand_pos_b,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
         )
+        # -- ballistic interception prediction (zeros in Phase 1) --
+        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.35})
         # -- motion placeholders --
         motion_anchor_pos_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
         motion_anchor_ori_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
@@ -409,6 +433,71 @@ class TerminationsCfg:
 
 
 @configclass
+class CurriculumCfg:
+    """Curriculum: start with easy, slow throws and strong posture crutches, then
+    widen the throw distribution and taper the crutches so the policy becomes free
+    to crouch/lean/reach for the ball.
+
+    Steps are ``common_step_counter`` values (one per env-step; at 24 steps/iteration
+    a full 30k-iteration run is 720k steps). Tune alongside run length.
+    """
+
+    ball_throws = CurrTerm(
+        func=mdp.ball_throw_curriculum,
+        params={
+            "command_name": "ball_throw",
+            "start_step": 50_000,
+            "end_step": 250_000,
+            "easy": {
+                "throw_distance_range": (1.2, 1.8),
+                "throw_lateral_range": (-0.3, 0.3),
+                "flight_time_range": (0.5, 0.7),   # slower throws first
+                "velocity_noise": 0.1,
+                "catch_lateral_std": 0.02,
+            },
+            "final": {  # = BallCommandCfg defaults
+                "throw_distance_range": (1.0, 2.5),
+                "throw_lateral_range": (-0.75, 0.75),
+                "flight_time_range": (0.3, 0.6),
+                "velocity_noise": 0.3,
+                "catch_lateral_std": 0.05,
+            },
+        },
+    )
+
+    base_height_taper = CurrTerm(
+        func=mdp.modify_reward_weight_linear,
+        params={
+            "term_name": "base_height",
+            "start_weight": -10.0,
+            "end_weight": -2.5,
+            "start_step": 100_000,
+            "end_step": 400_000,
+        },
+    )
+    flat_orientation_taper = CurrTerm(
+        func=mdp.modify_reward_weight_linear,
+        params={
+            "term_name": "flat_orientation_l2",
+            "start_weight": -5.0,
+            "end_weight": -1.0,
+            "start_step": 100_000,
+            "end_step": 400_000,
+        },
+    )
+    arm_deviation_taper = CurrTerm(
+        func=mdp.modify_reward_weight_linear,
+        params={
+            "term_name": "joint_deviation_arms",
+            "start_weight": -0.1,
+            "end_weight": -0.02,
+            "start_step": 100_000,
+            "end_step": 400_000,
+        },
+    )
+
+
+@configclass
 class RobotEnvCfgPhase2(ManagerBasedRLEnvCfg):
     """Configuration for the ball catching Phase 2 (autonomous catching) environment."""
 
@@ -419,7 +508,7 @@ class RobotEnvCfgPhase2(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
-    curriculum = None
+    curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self):
         self.decimation = 4
@@ -436,3 +525,6 @@ class RobotPlayEnvCfgPhase2(RobotEnvCfgPhase2):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
+        # evaluate on the final throw distribution and reward weights, not the
+        # step-0 curriculum stage
+        self.curriculum = None

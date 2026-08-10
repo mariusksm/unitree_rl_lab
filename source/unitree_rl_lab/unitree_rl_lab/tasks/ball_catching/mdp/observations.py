@@ -125,6 +125,48 @@ def ball_to_hands_b(
     return quat_apply_inverse(heading, ball.data.root_pos_w - hands_mid)
 
 
+def ball_intercept_b(
+    env: ManagerBasedEnv,
+    ball_name: str = "ball",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    catch_height: float = 0.35,
+    max_time: float = 3.0,
+) -> torch.Tensor:
+    """Predicted ballistic interception point and time-to-go.
+
+    Solves for the (descending) crossing of the ball's ballistic trajectory with the
+    horizontal catch plane ``catch_height`` above the robot root and returns the
+    predicted crossing point relative to the root, rotated into the robot's yaw
+    frame. If the trajectory never reaches the plane, time-to-go is 0 and the
+    current ball position is returned instead.
+
+    This is the timing signal catching lives on, and the same ballistic prediction
+    the deployment pipeline computes from the filtered VICON stream (air drag is
+    negligible for a 0.15 kg ball below ~8 m/s). While the ball is parked before the
+    throw, the output is the "if it fell now" point — a smooth, informative signal.
+
+    Returns (num_envs, 3): [intercept_x_b, intercept_y_b, time_to_go].
+    """
+    ball: RigidObject = env.scene[ball_name]
+    robot: Articulation = env.scene[asset_cfg.name]
+    g = 9.81
+
+    ball_pos = ball.data.root_pos_w
+    ball_vel = ball.data.root_lin_vel_w
+    root_pos = robot.data.root_pos_w
+
+    # descending root of  z0 + vz*t - g*t²/2 = z_plane
+    vz = ball_vel[:, 2]
+    disc = vz * vz + 2.0 * g * (ball_pos[:, 2] - (root_pos[:, 2] + catch_height))
+    t_go = (vz + torch.sqrt(torch.clamp(disc, min=0.0))) / g
+    t_go = torch.where(disc > 0.0, t_go.clamp(0.0, max_time), torch.zeros_like(t_go))
+
+    rel = torch.zeros_like(ball_pos)
+    rel[:, :2] = ball_pos[:, :2] + ball_vel[:, :2] * t_go.unsqueeze(1) - root_pos[:, :2]
+    rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel)
+    return torch.cat([rel_b[:, :2], t_go.unsqueeze(1)], dim=1)
+
+
 def hand_pos_b(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Positions of the bodies in ``asset_cfg`` relative to the robot root, in the robot's yaw frame.
 

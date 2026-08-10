@@ -34,3 +34,22 @@ class BasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class Phase2PPORunnerCfg(BasePPORunnerCfg):
+    """Runner for Phase 2, tuned for fine-tuning from a Phase 1 checkpoint
+    (``--resume`` / ``--load_run``).
+
+    ``init_noise_std`` is lowered so PPO's initial exploration does not wipe the
+    pre-trained motor skills in the first iterations. When training Phase 2 from
+    scratch (e.g. for debugging), raise it back to 1.0 via
+    ``--agent.policy.init_noise_std=1.0`` or the exploration will be too timid.
+    """
+
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=0.2,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+    )

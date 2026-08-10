@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import os
 
 import isaaclab.sim as sim_utils
@@ -37,6 +38,30 @@ VELOCITY_RANGE = {
     "pitch": (-0.52, 0.52),
     "yaw": (-0.78, 0.78),
 }
+
+# ── Catching motion file ────────────────────────────────────────────────
+# Drop the retargeted catching motion (single .npz) into the `motions/` directory
+# next to this file — it is picked up automatically. Pipeline:
+#   VICON Shogun → GMR retarget (.pkl) → scripts/pkl_to_csv_without_hands.py
+#   → scripts/mimic/csv_to_npz.py  (see motions/README.md)
+# Until it exists, training falls back to the Gangnam-style placeholder so the
+# task stays runnable, with a loud warning.
+_MOTION_DIR = os.path.join(os.path.dirname(__file__), "motions")
+_PLACEHOLDER_MOTION = os.path.normpath(
+    f"{os.path.dirname(__file__)}/../../../../mimic/robots/g1_29dof/gangnanm_style/G1_gangnam_style_V01.bvh_60hz.npz"
+)
+_motion_candidates = sorted(glob.glob(os.path.join(_MOTION_DIR, "*.npz")))
+if _motion_candidates:
+    MOTION_FILE = _motion_candidates[0]
+    if len(_motion_candidates) > 1:
+        print(f"[ball_catching/phase1] Multiple motion files in {_MOTION_DIR}; using: {MOTION_FILE}")
+else:
+    MOTION_FILE = _PLACEHOLDER_MOTION
+    print(
+        "\n[ball_catching/phase1] WARNING: no catching motion found in "
+        f"{_MOTION_DIR} — falling back to the Gangnam-style PLACEHOLDER motion. "
+        "The policy will imitate dancing, not catching!\n"
+    )
 
 
 @configclass
@@ -86,8 +111,7 @@ class CommandsCfg:
 
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
-        # TODO: replace with your catching motion npz after recording mocap
-        motion_file=f"{os.path.dirname(__file__)}/../../../../mimic/robots/g1_29dof/gangnanm_style/G1_gangnam_style_V01.bvh_60hz.npz",
+        motion_file=MOTION_FILE,
         anchor_body_name="torso_link",
         resampling_time_range=(1.0e9, 1.0e9),
         debug_vis=True,
@@ -143,6 +167,7 @@ class ObservationsCfg:
         ball_state = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
         ball_relative = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
         hand_pos = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        ball_intercept = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
         # -- motion tracking --
         motion_anchor_ori_b = ObsTerm(
             func=mdp.motion_anchor_ori_b, params={"command_name": "motion"}, noise=Unoise(n_min=-0.05, n_max=0.05)
@@ -167,6 +192,7 @@ class ObservationsCfg:
         ball_state = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
         ball_relative = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
         hand_pos = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
+        ball_intercept = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
         # -- motion tracking --
         motion_anchor_pos_b = ObsTerm(func=mdp.motion_anchor_pos_b, params={"command_name": "motion"})
         motion_anchor_ori_b = ObsTerm(func=mdp.motion_anchor_ori_b, params={"command_name": "motion"})
@@ -221,6 +247,16 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
             "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
+        },
+    )
+
+    add_base_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+            "mass_distribution_params": (-1.0, 3.0),
+            "operation": "add",
         },
     )
 
