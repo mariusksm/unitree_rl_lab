@@ -72,27 +72,29 @@ class BallCommand(CommandTerm):
         self.metrics["ball_height"] = self.ball.data.root_pos_w[:, 2].clone()
         self.metrics["ball_secured_time"] = self.secured_steps.float() * self._env.step_dt
 
-    def _resample_command(self, env_ids: Sequence[int]):
-        """Park the ball at a new spawn point and arm the launch timer."""
-        if len(env_ids) == 0:
-            return
-
+    def _sample_spawn(self, env_ids: Sequence[int]):
+        """Sample a new spawn point in the robot's heading frame."""
         n = len(env_ids)
         device = self.device
 
         robot_pos = self.robot.data.root_pos_w[env_ids]
         heading = yaw_quat(self.robot.data.root_quat_w[env_ids])
 
-        # spawn offset in the robot's heading frame
         offset = torch.zeros(n, 3, device=device)
         offset[:, 0] = sample_uniform(*self.cfg.throw_distance_range, (n,), device)
         offset[:, 1] = sample_uniform(*self.cfg.throw_lateral_range, (n,), device)
         offset[:, 2] = sample_uniform(*self.cfg.throw_height_range, (n,), device)
         self._spawn_pos[env_ids] = robot_pos + quat_apply(heading, offset)
 
+    def _resample_command(self, env_ids: Sequence[int]):
+        """Park the ball at a new spawn point and arm the launch timer."""
+        if len(env_ids) == 0:
+            return
+
+        self._sample_spawn(env_ids)
         self._write_parked_state(env_ids)
 
-        self.time_until_throw[env_ids] = sample_uniform(*self.cfg.throw_delay_range, (n,), device)
+        self.time_until_throw[env_ids] = sample_uniform(*self.cfg.throw_delay_range, (len(env_ids),), self.device)
         self.time_since_throw[env_ids] = 0.0
         self.secured_steps[env_ids] = 0
 
@@ -109,8 +111,11 @@ class BallCommand(CommandTerm):
         )
         self.ball.write_root_state_to_sim(root_state, env_ids=env_ids)
 
-    def _launch(self, env_ids: torch.Tensor):
-        """Throw the ball from its spawn point toward the catch zone."""
+    def _launch(self, env_ids: torch.Tensor, flight_time: torch.Tensor | None = None):
+        """Throw the ball from its spawn point toward the catch zone.
+
+        If ``flight_time`` is not given, it is sampled from ``cfg.flight_time_range``.
+        """
         n = len(env_ids)
         device = self.device
 
@@ -124,7 +129,8 @@ class BallCommand(CommandTerm):
         catch_local[:, 2] = sample_uniform(*self.cfg.catch_height_range, (n,), device)
         catch_zone = robot_pos + quat_apply(heading, catch_local)
 
-        flight_time = sample_uniform(*self.cfg.flight_time_range, (n,), device)
+        if flight_time is None:
+            flight_time = sample_uniform(*self.cfg.flight_time_range, (n,), device)
 
         # gravity-compensated ballistic velocity
         spawn_pos = self._spawn_pos[env_ids]
@@ -163,7 +169,14 @@ class BallCommand(CommandTerm):
         in_flight = self.time_until_throw <= 0.0
         self.time_since_throw += in_flight.float() * step_dt
 
-        # catch state: ball close to a hand, slow relative to that hand, above ground
+        self._update_catch_state(in_flight)
+
+    def _update_catch_state(self, in_flight: torch.Tensor):
+        """Track consecutive steps where the ball counts as held at a hand.
+
+        Held := ball close to a hand, slow relative to that hand, above ground —
+        gated by ``in_flight`` so a parked (pre-throw) ball never counts.
+        """
         ball_pos = self.ball.data.root_pos_w
         ball_vel = self.ball.data.root_lin_vel_w
         hand_pos = self.robot.data.body_pos_w[:, self.hand_body_ids]
