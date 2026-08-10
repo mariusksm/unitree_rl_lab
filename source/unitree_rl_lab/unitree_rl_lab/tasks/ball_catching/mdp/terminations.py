@@ -65,6 +65,12 @@ def bad_motion_body_pos_z_only(
 # ── Ball catching terminations ─────────────────────────────────────────
 
 
+def ball_caught(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
+    """Terminate (successfully) once the ball has been held at a hand for the configured duration."""
+    command = env.command_manager.get_term(command_name)
+    return command.secured_steps >= command.cfg.secure_steps
+
+
 def ball_below_height(env: ManagerBasedRLEnv, ball_name: str, min_height: float) -> torch.Tensor:
     """Terminate when the ball falls below a minimum height (hit the ground or unrecoverable)."""
     ball: RigidObject = env.scene[ball_name]

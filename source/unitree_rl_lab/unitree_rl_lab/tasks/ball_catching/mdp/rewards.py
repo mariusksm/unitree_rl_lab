@@ -96,36 +96,41 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
 
 def hand_to_ball_distance_exp(
     env: ManagerBasedRLEnv,
-    ball_name: str,
-    hand_body_names: list[str],
     std: float,
+    ball_name: str = "ball",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Gaussian reward based on the closest hand's distance to the ball.
 
-    Returns exp(-min_distance² / std²) — saturates at 1.0 when hands are near the ball.
+    Pass the hand bodies via ``asset_cfg`` (body indices are resolved once by the
+    reward manager). Returns exp(-min_distance² / std²) — saturates at 1.0 when a
+    hand is at the ball.
     """
     ball: RigidObject = env.scene[ball_name]
-    robot: Articulation = env.scene["robot"]
-    ball_pos = ball.data.root_pos_w.unsqueeze(1)               # (N, 1, 3)
-    hand_ids, _ = robot.find_bodies(hand_body_names, preserve_order=True)
-    hand_pos = robot.data.body_pos_w[:, hand_ids]               # (N, H, 3)
+    robot: Articulation = env.scene[asset_cfg.name]
+    ball_pos = ball.data.root_pos_w.unsqueeze(1)                # (N, 1, 3)
+    hand_pos = robot.data.body_pos_w[:, asset_cfg.body_ids]     # (N, H, 3)
     dist = torch.norm(hand_pos - ball_pos, dim=-1)              # (N, H)
     min_dist = dist.min(dim=-1).values                          # (N,)
     return torch.exp(-(min_dist**2) / std**2)
 
 
-def ball_caught(
-    env: ManagerBasedRLEnv,
-    ball_name: str,
-    vel_threshold: float,
-    min_height: float,
-) -> torch.Tensor:
-    """Binary bonus: ball speed below threshold AND ball above ground."""
-    ball: RigidObject = env.scene[ball_name]
-    speed = torch.norm(ball.data.root_lin_vel_w, dim=-1)
-    height = ball.data.root_pos_w[:, 2]
-    caught = (speed < vel_threshold) & (height > min_height)
-    return caught.float()
+def ball_caught_bonus(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
+    """One-time bonus on the step the catch is confirmed.
+
+    Fires exactly once per catch: the secured-steps counter (tracked by the
+    BallCommand term) equals ``secure_steps`` on the same step the ``ball_caught``
+    termination triggers, after which the counter is reset. Note the reward manager
+    multiplies by ``weight * dt`` — size the weight as bonus_value / dt.
+    """
+    command = env.command_manager.get_term(command_name)
+    return (command.secured_steps == command.cfg.secure_steps).float()
+
+
+def ball_secured(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
+    """Per-step reward while the ball is held at a hand (bounded by the catch termination)."""
+    command = env.command_manager.get_term(command_name)
+    return (command.secured_steps > 0).float()
 
 
 def ball_height_penalty(

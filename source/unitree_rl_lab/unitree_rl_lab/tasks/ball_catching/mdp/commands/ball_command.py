@@ -8,22 +8,29 @@ from typing import TYPE_CHECKING
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.math import quat_apply, sample_uniform, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
 class BallCommand(CommandTerm):
-    """Command term that spawns and throws a ball toward the robot using PhysX physics.
+    """Single-throw ball command.
 
-    On resample: spawns the ball at a random position in front of the robot with
-    a velocity computed to bring it near the robot's catch zone (chest height).
-    Physics (gravity, collision) is handled by PhysX after the throw.
+    On reset (per env): parks the ball at a spawn point sampled in the robot's
+    heading (yaw) frame and starts a launch timer. While the timer runs, the ball is
+    held at the spawn point so the policy can settle into a stable stance and observe
+    the incoming throw origin. When the timer expires, the ball is launched toward a
+    catch zone in front of the robot's chest with a gravity-compensated ballistic
+    velocity. Physics (gravity, collision) is handled by PhysX after the launch.
 
-    Resampling is triggered when:
-    - The ball falls below min_height_throw (dropped)
-    - The ball moves too far from the robot (missed)
-    - The throw has been active longer than max_flight_time (timed out)
+    The command does NOT re-throw within an episode. Episode outcomes are owned by
+    the termination terms (ball dropped / missed / caught / time out), which read the
+    catch state tracked here:
+
+    - ``secured_steps``: consecutive control steps for which the ball has been close
+      to a hand, moving slowly relative to that hand, and above the ground. Reaching
+      ``cfg.secure_steps`` counts as a confirmed catch.
     """
 
     cfg: BallCommandCfg
@@ -34,103 +41,104 @@ class BallCommand(CommandTerm):
         self.ball: RigidObject = env.scene[cfg.asset_name]
         self.robot: Articulation = env.scene["robot"]
 
-        # [BALL THROW PARAMS] per-environment counters
+        # resolve hand body indices once
+        self.hand_body_ids, _ = self.robot.find_bodies(cfg.hand_body_names, preserve_order=True)
+
+        # per-environment state
+        self.time_until_throw = torch.zeros(self.num_envs, device=self.device)
         self.time_since_throw = torch.zeros(self.num_envs, device=self.device)
-        # debug
-        self._debug_step = 0
+        self.secured_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._spawn_pos = torch.zeros(self.num_envs, 3, device=self.device)
 
         # identity quaternion (w,x,y,z) — ball orientation doesn't matter
         self._default_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
-        # gravity vector for velocity computation
+        # gravity vector for the ballistic velocity computation
         self._gravity = torch.tensor([0.0, 0.0, -9.81], device=self.device)
 
-    def __del__(self):
-        pass
+        self.metrics["ball_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["ball_secured_time"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["hand_ball_distance"] = torch.zeros(self.num_envs, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
-        """Returns (num_envs, 6): ball position (3) + ball velocity (3) in world frame."""
-        return torch.cat(
-            [self.ball.data.root_pos_w, self.ball.data.root_lin_vel_w],
-            dim=1,
-        )
+        """Ball position (3) + linear velocity (3) in world frame, shape (num_envs, 6).
+
+        Note: not used as a policy observation (world coordinates include per-env
+        origins). Policy observations use the yaw-frame terms in ``observations.py``.
+        """
+        return torch.cat([self.ball.data.root_pos_w, self.ball.data.root_lin_vel_w], dim=1)
 
     def _update_metrics(self):
         self.metrics["ball_height"] = self.ball.data.root_pos_w[:, 2].clone()
-
-        # DEBUG: print relative positions every ~1000 steps (every ~20s at 50Hz)
-        self._debug_step += 1
-        if self._debug_step % 1000 == 0:
-            e = 0  # sample env 0
-            robot = self.robot.data
-            ball = self.ball.data
-            wrist_ids, wrist_names = self.robot.find_bodies(
-                ["left_wrist_yaw_link", "right_wrist_yaw_link"], preserve_order=True
-            )
-            print(f"\n[DEBUG BallCommand] env={e} step={self._debug_step}")
-            print(f"  robot_root_pos    = {robot.root_pos_w[e].tolist()}")
-            print(f"  ball_world_pos    = {ball.root_pos_w[e].tolist()}")
-            print(f"  ball_relative     = {(ball.root_pos_w[e] - robot.root_pos_w[e]).tolist()}")
-            print(f"  ball_height       = {ball.root_pos_w[e, 2]:.3f}  (dropped={ball.root_pos_w[e, 2] < 0.2})")
-            print(f"  time_since_throw  = {self.time_since_throw[e]:.2f}s")
-            # termination flags for env 0
-            tm = self._env.termination_manager
-            drop_val = tm.get_term("ball_dropped")[e].item() if "ball_dropped" in tm.active_terms else -1
-            miss_val = tm.get_term("ball_missed")[e].item() if "ball_missed" in tm.active_terms else -1
-            done = tm.terminated[e].item() or tm.time_outs[e].item()
-            print(f"  terminated        = {done}  (ball_dropped={drop_val}  ball_missed={miss_val})")
-            # ball mass for two envs — should differ due to startup randomization
-            masses = self.ball.root_physx_view.get_masses()[:2]
-            print(f"  ball_mass (env0)  = {masses[0].item():.4f} kg")
-            print(f"  ball_mass (env1)  = {masses[1].item():.4f} kg")
-            for i, name in enumerate(wrist_names):
-                bid = wrist_ids[i]
-                rel = (robot.body_pos_w[e, bid] - robot.root_pos_w[e]).tolist()
-                print(f"  {name:30s} = {rel}")
-            print()
+        self.metrics["ball_secured_time"] = self.secured_steps.float() * self._env.step_dt
 
     def _resample_command(self, env_ids: Sequence[int]):
+        """Park the ball at a new spawn point and arm the launch timer."""
         if len(env_ids) == 0:
             return
 
         n = len(env_ids)
         device = self.device
 
-        # ── spawn position ──────────────────────────────────
         robot_pos = self.robot.data.root_pos_w[env_ids]
+        heading = yaw_quat(self.robot.data.root_quat_w[env_ids])
 
-        offset_x = 1.0 + torch.rand(n, device=device) * 1.5        # [THROW DISTANCE] 1.0–2.5m in front
-        offset_y = (torch.rand(n, device=device) - 0.5) * 1.5      # [THROW LATERAL] ±0.75m sideways
-        offset_z = 0.8 + torch.rand(n, device=device) * 0.7        # [THROW HEIGHT] 0.8–1.5m above robot
+        # spawn offset in the robot's heading frame
+        offset = torch.zeros(n, 3, device=device)
+        offset[:, 0] = sample_uniform(*self.cfg.throw_distance_range, (n,), device)
+        offset[:, 1] = sample_uniform(*self.cfg.throw_lateral_range, (n,), device)
+        offset[:, 2] = sample_uniform(*self.cfg.throw_height_range, (n,), device)
+        self._spawn_pos[env_ids] = robot_pos + quat_apply(heading, offset)
 
-        spawn_pos = robot_pos.clone()
-        spawn_pos[:, 0] += offset_x
-        spawn_pos[:, 1] += offset_y
-        spawn_pos[:, 2] += offset_z
+        self._write_parked_state(env_ids)
 
-        # ── catch target ────────────────────────────────────
-        catch_zone = robot_pos.clone()
-        catch_zone[:, 0] += 0.4                                     # [CATCH DISTANCE] 0.4m in front
-        catch_zone[:, 1] += torch.randn(n, device=device) * 0.05   # small lateral noise
-        catch_zone[:, 2] += 1.0 + torch.randn(n, device=device) * 0.05  # [CATCH HEIGHT] ~1.0m above base (chest)
+        self.time_until_throw[env_ids] = sample_uniform(*self.cfg.throw_delay_range, (n,), device)
+        self.time_since_throw[env_ids] = 0.0
+        self.secured_steps[env_ids] = 0
 
-        # ── flight time ─────────────────────────────────────
-        flight_time = 0.3 + torch.rand(n, device=device) * 0.3     # [FLIGHT TIME] 0.3–0.6s
+    def _write_parked_state(self, env_ids: Sequence[int]):
+        """Hold the ball at its spawn point with zero velocity."""
+        n = len(env_ids)
+        root_state = torch.cat(
+            [
+                self._spawn_pos[env_ids],
+                self._default_quat.unsqueeze(0).expand(n, -1),
+                torch.zeros(n, 6, device=self.device),
+            ],
+            dim=1,
+        )
+        self.ball.write_root_state_to_sim(root_state, env_ids=env_ids)
 
-        # ── throw velocity (gravity-compensated) ────────────
+    def _launch(self, env_ids: torch.Tensor):
+        """Throw the ball from its spawn point toward the catch zone."""
+        n = len(env_ids)
+        device = self.device
+
+        robot_pos = self.robot.data.root_pos_w[env_ids]
+        heading = yaw_quat(self.robot.data.root_quat_w[env_ids])
+
+        # catch zone in the robot's heading frame (chest height, slightly in front)
+        catch_local = torch.zeros(n, 3, device=device)
+        catch_local[:, 0] = self.cfg.catch_forward
+        catch_local[:, 1] = torch.randn(n, device=device) * self.cfg.catch_lateral_std
+        catch_local[:, 2] = sample_uniform(*self.cfg.catch_height_range, (n,), device)
+        catch_zone = robot_pos + quat_apply(heading, catch_local)
+
+        flight_time = sample_uniform(*self.cfg.flight_time_range, (n,), device)
+
+        # gravity-compensated ballistic velocity
+        spawn_pos = self._spawn_pos[env_ids]
         direction = catch_zone - spawn_pos
         dt_sq = flight_time.unsqueeze(1) ** 2
         throw_vel = (direction - 0.5 * self._gravity.unsqueeze(0) * dt_sq) / flight_time.unsqueeze(1)
-        throw_vel += torch.randn(n, 3, device=device) * 0.3         # [VELOCITY NOISE] ±0.3 m/s per axis
+        throw_vel += torch.randn(n, 3, device=device) * self.cfg.velocity_noise
 
-        # ── write to simulation ─────────────────────────────
-        zero_ang_vel = torch.zeros(n, 3, device=device)
         root_state = torch.cat(
             [
                 spawn_pos,
                 self._default_quat.unsqueeze(0).expand(n, -1),
                 throw_vel,
-                zero_ang_vel,
+                torch.zeros(n, 3, device=device),
             ],
             dim=1,
         )
@@ -139,18 +147,42 @@ class BallCommand(CommandTerm):
         self.time_since_throw[env_ids] = 0.0
 
     def _update_command(self):
-        self.time_since_throw += self._env.step_dt
+        step_dt = self._env.step_dt
 
+        # launch timer
+        pre_throw = self.time_until_throw > 0.0
+        self.time_until_throw -= step_dt
+        launch_ids = (pre_throw & (self.time_until_throw <= 0.0)).nonzero(as_tuple=False).flatten()
+        hold_ids = (self.time_until_throw > 0.0).nonzero(as_tuple=False).flatten()
+
+        if len(hold_ids) > 0:
+            self._write_parked_state(hold_ids)
+        if len(launch_ids) > 0:
+            self._launch(launch_ids)
+
+        in_flight = self.time_until_throw <= 0.0
+        self.time_since_throw += in_flight.float() * step_dt
+
+        # catch state: ball close to a hand, slow relative to that hand, above ground
         ball_pos = self.ball.data.root_pos_w
-        robot_pos = self.robot.data.root_pos_w
+        ball_vel = self.ball.data.root_lin_vel_w
+        hand_pos = self.robot.data.body_pos_w[:, self.hand_body_ids]
+        hand_vel = self.robot.data.body_lin_vel_w[:, self.hand_body_ids]
 
-        dropped = ball_pos[:, 2] < self.cfg.min_height_throw
-        too_far = torch.norm(ball_pos[:, :2] - robot_pos[:, :2], dim=1) > self.cfg.max_distance
-        timed_out = self.time_since_throw > self.cfg.max_flight_time
+        dist = torch.norm(hand_pos - ball_pos.unsqueeze(1), dim=-1)
+        min_dist, min_idx = dist.min(dim=-1)
+        closest_hand_vel = hand_vel.gather(1, min_idx.view(-1, 1, 1).expand(-1, 1, 3)).squeeze(1)
+        rel_speed = torch.norm(ball_vel - closest_hand_vel, dim=-1)
 
-        resample_ids = (dropped | too_far | timed_out).nonzero(as_tuple=False).flatten()
-        if len(resample_ids) > 0:
-            self._resample(resample_ids)
+        secured = (
+            in_flight
+            & (min_dist < self.cfg.catch_radius)
+            & (rel_speed < self.cfg.secure_rel_vel)
+            & (ball_pos[:, 2] > self.cfg.secure_min_height)
+        )
+        self.secured_steps = torch.where(secured, self.secured_steps + 1, torch.zeros_like(self.secured_steps))
+
+        self.metrics["hand_ball_distance"] = min_dist
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         pass
@@ -158,18 +190,54 @@ class BallCommand(CommandTerm):
 
 @configclass
 class BallCommandCfg(CommandTermCfg):
-    """Configuration for the ball throw command."""
+    """Configuration for the single-throw ball command."""
 
     class_type: type = BallCommand
 
     asset_name: str = MISSING
 
-    # [RESAMPLE TRIGGERS] — when to re-throw
-    min_height_throw: float = 0.2
-    """Minimum ball Z height (m). Ball below this is considered dropped and re-thrown."""
+    hand_body_names: list[str] = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+    """Bodies used for catch detection (later: palm links of the dexterous hands)."""
 
-    max_distance: float = 5.0
-    """Maximum horizontal distance (m) from robot base. Ball beyond this is considered missed."""
+    # ── throw generation (all offsets in the robot's heading frame) ──
+    throw_delay_range: tuple[float, float] = (0.5, 1.5)
+    """Time (s) after reset before the ball is launched. The ball is parked at the
+    spawn point in the meantime so the robot can settle and see the throw origin."""
 
-    max_flight_time: float = 5.0
-    """Maximum time (s) a ball can be in flight before re-throwing."""
+    throw_distance_range: tuple[float, float] = (1.0, 2.5)
+    """Spawn distance (m) in front of the robot."""
+
+    throw_lateral_range: tuple[float, float] = (-0.75, 0.75)
+    """Spawn lateral offset (m)."""
+
+    throw_height_range: tuple[float, float] = (0.8, 1.5)
+    """Spawn height (m) above the robot root."""
+
+    catch_forward: float = 0.4
+    """Aim point distance (m) in front of the robot root."""
+
+    catch_lateral_std: float = 0.05
+    """Std (m) of the lateral aim scatter."""
+
+    catch_height_range: tuple[float, float] = (0.25, 0.45)
+    """Aim point height (m) above the robot root (root ≈ 0.76 m → aim ≈ 1.0–1.2 m,
+    chest height of the G1). Curriculum variable."""
+
+    flight_time_range: tuple[float, float] = (0.3, 0.6)
+    """Ballistic flight time (s) to the aim point."""
+
+    velocity_noise: float = 0.3
+    """Std (m/s) of Gaussian noise added per axis to the throw velocity."""
+
+    # ── catch detection ──
+    catch_radius: float = 0.2
+    """Max hand-to-ball distance (m) for the ball to count as held."""
+
+    secure_rel_vel: float = 0.5
+    """Max ball speed (m/s) relative to the closest hand for the ball to count as held."""
+
+    secure_min_height: float = 0.5
+    """Min ball height (m) for the ball to count as held (excludes balls on the ground)."""
+
+    secure_steps: int = 25
+    """Consecutive held steps for a confirmed catch (25 steps = 0.5 s at 50 Hz)."""

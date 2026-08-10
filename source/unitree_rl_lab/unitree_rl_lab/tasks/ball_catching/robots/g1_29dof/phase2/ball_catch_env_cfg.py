@@ -1,5 +1,3 @@
-import math
-
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -16,7 +14,10 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
+from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
+
+HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 
 
 @configclass
@@ -173,7 +174,7 @@ class EventCfg:
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(5.0, 5.0),
+        interval_range_s=(4.0, 8.0),
         params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
     )
 
@@ -184,7 +185,8 @@ class CommandsCfg:
 
     ball_throw = mdp.BallCommandCfg(
         asset_name="ball",
-        resampling_time_range=(1.0e9, 1.0e9),  # never auto-resample; triggered by ball state
+        resampling_time_range=(1.0e9, 1.0e9),  # single throw per episode; new throw only on env reset
+        hand_body_names=HAND_BODY_NAMES,
         debug_vis=False,
     )
 
@@ -193,8 +195,10 @@ class CommandsCfg:
 class ActionsCfg:
     """Action specifications for the MDP."""
 
+    # NOTE: must match Phase 1 exactly, otherwise transferred policies command
+    # different joint targets for the same network output.
     JointPositionAction = mdp.JointPositionActionCfg(
-        asset_name="robot", joint_names=[".*"], scale=0.25, use_default_offset=True
+        asset_name="robot", joint_names=[".*"], scale=UNITREE_G1_29DOF_MIMIC_ACTION_SCALE, use_default_offset=True
     )
 
 
@@ -209,12 +213,15 @@ class ObservationsCfg:
         # (order preserved — must match Phase 1 for transfer)
         # -- motion placeholders (zero in Phase 2, real in Phase 1) --
         motion_command = ObsTerm(func=mdp.dummy_zeros, params={"dim": 58})
-        # -- ball state --
-        ball_state = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
-        ball_relative = ObsTerm(func=mdp.ball_pos_relative)
+        # -- ball state (robot-yaw frame: reproducible from VICON on hardware) --
+        ball_state = ObsTerm(func=mdp.ball_pos_vel_b)
+        ball_relative = ObsTerm(
+            func=mdp.ball_to_hands_b,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
+        )
         hand_pos = ObsTerm(
-            func=mdp.hand_body_pos,
-            params={"body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"]},
+            func=mdp.hand_pos_b,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
             noise=Unoise(n_min=-0.02, n_max=0.02),
         )
         # -- motion placeholder --
@@ -240,12 +247,15 @@ class ObservationsCfg:
         # (order preserved — must match Phase 1 for transfer)
         # -- motion placeholders (zero in Phase 2, real in Phase 1) --
         command = ObsTerm(func=mdp.dummy_zeros, params={"dim": 58})
-        # -- ball state (clean, no noise) --
-        ball_state = ObsTerm(func=mdp.generated_commands, params={"command_name": "ball_throw"})
-        ball_relative = ObsTerm(func=mdp.ball_pos_relative)
+        # -- ball state (robot-yaw frame, clean, no noise) --
+        ball_state = ObsTerm(func=mdp.ball_pos_vel_b)
+        ball_relative = ObsTerm(
+            func=mdp.ball_to_hands_b,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
+        )
         hand_pos = ObsTerm(
-            func=mdp.hand_body_pos,
-            params={"body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"]},
+            func=mdp.hand_pos_b,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
         )
         # -- motion placeholders --
         motion_anchor_pos_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
@@ -276,18 +286,19 @@ class RewardsCfg:
         weight=2.0,
         params={
             "ball_name": "ball",
-            "hand_body_names": ["left_wrist_yaw_link", "right_wrist_yaw_link"],
-            "std": 0.15,            # [CATCH TOLERANCE] hands within 15cm get full reward
+            "asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES),
+            "std": 0.3,             # [REACH SHAPING] gradient reaches ~0.8m; saturates at the ball
         },
     )
     catch_success = RewTerm(
-        func=mdp.ball_caught,
-        weight=10.0,
-        params={
-            "ball_name": "ball",
-            "vel_threshold": 0.5,    # [CATCH VEL] ball speed below 0.5 m/s = hit something
-            "min_height": 0.5,       # [CATCH HEIGHT] ball must be above ground
-        },
+        func=mdp.ball_caught_bonus,
+        weight=500.0,               # one-time bonus; effective value = weight * dt = 10
+        params={"command_name": "ball_throw"},
+    )
+    ball_secured_hold = RewTerm(
+        func=mdp.ball_secured,
+        weight=5.0,                 # 0.1/step while held; capped by the ball_caught termination
+        params={"command_name": "ball_throw"},
     )
     ball_height_penalty = RewTerm(
         func=mdp.ball_height_penalty,
@@ -363,7 +374,13 @@ class RewardsCfg:
         weight=-1,
         params={
             "threshold": 1,
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["(?!.*ankle.*).*"]),
+            # exclude feet AND wrists — ball-on-hand contact is the goal, not a fault
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=[
+                    r"^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$).+$"
+                ],
+            ),
         },
     )
 
@@ -372,17 +389,22 @@ class RewardsCfg:
 class TerminationsCfg:
     """Termination terms for the MDP."""
 
-    # TODO: add ball-specific terminations (ball_dropped, ball_missed, etc.)
+    # Single-throw episode contract: every throw ends in exactly one of
+    # caught / dropped / missed / robot fell / time out.
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_height = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.2})
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 0.8})
+    ball_caught = DoneTerm(
+        func=mdp.ball_caught,
+        params={"command_name": "ball_throw"},  # [TERM SUCCESS] ball held 0.5s = confirmed catch
+    )
     ball_dropped = DoneTerm(
         func=mdp.ball_below_height,
         params={"ball_name": "ball", "min_height": 0.1},  # [TERM DROP] ball z below 10cm = dead
     )
     ball_missed = DoneTerm(
         func=mdp.ball_far_from_robot,
-        params={"ball_name": "ball", "max_distance": 6.0},  # [TERM MISS] ball > 6m away horizontally
+        params={"ball_name": "ball", "max_distance": 4.0},  # [TERM MISS] beyond max spawn distance (~2.6m) + margin
     )
 
 
