@@ -40,7 +40,8 @@
 
 | Area | Status |
 |---|---|
-| Phase 1 (mimic) on real mocap data | ✅ Trained: run `2026-08-31_15-06-41`, 1657 iterations, clip `143_merged_filtered.npz`. Reward −1.3 → 89.7, episode length → 1413 steps, `time_out` 86 %. Tracking works. |
+| Motion conversion (.pkl → .npz) | ✅ Fixed on 2026-09-28: the right arm was filled with left-hand finger joints (wrong GMR column selection). **All `.npz` created before that date were corrupt** and have been deleted; verify with `scripts/mimic/check_motion.py`. The training clip in `phase1/motions/` has been regenerated (see Section 5). |
+| Phase 1 (mimic) on real mocap data | ⚠️ Run `2026-08-31_15-06-41` (1657 iterations, clip `143_merged_filtered.npz`) converged, but on the **corrupt clip** (right arm frozen inside the torso). Must be retrained on a regenerated clip; do not use `model_1500.pt` for transfer. |
 | Phase 2 (RL catching, transfer from Phase 1) | ⚠️ Code is in place (P0/P1 fixes), but **no training run** since the fixes (log folder is empty). |
 | Unified task (mimic + catching simultaneously) | ⚠️ Code is in place, **never trained**. `CATCH_MOTION_TIME = 2.0` is a **placeholder**. |
 | Catch success in simulation | ❌ not yet demonstrated |
@@ -54,23 +55,28 @@
 CLAUDE.md                              Instructions for AI assistants (incl. spec maintenance rule)
 unitree_rl_lab.sh                      Launcher: -i install, -l list, -t train (headless), -p play
 scripts/
-  rsl_rl/train.py, play.py, cli_args.py   Upstream + fix: --experiment_name is honored (needed for --resume)
+  rsl_rl/train.py, play.py, cli_args.py   Upstream + additions: --experiment_name is honored; resume from
+                                       another experiment (--resume_experiment), actor-only fine-tuning
+                                       (--finetune), noise std override after loading (--finetune_std);
+                                       play.py adapted to Isaac Lab 2.3 / rsl-rl 5 (exports policy.pt/.onnx
+                                       to <run>/exported/)
   list_envs.py
-  pkl_to_csv_without_hands.py          GMR .pkl → CSV (29 body joints only, 24 hand columns dropped)
+  pkl_to_csv_without_hands.py          GMR .pkl → CSV (29 body joints: cols 0-21 + 34-40, hands dropped)
   mimic/csv_to_npz.py                  CSV → .npz (Isaac replay, upstream)
-  mimic/pkl_to_npz.py                  NEW: GMR .pkl → .npz directly, whole folder in one Isaac session
+  mimic/pkl_to_npz.py                  GMR .pkl → .npz directly, whole folder in one Isaac session
+  mimic/check_motion.py                Numpy-only check: .npz joints vs .pkl columns, static-arm warning
   mimic/replay_npz.py                  Visually inspect a .npz
 source/unitree_rl_lab/unitree_rl_lab/
   assets/robots/unitree.py             UNITREE_G1_29DOF_MIMIC_CFG, UNITREE_G1_29DOF_MIMIC_ACTION_SCALE,
                                        local paths UNITREE_MODEL_DIR / UNITREE_ROS_DIR
   tasks/locomotion/, tasks/mimic/      Upstream tasks (Velocity, Gangnam, Dance)
   tasks/ball_catching/                 ← PROJECT TASK (= BC/)
-    agents/rsl_rl_ppo_cfg.py           BasePPORunnerCfg, Phase2PPORunnerCfg
+    agents/rsl_rl_ppo_cfg.py           BasePPORunnerCfg (used by all three tasks)
     mdp/                               commands/, observations, rewards, terminations, events, curriculums
     robots/g1_29dof/phase1/            Env cfg + motions/ (drop-in folder for .npz, README)
     robots/g1_29dof/phase2/            Env cfg
     robots/g1_29dof/unified/           Env cfg
-pkl_isaac_lab_fixed_27_07_26/          150 retargeted GMR .pkl (+ npz/ with 5 converted), gitignored
+pkl_isaac_lab_fixed_27_07_26/          150 retargeted GMR .pkl (pkl_to_npz.py writes to npz/ inside), gitignored
 pkl_isaac_lab_17_08_26/                7 newer .pkl (as of 17 Aug), gitignored
 logs/rsl_rl/<experiment>/<timestamp>/  Checkpoints model_*.pt, params/, tfevents
 deploy/                                C++ deployment (ONNX, unitree_sdk2), upstream, untouched for the ball task
@@ -91,12 +97,16 @@ context/                               Project background + this spec (see Secti
 ./unitree_rl_lab.sh -l                                           # list tasks
 ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Phase1  # train headless
 ./unitree_rl_lab.sh -p --task Unitree-G1-29dof-BallCatch-Phase1  # play (loads latest run)
-# Phase 2 from a Phase 1 checkpoint (Phase2PPORunnerCfg: init_noise_std=0.2)
+# Phase 2 from scratch (std 1.0)
+./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Phase2
+# Phase 2 fine-tuned from a Phase 1 checkpoint: loads the actor only, sets the noise std,
+# logs into the Phase 2 folder (NOT into the Phase 1 folder)
 ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Phase2 --resume \
-  --experiment_name unitree_g1_29dof_ballcatch_phase1 --load_run <timestamp> --checkpoint model_<N>.pt
-# Phase 2 from scratch: additionally --agent.policy.init_noise_std=1.0
+  --resume_experiment unitree_g1_29dof_ballcatch_phase1 --load_run <timestamp> --checkpoint model_<N>.pt \
+  --finetune --finetune_std 0.2
 ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Unified # unified (from scratch, std 1.0)
-# Smoke test: --num_envs 16 --max_iterations 2
+# Smoke test: --num_envs 16 --max_iterations 2 --experiment_name /tmp/smoke  (absolute path keeps logs/ clean)
+# Hydra overrides are passed without dashes, e.g. agent.policy.init_noise_std=1.0
 tensorboard --logdir logs/rsl_rl/
 ```
 
@@ -104,20 +114,30 @@ tensorboard --logdir logs/rsl_rl/
 
 ```
 VICON Shogun (+Manus) ──(other repos: cleaning, GMR retargeting)──► *_merged_filtered.pkl
-  .pkl: root_pos, root_rot (xyzw), dof_pos (53 cols = 29 body + 24 hand), fps (usually 30)
+  .pkl: root_pos, root_rot (xyzw), fps (usually 30), dof_pos with 53 cols in this layout:
+        0-11 legs | 12-14 waist | 15-21 left arm | 22-33 left hand | 34-40 right arm | 41-52 right hand
       │
       ├─ recommended: scripts/mimic/pkl_to_npz.py -i <folder|file> [--headless] [-o out] [--output_fps 50]
-      │     29 body joints → interpolation (lerp/slerp) to 50 fps → finite-difference velocities
+      │     29 body joints (cols 0-21 + 34-40, SDK order) → interpolation (lerp/slerp) to 50 fps
+      │     → finite-difference velocities
       │     → kinematic replay in Isaac Sim → forward kinematics of all bodies → <input>/npz/*.npz
       └─ legacy: pkl_to_csv_without_hands.py → mimic/csv_to_npz.py
       ▼
 .npz keys: fps, joint_pos (T,29), joint_vel (T,29), body_pos_w (T,30,3), body_quat_w (T,30,4),
            body_lin_vel_w (T,30,3), body_ang_vel_w (T,30,3)
       ▼
+scripts/mimic/check_motion.py --pkl <file>.pkl --npz <file>.npz   → must print "RESULT: OK"
+      ▼
 BC/robots/g1_29dof/phase1/motions/*.npz   (the alphabetically first file is picked automatically)
 ```
 
-- **Current clip:** `143_merged_filtered.npz`, 155 frames at 50 fps, i.e. **3.1 s**.
+- **Current clip:** `143_merged_filtered.npz`, 155 frames at 50 fps, i.e. **3.1 s**. Regenerated on 2026-09-28
+  with the fixed `pkl_to_npz.py` from `pkl_isaac_lab_fixed_27_07_26/143_merged_filtered.pkl`; `check_motion.py`
+  reports `RESULT: OK`, and a Phase 1 probe shows no more torso/arm self-contact (feet only).
+- Known quirk: `pkl_to_npz.py` hangs while Isaac Sim shuts down after printing `[DONE]`. The files are
+  complete at that point; stop it with Ctrl+C.
+- The `.npz` column order is the Isaac articulation joint order (not SDK order);
+  `check_motion.py` contains both orders.
 - If no `.npz` is in `motions/`, Phase 1 (and therefore Unified) falls back to the Gangnam placeholder and
   prints a loud warning.
 - Quality check before training (see `phase1/motions/README.md`):
@@ -229,7 +249,9 @@ actual size when loading (`Actor Model: ... input_dim`).
   - Posture tapers over steps 100k → 400k: `base_height` −10 → −2.5, `flat_orientation` −5 → −1,
     arm deviation −0.1 → −0.02.
   - The play cfg sets `curriculum=None` and therefore uses the final distribution.
-- Runner: `Phase2PPORunnerCfg` (**init_noise_std 0.2**, for fine-tuning).
+- Runner: `BasePPORunnerCfg` (std 1.0, from scratch). Fine-tuning from Phase 1 is done on the command line
+  (`--resume --resume_experiment … --finetune --finetune_std 0.2`, see Section 4): `init_noise_std` in a runner
+  config has no effect after `--resume`, because the std is part of the loaded actor state.
 
 ### 7.3 Unified: `Unitree-G1-29dof-BallCatch-Unified` (recommended direction)
 
@@ -247,7 +269,7 @@ actual size when loading (`Actor Model: ... input_dim`).
   - Body tracking tapers (pos/ori 1.0 → 0.4, vel 1.0 → 0.5) over 150k → 500k.
   - Anchor tracking keeps full weight.
 - 6-DoF pushes every 2–5 s. Runner: `BasePPORunnerCfg` (std 1.0).
-  Optional warm start: `--resume ... --agent.policy.init_noise_std=0.3`.
+  Optional warm start: `--resume --resume_experiment unitree_g1_29dof_ballcatch_phase1 --load_run … --finetune --finetune_std 0.3`.
 - **Before serious training:**
   - Set `CATCH_MOTION_TIME` (in `unified/ball_catch_env_cfg.py`) to the ball-contact moment of the current
     clip. The clip is 3.1 s long; 2.0 s is an unverified placeholder.
@@ -282,6 +304,10 @@ current position is returned.
 6. Checkpoints from before 2026-08-10 (pre-P0/P1: different obs scales, no `ball_intercept`) are **incompatible**.
 7. For play and evaluation set `curriculum=None`, otherwise evaluation runs on the easy initial distribution.
 8. Curriculum steps assume about 30k iterations (24 steps per iteration). Scale them for other run lengths.
+9. GMR `.pkl` files interleave the hands with the arms (see Section 5). Never slice `dof_pos[:, :29]`; use
+   `select_body_joints()` from the conversion scripts.
+10. `--resume` restores actor (incl. noise std), critic, optimizer and iteration unless `--finetune` is given.
+    `--experiment_name` decides where the new run is logged; `--resume_experiment` where the checkpoint is read from.
 
 ## 10. Training History & Artifacts
 
@@ -290,31 +316,34 @@ current position is returned.
 | `ballcatch_phase1/2026-07-27_13-32-10` | Phase 1 | Gangnam placeholder | model_99 (smoke test, outdated, incompatible) |
 | `ballcatch_phase1/2026-07-27_13-41-06` | Phase 1 | – | empty / aborted |
 | `ballcatch_phase1/2026-08-31_14-45-09` | Phase 1 | 143_merged_filtered | model_1 (test run) |
-| `ballcatch_phase1/2026-08-31_15-06-41` | Phase 1 | 143_merged_filtered | **model_1500**, 1657 iterations, tracking converged (see Section 2) |
+| `ballcatch_phase1/2026-08-31_15-06-41` | Phase 1 | 143_merged_filtered | model_1500, 1657 iterations, tracking converged, but on the corrupt clip (see Section 2) → unusable |
 | `ballcatch_phase2/` | Phase 2 | – | empty |
 | Unified | – | – | never started |
 
 ## 11. Open Items & Next Steps (prioritized)
 
-1. **Determine `CATCH_MOTION_TIME`** (via `replay_npz.py` on `143_merged_filtered.npz`) and check
+1. Visually check the regenerated clip with `replay_npz.py` (legs!), then **retrain Phase 1**. Convert further
+   clips as needed (`context/guides/replay_guide.md`, step 5).
+2. **Determine `CATCH_MOTION_TIME`** (via `replay_npz.py` on the regenerated clip) and check
    `catch_height_range` against the wrist height. Then **train Unified**, with Phase 2 in parallel as an
-   A/B comparison (warm start from `2026-08-31_15-06-41/model_1500.pt`).
-2. Establish a catch-rate metric (`Episode_Termination/ball_caught` vs. `ball_dropped`/`ball_missed`) and decide
+   A/B comparison (fine-tuned from the new Phase 1 run vs. from scratch).
+3. Remaining review findings M1–M4 and L1–L5 in `context/REVIEW.md` (C1, H1, H2 are fixed).
+4. Establish a catch-rate metric (`Episode_Termination/ball_caught` vs. `ball_dropped`/`ball_missed`) and decide
    which line (two phases or Unified) to pursue.
-3. Check the ball size: the simulation uses ∅ 10 cm and 0.15 kg, while the mocap group now uses a larger ball or
+5. Check the ball size: the simulation uses ∅ 10 cm and 0.15 kg, while the mocap group now uses a larger ball or
    a football. Adapt the sim parameters to the real ball.
-4. Model the static hand mount (per the proposal) as geometry and tune catch detection / `catch_radius` to it.
+6. Model the static hand mount (per the proposal) as geometry and tune catch detection / `catch_radius` to it.
    Dex3 hands are **not** required per the proposal.
-5. Sim2real hardening:
+7. Sim2real hardening:
    - noise, 1–2 step delay and dropout on ball observations
    - actuator delay as DR
    - fit the throw distribution to real VICON throws
-6. Sim2Sim in MuJoCo, ONNX export and a deploy config (`deploy/robots/g1_29dof/config/`). Build the live VICON
+8. Sim2Sim in MuJoCo, ONNX export and a deploy config (`deploy/robots/g1_29dof/config/`). Build the live VICON
    pipeline:
    - robot base tracking
    - ballistic Kalman filter with latency forward prediction
    - **identical** yaw-frame math to `observations.py`
-7. Select more / better clips (`pkl_isaac_lab_*`). `MotionCommand` currently loads only **one** file.
+9. Select more / better clips (`pkl_isaac_lab_*`). `MotionCommand` currently loads only **one** file.
 
 ## 12. Context Documents
 
@@ -329,6 +358,8 @@ current position is returned.
 - `changes/p0_changes.md`, `changes/p1_changes.md`, `changes/merge_changes.md`: changelogs of the 10 Aug implementation
 - `changes/LATENT_mimic_adjustments.md`: LATENT ideas for the mimic stage (not all adopted yet)
 - `guides/debug_instructions.md`: older debug guide (partly outdated, e.g. debug prints were removed)
+- `guides/replay_guide.md`: step-by-step guide (German) to convert, check (`check_motion.py`) and replay a mocap clip
+- `REVIEW.md`: code review of the ball-catching work (findings C1–L5; C1, H1, H2 fixed)
 
 In case of conflicts: **code > this spec > other context documents.**
 
@@ -392,3 +423,37 @@ In case of conflicts: **code > this spec > other context documents.**
   Root-level plan / changelog documents moved there.
 - Spec moved to `context/unitree_rl_lab_spec.md` and translated fully to English. Sections 3, 6.1, 12 and
   changelog paths updated to the new structure. `CLAUDE.md` now points to the new spec location.
+
+### 2026-09-28: Review fixes C1, H1, H2 (see `context/REVIEW.md`)
+- **C1** `scripts/mimic/pkl_to_npz.py`, `scripts/pkl_to_csv_without_hands.py`: the GMR `.pkl` columns 22-28 are
+  left-hand finger joints, not the right arm. Body joints are now taken from columns 0-21 + 34-40
+  (`select_body_joints()`), and any width other than 53/29 raises. Every `.npz` created before is corrupt
+  (right arm frozen inside the torso); the Phase 1 run `2026-08-31_15-06-41` is marked unusable.
+- New `scripts/mimic/check_motion.py`: numpy-only comparison of a `.npz` against its `.pkl` (per joint, Isaac ↔ SDK order).
+  Verified: the old clip shows 7 mismatching right-arm joints; a clip regenerated with the fix matches exactly.
+- **H1** `train.py`/`cli_args.py`: new `--finetune` (load actor only; fresh critic, optimizer, iteration) and
+  `--finetune_std` (overwrite the loaded noise std). `Phase2PPORunnerCfg` removed (its `init_noise_std` had no
+  effect after `--resume`); Phase 2 now uses `BasePPORunnerCfg`.
+- **H2** `train.py`/`cli_args.py`: new `--resume_experiment` reads the checkpoint from another experiment folder,
+  so Phase 2 fine-tuning no longer logs into the Phase 1 folder. Verified by a smoke run (logs in the given folder,
+  std 0.20, iteration counter starts at 0).
+- Spec sections 2, 3, 4, 5, 7.2, 7.3, 9, 10 and 11 updated.
+
+### 2026-09-28: Training clip regenerated
+- `phase1/motions/143_merged_filtered.npz` regenerated with the fixed `pkl_to_npz.py` from
+  `pkl_isaac_lab_fixed_27_07_26/143_merged_filtered.pkl` (155 frames @ 50 fps). `check_motion.py`: all 29 joints match
+  (maxdiff 0.000). Phase 1 probe: contact forces on `torso_link` and the right arm dropped from ~2000 N to 0.
+- Spec sections 2, 5 and 11 updated.
+
+### 2026-09-28: Corrupt clips removed, replay guide updated
+- The five pre-fix `.npz` in `pkl_isaac_lab_fixed_27_07_26/npz/` were deleted (by the user); only the regenerated
+  training clip in `phase1/motions/` exists.
+- `context/guides/replay_guide.md` rewritten for the current paths (file overview, check/replay of the training clip,
+  swapping in another clip). Spec sections 2, 3 and 11 updated.
+
+### 2026-09-28: play.py fixed for Isaac Lab 2.3 / rsl-rl 5 (`d86ef57`)
+- `scripts/rsl_rl/play.py` crashed on import (`isaaclab.utils.pretrained_checkpoint` moved to `isaaclab_rl.utils`).
+  Also added `handle_deprecated_rsl_rl_cfg` (as in `train.py`) and JIT/ONNX export via
+  `runner.export_policy_to_jit/onnx` for rsl-rl >= 4 (`runner.alg.policy` no longer exists).
+- Verified by the user: playing the smoke checkpoint `/tmp/smoke_p1/…/model_9.pt` opens the sim and runs the policy.
+- Spec section 3 updated.

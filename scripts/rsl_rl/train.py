@@ -166,7 +166,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        # the checkpoint may come from another experiment (e.g. Phase 1 -> Phase 2) without
+        # redirecting this run's logs into that experiment's folder
+        resume_root_path = log_root_path
+        if args_cli.resume_experiment is not None:
+            resume_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", args_cli.resume_experiment))
+        resume_path = get_checkpoint_path(resume_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     # wrap for video recording
     if args_cli.video:
@@ -191,7 +196,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
-        runner.load(resume_path)
+        if args_cli.finetune:
+            # actor only: a critic fitted to another task's reward, its optimizer state and its
+            # iteration counter would corrupt the first updates of the new task
+            runner.load(resume_path, load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": False})
+        else:
+            runner.load(resume_path)
+        if args_cli.finetune_std is not None:
+            # the noise std is part of the actor state dict, so init_noise_std has no effect after loading
+            runner.alg.actor.distribution.std_param.data.fill_(args_cli.finetune_std)
+            print(f"[INFO]: Action noise std set to {args_cli.finetune_std}")
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

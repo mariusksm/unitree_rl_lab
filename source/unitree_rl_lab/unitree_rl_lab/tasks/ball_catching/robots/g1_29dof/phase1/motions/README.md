@@ -8,25 +8,25 @@ warning (the policy then imitates dancing, not catching).
 ## Pipeline (VICON Shogun → npz)
 
 1. Record the catching motion with VICON Shogun and retarget it to the G1 with GMR
-   (produces a `.pkl` with 29 body + 24 hand joint columns).
-2. Extract the 29 body joints and convert to the Phase-1 CSV layout
-   (`base_xyz, quat_xyzw, joint_0..28`):
+   (produces a `.pkl` with 53 joint columns; the hands sit between the arms:
+   `0-11 legs | 12-14 waist | 15-21 left arm | 22-33 left hand | 34-40 right arm | 41-52 right hand`).
+2. Convert to `.npz` (picks the 29 body joints, replays them through Isaac Sim; requires the
+   Isaac Lab python environment). It may hang on shutdown after `[DONE]` — Ctrl+C is safe then:
 
    ```bash
-   python scripts/pkl_to_csv_without_hands.py -i pkl_result/ -o <csv_out>/
+   python scripts/mimic/pkl_to_npz.py -i <file_or_folder>.pkl --headless -o <npz_out>/
    ```
 
-3. Replay through Isaac Sim to compute body kinematics and write the `.npz`
-   (requires the Isaac Lab python environment):
+3. Check that the `.npz` contains the right joints (numpy only, prints `RESULT: OK`):
 
    ```bash
-   python scripts/mimic/csv_to_npz.py -f <csv_out>/<file>.csv --input_fps 30 --output_fps 50
+   python scripts/mimic/check_motion.py --pkl <file>.pkl --npz <npz_out>/<file>.npz
    ```
 
-4. Copy the resulting `.npz` into this directory and verify it visually:
+4. Verify it visually, then copy it into this directory:
 
    ```bash
-   python scripts/mimic/replay_npz.py --motion_file <this_dir>/<file>.npz
+   python scripts/mimic/replay_npz.py -f <npz_out>/<file>.npz
    ```
 
 ## Quality checklist before training on it

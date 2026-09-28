@@ -36,9 +36,9 @@ Date: 2026-09-28.
 
 | ID | Severity | File | Title |
 |---|---|---|---|
-| C1 | Critical | `scripts/mimic/pkl_to_npz.py:113`, `scripts/pkl_to_csv_without_hands.py:41` | `dof_pos[:, :29]` puts left-hand finger joints into the right arm |
-| H1 | High | `tasks/ball_catching/agents/rsl_rl_ppo_cfg.py:39-55` | `Phase2PPORunnerCfg.init_noise_std=0.2` has no effect on resume and is too low from scratch; resume also loads the Phase 1 critic, optimizer and iteration |
-| H2 | High | `scripts/rsl_rl/cli_args.py:88-89` | `--experiment_name` override sends Phase 2 fine-tuning runs into the Phase 1 log folder; `play` then silently loads the wrong policy |
+| C1 | Critical (✅ fixed 2026-09-28) | `scripts/mimic/pkl_to_npz.py:113`, `scripts/pkl_to_csv_without_hands.py:41` | `dof_pos[:, :29]` puts left-hand finger joints into the right arm |
+| H1 | High (✅ fixed 2026-09-28) | `tasks/ball_catching/agents/rsl_rl_ppo_cfg.py:39-55` | `Phase2PPORunnerCfg.init_noise_std=0.2` has no effect on resume and is too low from scratch; resume also loads the Phase 1 critic, optimizer and iteration |
+| H2 | High (✅ fixed 2026-09-28) | `scripts/rsl_rl/cli_args.py:88-89` | `--experiment_name` override sends Phase 2 fine-tuning runs into the Phase 1 log folder; `play` then silently loads the wrong policy |
 | M1 | Medium | `mdp/commands/ball_command.py:114-130`, `phase2/ball_catch_env_cfg.py:308-316` | Pre-throw exploit: hands are rewarded near the parked ball, and the aim point is computed at launch from the robot's current pose |
 | M2 | Medium | `mdp/commands/synced_ball_command.py:117-121`, `ball_command.py:125-130` | Unified: the ball is aimed at a fixed chest point, not at the reference's (left-hand) catch pose |
 | M3 | Medium | `unified/ball_catch_env_cfg.py:42` | `CATCH_MOTION_TIME = 2.0` is unverified; the clip has no retract phase |

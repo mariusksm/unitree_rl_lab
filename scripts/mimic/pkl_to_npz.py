@@ -6,8 +6,8 @@ one script and one Isaac Sim session for a whole folder.
 
 What happens per file:
 1. Load the .pkl (root_pos, root_rot in xyzw, dof_pos with 53 columns).
-   Only the first 29 columns (G1 body joints, SDK order) are used — the 24 hand
-   columns are dropped (no hands on the robot model yet).
+   The 29 G1 body joints (SDK order) are picked out — columns 0-21 and 34-40; the
+   24 hand columns (22-33 left, 41-52 right) are dropped (no hands on the robot model).
 2. Interpolate from the recording fps (read from the pkl, usually 30) to the
    training fps (default 50): lerp for positions, slerp for the base quaternion.
 3. Differentiate to get base/joint velocities (finite differences, SO3-aware for
@@ -89,7 +89,19 @@ from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul, 
 
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_CFG as ROBOT_CFG  # only G1-29dof is supported
 
-NUM_BODY_JOINTS = 29  # G1 body joints in SDK order; hand columns beyond this are dropped
+# GMR "unitree_g1 with hands" (53 dof). The hand joints are NOT at the end:
+#   0-11 legs | 12-14 waist | 15-21 left arm | 22-33 left hand | 34-40 right arm | 41-52 right hand
+GMR_BODY_COLUMNS = list(range(0, 22)) + list(range(34, 41))  # -> 29 G1 body joints in SDK order
+
+
+def select_body_joints(dof_pos: np.ndarray, source: str) -> np.ndarray:
+    """Return the 29 G1 body joints in SDK order from a GMR dof_pos array."""
+    dof_pos = np.asarray(dof_pos)
+    if dof_pos.shape[1] == 53:
+        return dof_pos[:, GMR_BODY_COLUMNS]
+    if dof_pos.shape[1] == 29:
+        return dof_pos
+    raise ValueError(f"Unexpected dof_pos width {dof_pos.shape[1]} in {source} (expected 53 or 29).")
 
 
 @configclass
@@ -122,7 +134,7 @@ class PklMotion:
         base_pos = torch.tensor(np.asarray(data["root_pos"]), dtype=torch.float32, device=device)
         base_rot_xyzw = torch.tensor(np.asarray(data["root_rot"]), dtype=torch.float32, device=device)
         base_rot = base_rot_xyzw[:, [3, 0, 1, 2]]  # xyzw (GMR) -> wxyz (Isaac Lab)
-        dof_pos = torch.tensor(np.asarray(data["dof_pos"])[:, :NUM_BODY_JOINTS], dtype=torch.float32, device=device)
+        dof_pos = torch.tensor(select_body_joints(data["dof_pos"], pkl_path), dtype=torch.float32, device=device)
 
         self.input_frames = base_pos.shape[0]
         self.duration = (self.input_frames - 1) / self.input_fps
