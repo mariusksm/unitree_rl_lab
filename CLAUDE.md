@@ -6,19 +6,19 @@ Ein Unitree G1 (29 DoF) soll einen zugeworfenen Ball fangen. Die Projektarbeit l
 
 ## Zuerst lesen
 
-**`unitree_rl_lab_spec.md`** ist die zentrale Spezifikation und Stand-Aufnahme: Architektur,
-Tasks, Observation-Vertrag, Datenpipeline, Trainingsstand, offene Punkte, Änderungslog.
+**`context/unitree_rl_lab_spec.md`** ist die zentrale Spezifikation und Stand-Aufnahme: Architektur,
+Tasks, Observation-Vertrag, Datenpipeline, Trainingsstand, offene Punkte, Changelog.
 Vor jeder Arbeit lesen. Hintergrundmaterial wie Antrag, Protokolle und Pläne liegt in `context/`.
 
 ## Pflicht: Spec-Dokument pflegen
 
-Jede **substanzielle Änderung** muss in `unitree_rl_lab_spec.md` festgehalten werden, und zwar in
+Jede **substanzielle Änderung** muss in `context/unitree_rl_lab_spec.md` festgehalten werden, und zwar in
 dieser Reihenfolge:
 
 1. **Zuerst die Spezifikation anpassen:** die betroffenen Kapitel (Tasks, Observation-Layout, Rewards,
    Pipeline, Status, offene Punkte …) so aktualisieren, dass sie den neuen Ist-Zustand beschreiben.
    Die Spec beschreibt immer den *aktuellen* Stand und keine Historie.
-2. **Dann einen Log-Eintrag anhängen:** im Kapitel „Änderungslog“ am Ende des Dokuments einen neuen
+2. **Dann einen Log-Eintrag anhängen:** im Kapitel „Changelog“ am Ende des Dokuments einen neuen
    Eintrag **unten** ergänzen (`### YYYY-MM-DD: Kurztitel` + Stichpunkte: was, warum, betroffene Dateien
    bzw. Kapitel). Bestehende Log-Einträge werden nie verändert oder gelöscht, damit die Historie erhalten bleibt.
 
