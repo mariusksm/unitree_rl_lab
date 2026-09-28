@@ -1,0 +1,46 @@
+You are reviewing my changes to a fork of unitree_rl_lab (Isaac Lab–based RL training for Unitree robots). Over time, many different AI coding agents added tasks and features to this repo with little oversight ("vibe coding"). None of the training I set up has been run yet, and I'm worried it won't work, or will train silently wrong.
+
+## Scope (strict)
+- Review ONLY what my commits changed. The baseline is commit <cd953ed> The author is me, Marius H.
+- Get the scope with: `git diff <cd953ed>..HEAD --stat` and `git log <cd953ed>..HEAD`.
+- Upstream code that existed before <cd953ed> is out of scope. Do not report issues in it.
+- Exception: if my changes break, misuse, or contradict existing upstream code (wrong function signatures, overridden configs, broken registrations), DO report that, since the cause is in my diff.
+- You may read upstream files freely to understand conventions and APIs. Just don't review them.
+
+## Process
+1. First, understand the upstream structure: how tasks are registered (gym.register), how env configs are built (scene, observations, actions, commands, rewards, terminations, events, curriculum), how the RSL-RL agent configs work, and which Isaac Lab version and API the repo targets.
+2. Then go through my diff file by file and check it against those conventions.
+3. Verify claims before reporting them. When you doubt an API, look up the actual function or class in the installed Isaac Lab / upstream code instead of guessing.
+4. You may run non-destructive checks (py_compile, importing modules, listing registered gym envs, grep). Do NOT modify any code, and do NOT start long training runs.
+
+## What to look for
+- Code that will crash: wrong imports, nonexistent Isaac Lab APIs (agents often hallucinate these or use a different Isaac Lab version), wrong function signatures in reward/obs/termination terms, typos in config attribute names, missing `@configclass`, broken `__post_init__`
+- Code that runs but trains wrong (most important):
+  - reward terms with wrong sign or absurd weights
+  - rewards that can be exploited
+  - wrong body/joint name regexes that match nothing or the wrong things
+  - wrong joint ordering
+  - tensor shape or broadcasting bugs
+  - device mismatches
+  - wrong dt/decimation assumptions
+  - command ranges that make no sense for the robot
+  - terminations that fire immediately or never
+  - observation noise/scaling issues
+  - curriculum logic bugs
+- Inconsistencies between tasks written by different agents: duplicated helpers with diverging behavior, conflicting configs, one task silently inheriting and overriding another's settings, dead or unused code, multiple registrations of the same ID
+- Train/play/deploy mismatches: observation order, scaling, action scale, or default joint positions differing between training config and play/deploy configs (only if my diff touches those)
+- Agent/runner configs: PPO hyperparameters, network sizes, experiment names, max_iterations, save paths
+
+## Output
+Write the findings to `REVIEW.md` in the context folder. Structure:
+1. A short summary: overall assessment, and whether each task is likely to run and likely to train properly
+2. A table of all findings, sorted by severity (Critical = crashes or definitely trains wrong, High, Medium, Low/Style)
+3. A detailed section for each finding with:
+   - file:line
+   - what is wrong
+   - why it is wrong (with evidence, e.g. the correct upstream API)
+   - a concrete suggested fix (code snippet)
+   - your confidence (high/medium/low)
+4. A list of things you could not verify statically, which I should test with a short smoke run (e.g. `--num_envs 16 --max_iterations 10`)
+
+Be precise and skeptical, and don't pad the report. If something is fine, don't list it. If you're unsure, say so instead of presenting a guess as fact.
