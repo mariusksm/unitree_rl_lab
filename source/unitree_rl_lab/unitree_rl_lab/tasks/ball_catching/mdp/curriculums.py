@@ -16,9 +16,12 @@ def _progress(env: ManagerBasedRLEnv, start_step: int, end_step: int) -> float:
 
 
 def _lerp(a, b, p: float):
-    """Linear interpolation for floats and (nested) tuples/lists of floats."""
+    """Linear interpolation for floats, ints (rounded) and (nested) tuples/lists of them."""
     if isinstance(a, (tuple, list)):
-        return type(a)(ai + (bi - ai) * p for ai, bi in zip(a, b))
+        return type(a)(_lerp(ai, bi, p) for ai, bi in zip(a, b))
+    if isinstance(a, int) and isinstance(b, int):
+        # int fields (e.g. secure_steps) are compared with ==/>= against step counters
+        return int(round(a + (b - a) * p))
     return a + (b - a) * p
 
 
@@ -55,7 +58,7 @@ def ball_throw_curriculum(
     """Widen the BallCommand throw distribution from ``easy`` to ``final`` values.
 
     ``easy``/``final`` map BallCommandCfg field names (e.g. ``flight_time_range``,
-    ``throw_lateral_range``, ``velocity_noise``) to values; each field is linearly
+    ``throw_direction_range``, ``secure_steps``) to values; each field is linearly
     interpolated over training progress. New throws sample from the updated cfg
     immediately. Returns the progress in [0, 1] for logging.
     """

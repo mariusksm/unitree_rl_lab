@@ -1,3 +1,5 @@
+import math
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -19,6 +21,12 @@ from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_S
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+# forearm + hand links the ball may rest on in the two-arm underhand catch (left first, then right)
+ARM_CONTACT_BODY_NAMES = [
+    f"{side}_{link}"
+    for side in ("left", "right")
+    for link in ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
+]
 
 
 @configclass
@@ -52,17 +60,25 @@ class RobotSceneCfg(InteractiveSceneCfg):
         prim_path="/World/skyLight",
         spawn=sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0),
     )
-    # sensors (robot only — ball contact sensing added later for catch detection)
+    # sensors
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True
     )
-    # ball — physics-simulated rigid object thrown toward the robot
+    # ball-arm contact for catch detection: the ball is the single sensor body, filtered against the arm
+    # links (Isaac Lab reports filtered contacts only one-to-many); history = physics steps per control step
+    ball_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Ball",
+        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES],
+        history_length=4,
+    )
+    # ball — physics-simulated rigid object thrown toward the robot (same ball as the mjlab task,
+    # interim report ch. 9.2: ∅15 cm, 112 g)
     ball = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
         spawn=sim_utils.SphereCfg(
-            radius=0.05,                  # [BALL SIZE] radius in meters (∅10cm)
+            radius=0.075,                 # [BALL SIZE] radius in meters (∅15cm)
             mass_props=sim_utils.MassPropertiesCfg(
-                mass=0.15,                # [BALL MASS] kg
+                mass=0.112,               # [BALL MASS] kg
             ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,    # ball flies under gravity
@@ -70,11 +86,11 @@ class RobotSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True,   # ball collides with robot and ground
             ),
-            activate_contact_sensors=True,  # needed by ContactSensorCfg prim_path=".*"
+            activate_contact_sensors=True,  # needed by the ball_contact sensor
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.5,      # [BALL FRICTION] with hands/ground
                 dynamic_friction=0.5,
-                restitution=0.6,          # [BALL BOUNCINESS] 0=clay, 1=superball
+                restitution=0.4,          # [BALL BOUNCINESS] 0=clay, 1=superball; not measured yet
             ),
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(1.0, 0.3, 0.0),   # [BALL COLOR] orange-red
@@ -140,16 +156,16 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("ball"),
             "static_friction_range": (0.3, 0.8),     # [BALL FRIC RANGE] randomized surface grip
             "dynamic_friction_range": (0.3, 0.8),
-            "restitution_range": (0.4, 0.8),          # [BALL BOUNCE RANGE] randomized bounciness
+            "restitution_range": (0.2, 0.6),          # [BALL BOUNCE RANGE] until a drop test of the real ball
             "num_buckets": 16,
         },
     )
     ball_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
-        mode="startup",
+        mode="startup",  # must stay startup: BallCommand reads the masses once for the drag-compensated aim
         params={
             "asset_cfg": SceneEntityCfg("ball"),
-            "mass_distribution_params": (-0.05, 0.05),  # [BALL MASS RANGE] ±50g around 150g default
+            "mass_distribution_params": (-0.015, 0.015),  # [BALL MASS RANGE] ±15g around 112g default
             "operation": "add",
         },
     )
@@ -207,6 +223,7 @@ class CommandsCfg:
         asset_name="ball",
         resampling_time_range=(1.0e9, 1.0e9),  # single throw per episode; new throw only on env reset
         hand_body_names=HAND_BODY_NAMES,
+        contact_sensor_name="ball_contact",
         debug_vis=False,
     )
 
@@ -244,8 +261,8 @@ class ObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
             noise=Unoise(n_min=-0.02, n_max=0.02),
         )
-        # -- ballistic interception prediction (zeros in Phase 1) --
-        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.35})
+        # -- ballistic interception prediction at belly height (zeros in Phase 1) --
+        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.15})
         # -- motion placeholder --
         motion_anchor_ori_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
         # -- proprioception --
@@ -279,8 +296,8 @@ class ObservationsCfg:
             func=mdp.hand_pos_b,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
         )
-        # -- ballistic interception prediction (zeros in Phase 1) --
-        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.35})
+        # -- ballistic interception prediction at belly height (zeros in Phase 1) --
+        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.15})
         # -- motion placeholders --
         motion_anchor_pos_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
         motion_anchor_ori_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
@@ -304,15 +321,31 @@ class ObservationsCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    # -- ball catching
-    hand_to_ball = RewTerm(
-        func=mdp.hand_to_ball_distance_exp,
+    # -- ball catching (mjlab ch. 9.4.1: small proximity < larger contact < largest retention reward;
+    #    all zero before the launch)
+    ball_reach = RewTerm(
+        func=mdp.ball_interception_exp,
+        weight=1.0,
+        params={
+            "command_name": "ball_throw",
+            "asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES),
+            "std_dist": 0.3,        # [REACH SHAPING] hands midpoint to ball; gradient reaches ~0.8m
+        },
+    )
+    ball_interception = RewTerm(
+        func=mdp.ball_interception_exp,
         weight=2.0,
         params={
-            "ball_name": "ball",
+            "command_name": "ball_throw",
             "asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES),
-            "std": 0.3,             # [REACH SHAPING] gradient reaches ~0.8m; saturates at the ball
+            "std_dist": 0.2,
+            "std_vel": 1.0,         # [SOFT CATCH] eq. 9.1: hands move with the ball instead of blocking it
         },
+    )
+    ball_arm_contact = RewTerm(
+        func=mdp.ball_arm_contact,
+        weight=3.0,                 # 0.06/step with both arms in contact
+        params={"command_name": "ball_throw"},
     )
     catch_success = RewTerm(
         func=mdp.ball_caught_bonus,
@@ -398,11 +431,12 @@ class RewardsCfg:
         weight=-1,
         params={
             "threshold": 1,
-            # exclude feet AND wrists — ball-on-hand contact is the goal, not a fault
+            # exclude feet, forearms/hands and torso — in the two-arm underhand catch the ball rests on the
+            # forearms and against the belly; that contact is the goal, not a fault
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=[
-                    r"^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$).+$"
+                    r"^(?!.*_ankle_roll_link$)(?!.*_elbow_link$)(?!.*_wrist_(roll|pitch|yaw)_link$)(?!torso_link$).+$"
                 ],
             ),
         },
@@ -428,7 +462,7 @@ class TerminationsCfg:
     )
     ball_missed = DoneTerm(
         func=mdp.ball_far_from_robot,
-        params={"ball_name": "ball", "max_distance": 4.0},  # [TERM MISS] beyond max spawn distance (~2.6m) + margin
+        params={"ball_name": "ball", "max_distance": 6.0},  # [TERM MISS] beyond max release distance (5m) + margin
     )
 
 
@@ -448,19 +482,23 @@ class CurriculumCfg:
             "command_name": "ball_throw",
             "start_step": 50_000,
             "end_step": 250_000,
-            "easy": {
-                "throw_distance_range": (1.2, 1.8),
-                "throw_lateral_range": (-0.3, 0.3),
-                "flight_time_range": (0.5, 0.7),   # slower throws first
-                "velocity_noise": 0.1,
-                "catch_lateral_std": 0.02,
+            "easy": {  # short, high lobs from the front straight into the arms; mjlab: 2 m / ±15° first
+                "throw_distance_range": (2.0, 2.5),
+                "throw_direction_range": (-math.radians(15.0), math.radians(15.0)),
+                "target_lateral_range": (-0.03, 0.03),
+                "target_height_range": (0.85, 0.95),
+                "flight_time_range": (1.0, 1.2),
+                "velocity_noise": 0.0,
+                "secure_steps": 25,                # mjlab raises the required hold time over training
             },
             "final": {  # = BallCommandCfg defaults
-                "throw_distance_range": (1.0, 2.5),
-                "throw_lateral_range": (-0.75, 0.75),
-                "flight_time_range": (0.3, 0.6),
-                "velocity_noise": 0.3,
-                "catch_lateral_std": 0.05,
+                "throw_distance_range": (2.0, 5.0),
+                "throw_direction_range": (-math.radians(75.0), math.radians(75.0)),
+                "target_lateral_range": (-0.1, 0.1),
+                "target_height_range": (0.8, 1.05),
+                "flight_time_range": (0.8, 1.4),
+                "velocity_noise": 0.1,
+                "secure_steps": 50,
             },
         },
     )

@@ -10,6 +10,8 @@ checkpoint transfer, no observation placeholders, no forgetting.
 
 from __future__ import annotations
 
+import math
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -35,6 +37,12 @@ from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as R
 from ..phase1.ball_catch_env_cfg import MOTION_FILE
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+# forearm + hand links the ball may rest on in the two-arm underhand catch (left first, then right)
+ARM_CONTACT_BODY_NAMES = [
+    f"{side}_{link}"
+    for side in ("left", "right")
+    for link in ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
+]
 
 # [CATCH FRAME] Time (s) into the motion clip at which the mocap catch (ball-hand
 # contact) happens. READ THIS OFF YOUR RETARGETED CLIP (scripts/mimic/replay_npz.py)
@@ -82,18 +90,25 @@ class RobotSceneCfg(InteractiveSceneCfg):
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True
     )
+    # ball-arm contact for catch detection (ball = single sensor body, filtered against the arm links)
+    ball_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Ball",
+        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES],
+        history_length=4,
+    )
+    # same ball as Phase 2 / the mjlab task (interim report ch. 9.2: ∅15 cm, 112 g)
     ball = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
         spawn=sim_utils.SphereCfg(
-            radius=0.05,                  # [BALL SIZE] radius in meters (∅10cm)
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.15),
+            radius=0.075,                 # [BALL SIZE] radius in meters (∅15cm)
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.112),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             activate_contact_sensors=True,
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.5,
                 dynamic_friction=0.5,
-                restitution=0.6,
+                restitution=0.4,          # not measured yet
             ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.3, 0.0)),
         ),
@@ -146,6 +161,7 @@ class CommandsCfg:
         asset_name="ball",
         resampling_time_range=(1.0e9, 1.0e9),  # lifecycle driven by the motion phase
         hand_body_names=HAND_BODY_NAMES,
+        contact_sensor_name="ball_contact",
         motion_command_name="motion",
         catch_motion_time=CATCH_MOTION_TIME,
         arrival_jitter=0.05,
@@ -183,7 +199,7 @@ class ObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
             noise=Unoise(n_min=-0.02, n_max=0.02),
         )
-        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.35})
+        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.15})
         # -- motion tracking --
         motion_anchor_ori_b = ObsTerm(
             func=mdp.motion_anchor_ori_b, params={"command_name": "motion"}, noise=Unoise(n_min=-0.05, n_max=0.05)
@@ -213,7 +229,7 @@ class ObservationsCfg:
             func=mdp.hand_pos_b,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
         )
-        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.35})
+        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.15})
         # -- motion tracking (privileged) --
         motion_anchor_pos_b = ObsTerm(func=mdp.motion_anchor_pos_b, params={"command_name": "motion"})
         motion_anchor_ori_b = ObsTerm(func=mdp.motion_anchor_ori_b, params={"command_name": "motion"})
@@ -289,16 +305,16 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("ball"),
             "static_friction_range": (0.3, 0.8),
             "dynamic_friction_range": (0.3, 0.8),
-            "restitution_range": (0.4, 0.8),
+            "restitution_range": (0.2, 0.6),
             "num_buckets": 16,
         },
     )
     ball_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
-        mode="startup",
+        mode="startup",  # must stay startup: the ball command reads the masses once for the drag-compensated aim
         params={
             "asset_cfg": SceneEntityCfg("ball"),
-            "mass_distribution_params": (-0.05, 0.05),
+            "mass_distribution_params": (-0.015, 0.015),
             "operation": "add",
         },
     )
@@ -354,15 +370,30 @@ class RewardsCfg:
         params={"command_name": "motion", "std": 3.14},
     )
 
-    # -- ball catching
-    hand_to_ball = RewTerm(
-        func=mdp.hand_to_ball_distance_exp,
+    # -- ball catching (same terms as Phase 2; all zero before the launch)
+    ball_reach = RewTerm(
+        func=mdp.ball_interception_exp,
+        weight=1.0,
+        params={
+            "command_name": "ball_throw",
+            "asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES),
+            "std_dist": 0.3,
+        },
+    )
+    ball_interception = RewTerm(
+        func=mdp.ball_interception_exp,
         weight=2.0,
         params={
-            "ball_name": "ball",
+            "command_name": "ball_throw",
             "asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES),
-            "std": 0.3,
+            "std_dist": 0.2,
+            "std_vel": 1.0,
         },
+    )
+    ball_arm_contact = RewTerm(
+        func=mdp.ball_arm_contact,
+        weight=3.0,
+        params={"command_name": "ball_throw"},
     )
     catch_success = RewTerm(
         func=mdp.ball_caught_bonus,
@@ -393,10 +424,11 @@ class RewardsCfg:
         func=mdp.undesired_contacts,
         weight=-0.1,
         params={
+            # exclude feet, forearms/hands and torso (ball contact of the two-arm underhand catch)
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=[
-                    r"^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$).+$"
+                    r"^(?!.*_ankle_roll_link$)(?!.*_elbow_link$)(?!.*_wrist_(roll|pitch|yaw)_link$)(?!torso_link$).+$"
                 ],
             ),
             "threshold": 1.0,
@@ -446,7 +478,7 @@ class TerminationsCfg:
     )
     ball_missed = DoneTerm(
         func=mdp.ball_far_from_robot,
-        params={"ball_name": "ball", "max_distance": 4.0},
+        params={"ball_name": "ball", "max_distance": 6.0},  # beyond max release distance (5m) + margin
     )
 
 
@@ -464,18 +496,22 @@ class CurriculumCfg:
             "start_step": 50_000,
             "end_step": 250_000,
             "easy": {
-                "throw_distance_range": (1.2, 1.8),
-                "throw_lateral_range": (-0.3, 0.3),
-                "flight_time_range": (0.5, 0.7),
-                "velocity_noise": 0.1,
-                "catch_lateral_std": 0.02,
+                "throw_distance_range": (2.0, 2.5),
+                "throw_direction_range": (-math.radians(15.0), math.radians(15.0)),
+                "target_lateral_range": (-0.03, 0.03),
+                "target_height_range": (0.85, 0.95),
+                "flight_time_range": (1.0, 1.2),
+                "velocity_noise": 0.0,
+                "secure_steps": 25,
             },
-            "final": {
-                "throw_distance_range": (1.0, 2.5),
-                "throw_lateral_range": (-0.75, 0.75),
-                "flight_time_range": (0.3, 0.6),
-                "velocity_noise": 0.3,
-                "catch_lateral_std": 0.05,
+            "final": {  # = BallCommandCfg defaults
+                "throw_distance_range": (2.0, 5.0),
+                "throw_direction_range": (-math.radians(75.0), math.radians(75.0)),
+                "target_lateral_range": (-0.1, 0.1),
+                "target_height_range": (0.8, 1.05),
+                "flight_time_range": (0.8, 1.4),
+                "velocity_noise": 0.1,
+                "secure_steps": 50,
             },
         },
     )

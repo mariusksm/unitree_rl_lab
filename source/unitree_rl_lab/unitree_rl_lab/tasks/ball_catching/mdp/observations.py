@@ -129,21 +129,23 @@ def ball_intercept_b(
     env: ManagerBasedEnv,
     ball_name: str = "ball",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    catch_height: float = 0.35,
+    catch_height: float = 0.15,
     max_time: float = 3.0,
 ) -> torch.Tensor:
     """Predicted ballistic interception point and time-to-go.
 
     Solves for the (descending) crossing of the ball's ballistic trajectory with the
-    horizontal catch plane ``catch_height`` above the robot root and returns the
-    predicted crossing point relative to the root, rotated into the robot's yaw
-    frame. If the trajectory never reaches the plane, time-to-go is 0 and the
-    current ball position is returned instead.
+    horizontal catch plane ``catch_height`` above the robot root (default: belly height
+    of the underhand two-arm catch) and returns the predicted crossing point relative to
+    the root, rotated into the robot's yaw frame. If the trajectory never reaches the
+    plane, time-to-go is 0 and the current ball position is returned instead.
 
     This is the timing signal catching lives on, and the same ballistic prediction
-    the deployment pipeline computes from the filtered VICON stream (air drag is
-    negligible for a 0.15 kg ball below ~8 m/s). While the ball is parked before the
-    throw, the output is the "if it fell now" point — a smooth, informative signal.
+    the deployment pipeline computes from the filtered VICON stream. It ignores air
+    drag on purpose (simple to reproduce on hardware): for the light 15 cm ball the
+    early prediction lands up to ~0.4 m too far, the error shrinks as time-to-go drops.
+    While the ball is parked before the throw, the output is the "if it fell now"
+    point — a smooth, informative signal.
 
     Returns (num_envs, 3): [intercept_x_b, intercept_y_b, time_to_go].
     """

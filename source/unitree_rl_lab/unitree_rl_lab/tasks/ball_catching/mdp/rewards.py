@@ -94,25 +94,35 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
 # ── Ball catching rewards ──────────────────────────────────────────────
 
 
-def hand_to_ball_distance_exp(
+def ball_interception_exp(
     env: ManagerBasedRLEnv,
-    std: float,
-    ball_name: str = "ball",
+    std_dist: float,
+    std_vel: float | None = None,
+    command_name: str = "ball_throw",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Gaussian reward based on the closest hand's distance to the ball.
+    """Reward the hands for meeting the thrown ball (interim report, eq. 9.1).
 
-    Pass the hand bodies via ``asset_cfg`` (body indices are resolved once by the
-    reward manager). Returns exp(-min_distance² / std²) — saturates at 1.0 when a
-    hand is at the ball.
+    d is the distance between the ball and the midpoint of the bodies in ``asset_cfg`` (both hands, so a
+    two-arm catch is preferred over reaching with one hand), v the ball speed relative to the mean hand
+    velocity. Returns exp(-d²/std_dist² - v²/std_vel²); without ``std_vel`` only the distance counts.
+    Zero until the ball is launched, so the parked ball at the release point does not attract the hands.
     """
-    ball: RigidObject = env.scene[ball_name]
+    command = env.command_manager.get_term(command_name)
+    ball: RigidObject = command.ball
     robot: Articulation = env.scene[asset_cfg.name]
-    ball_pos = ball.data.root_pos_w.unsqueeze(1)                # (N, 1, 3)
-    hand_pos = robot.data.body_pos_w[:, asset_cfg.body_ids]     # (N, H, 3)
-    dist = torch.norm(hand_pos - ball_pos, dim=-1)              # (N, H)
-    min_dist = dist.min(dim=-1).values                          # (N,)
-    return torch.exp(-(min_dist**2) / std**2)
+    hands_pos = robot.data.body_pos_w[:, asset_cfg.body_ids].mean(dim=1)
+    error = torch.sum(torch.square(ball.data.root_pos_w - hands_pos), dim=-1) / std_dist**2
+    if std_vel is not None:
+        hands_vel = robot.data.body_lin_vel_w[:, asset_cfg.body_ids].mean(dim=1)
+        error += torch.sum(torch.square(ball.data.root_lin_vel_w - hands_vel), dim=-1) / std_vel**2
+    return torch.exp(-error) * command.launched.float()
+
+
+def ball_arm_contact(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
+    """Fraction of arms (left, right) the launched ball touches in this step (interim report, eq. 9.2)."""
+    command = env.command_manager.get_term(command_name)
+    return command.arm_contact.float().mean(dim=-1) * command.launched.float()
 
 
 def ball_caught_bonus(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:

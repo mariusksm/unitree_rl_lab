@@ -27,7 +27,7 @@ class SyncedBallCommand(BallCommand):
 
     Behavior per motion cycle:
     - While the motion time is before ``launch_time``, the ball is parked at its
-      spawn point (visible "thrower" position).
+      release point (visible "thrower" position).
     - At ``launch_time`` the ball is thrown with the pre-sampled flight time, so
       ball arrival and the mocap catch pose coincide.
     - If an episode starts *past* the launch window (adaptive sampling can start
@@ -35,9 +35,10 @@ class SyncedBallCommand(BallCommand):
       motion tracking (e.g. the retract phase) until the motion wraps.
     - When the motion wraps or is resampled (detected as a backward jump of the
       motion time; the robot is teleported by the MotionCommand at that moment),
-      the ball is re-parked at a fresh spawn point and re-armed.
+      a fresh throw is sampled, the ball is re-parked and re-armed.
 
-    Catch-state tracking (``secured_steps``) is inherited from :class:`BallCommand`.
+    Throw geometry, drag and catch-state tracking (``secured_steps``) are inherited
+    from :class:`BallCommand`.
 
     Note: the motion command must be declared *before* this command in the
     environment's ``CommandsCfg`` so that on env reset the motion time is already
@@ -51,7 +52,6 @@ class SyncedBallCommand(BallCommand):
 
         self._armed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._launched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._flight_time = torch.zeros(self.num_envs, device=self.device)
         self._launch_time = torch.zeros(self.num_envs, device=self.device)
         self._prev_motion_time = torch.zeros(self.num_envs, device=self.device)
         self._validated = False
@@ -59,6 +59,10 @@ class SyncedBallCommand(BallCommand):
     @property
     def motion_command(self) -> MotionCommand:
         return self._env.command_manager.get_term(self.cfg.motion_command_name)
+
+    @property
+    def launched(self) -> torch.Tensor:
+        return self._launched
 
     def _motion_time(self) -> torch.Tensor:
         """Current time (s) into the reference motion clip, per env."""
@@ -78,13 +82,20 @@ class SyncedBallCommand(BallCommand):
         self._validated = True
 
     def _arm(self, env_ids: Sequence[int]):
-        """Sample flight time and launch moment; arm envs whose launch is still ahead."""
+        """Derive the launch moment from the sampled flight time; arm envs whose launch is still ahead."""
         n = len(env_ids)
-        self._flight_time[env_ids] = sample_uniform(*self.cfg.flight_time_range, (n,), self.device)
         jitter = sample_uniform(-self.cfg.arrival_jitter, self.cfg.arrival_jitter, (n,), self.device)
         self._launch_time[env_ids] = self.cfg.catch_motion_time + jitter - self._flight_time[env_ids]
         self._armed[env_ids] = self._motion_time()[env_ids] <= self._launch_time[env_ids]
         self._launched[env_ids] = False
+
+    def _start_cycle(self, env_ids: Sequence[int]):
+        """Fresh throw for a new motion cycle: sample it, park the ball, reset the catch state, arm."""
+        self._sample_throw(env_ids)
+        self._write_parked_state(env_ids)
+        self.time_since_throw[env_ids] = 0.0
+        self._reset_catch_state(env_ids)
+        self._arm(env_ids)
 
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
@@ -92,31 +103,23 @@ class SyncedBallCommand(BallCommand):
         if not self._validated:
             self._validate_catch_time()
 
-        self._sample_spawn(env_ids)
-        self._write_parked_state(env_ids)
-        self.time_since_throw[env_ids] = 0.0
-        self.secured_steps[env_ids] = 0
-        self._arm(env_ids)
+        self._start_cycle(env_ids)
         # refresh so the next update does not misread the reset as a motion wrap
         self._prev_motion_time[env_ids] = self._motion_time()[env_ids]
 
     def _update_command(self):
         motion_time = self._motion_time()
 
-        # motion wrapped or was resampled mid-episode (robot teleported): re-park + re-arm
+        # motion wrapped or was resampled mid-episode (robot teleported): new throw
         restart_ids = (motion_time < self._prev_motion_time).nonzero(as_tuple=False).flatten()
         if len(restart_ids) > 0:
-            self._sample_spawn(restart_ids)
-            self._write_parked_state(restart_ids)
-            self.time_since_throw[restart_ids] = 0.0
-            self.secured_steps[restart_ids] = 0
-            self._arm(restart_ids)
+            self._start_cycle(restart_ids)
         self._prev_motion_time = motion_time.clone()
 
         # launch when the motion reaches the launch moment
         launch_ids = (self._armed & (motion_time >= self._launch_time)).nonzero(as_tuple=False).flatten()
         if len(launch_ids) > 0:
-            self._launch(launch_ids, flight_time=self._flight_time[launch_ids])
+            self._launch(launch_ids)
             self._armed[launch_ids] = False
             self._launched[launch_ids] = True
 
@@ -126,6 +129,7 @@ class SyncedBallCommand(BallCommand):
             self._write_parked_state(hold_ids)
 
         self.time_since_throw += self._launched.float() * self._env.step_dt
+        self._apply_drag(self._launched)
         self._update_catch_state(in_flight=self._launched)
 
 
