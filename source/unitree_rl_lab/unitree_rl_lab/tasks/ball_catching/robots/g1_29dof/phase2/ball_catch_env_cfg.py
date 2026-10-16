@@ -106,7 +106,7 @@ class RobotSceneCfg(InteractiveSceneCfg):
 class EventCfg:
     """Configuration for events."""
 
-    # startup (robot DR mirrored with Phase 1 for transfer integrity)
+    # startup (robot DR mirrored with Phase 1 / Unified)
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
@@ -245,26 +245,17 @@ class ObservationsCfg:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Observations for policy group."""
+        """Observations for policy group: only what the real robot has (actor contract, identical in the
+        Unified task so that ``--finetune`` can move the actor between them)."""
 
-        # (order preserved — must match Phase 1 for transfer)
-        # -- motion placeholders (zero in Phase 2, real in Phase 1) --
-        motion_command = ObsTerm(func=mdp.dummy_zeros, params={"dim": 58})
-        # -- ball state (robot-yaw frame: reproducible from VICON on hardware) --
-        ball_state = ObsTerm(func=mdp.ball_pos_vel_b)
-        ball_relative = ObsTerm(
-            func=mdp.ball_to_hands_b,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
+        # -- ball as the robot perceives it via VICON (yaw frame; noise, latency and dropouts come from the
+        #    ball command, so no ObsTerm noise here). Zeros while not visible. --
+        ball_state = ObsTerm(func=mdp.ball_perceived_pos_vel_b, params={"command_name": "ball_throw"})
+        ball_visible = ObsTerm(func=mdp.ball_visible, params={"command_name": "ball_throw"})
+        # -- ballistic interception prediction at belly height, from the perceived state --
+        ball_intercept = ObsTerm(
+            func=mdp.ball_perceived_intercept_b, params={"command_name": "ball_throw", "catch_height": 0.15}
         )
-        hand_pos = ObsTerm(
-            func=mdp.hand_pos_b,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
-            noise=Unoise(n_min=-0.02, n_max=0.02),
-        )
-        # -- ballistic interception prediction at belly height (zeros in Phase 1) --
-        ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.15})
-        # -- motion placeholder --
-        motion_anchor_ori_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
         # -- proprioception --
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
@@ -281,13 +272,14 @@ class ObservationsCfg:
 
     @configclass
     class CriticCfg(ObsGroup):
-        """Observations for critic group."""
+        """Observations for critic group (privileged; same slot layout in all three tasks)."""
 
-        # (order preserved — must match Phase 1 for transfer)
-        # -- motion placeholders (zero in Phase 2, real in Phase 1) --
+        # -- motion placeholders (zero in Phase 2, real in Phase 1 / Unified) --
         command = ObsTerm(func=mdp.dummy_zeros, params={"dim": 58})
         # -- ball state (robot-yaw frame, clean, no noise) --
         ball_state = ObsTerm(func=mdp.ball_pos_vel_b)
+        # -- whether the actor currently sees the ball --
+        ball_visible = ObsTerm(func=mdp.ball_visible, params={"command_name": "ball_throw"})
         ball_relative = ObsTerm(
             func=mdp.ball_to_hands_b,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
@@ -296,7 +288,7 @@ class ObservationsCfg:
             func=mdp.hand_pos_b,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES)},
         )
-        # -- ballistic interception prediction at belly height (zeros in Phase 1) --
+        # -- ballistic interception prediction at belly height, clean (zeros in Phase 1) --
         ball_intercept = ObsTerm(func=mdp.ball_intercept_b, params={"catch_height": 0.15})
         # -- motion placeholders --
         motion_anchor_pos_b = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
@@ -482,23 +474,29 @@ class CurriculumCfg:
             "command_name": "ball_throw",
             "start_step": 50_000,
             "end_step": 250_000,
-            "easy": {  # short, high lobs from the front straight into the arms; mjlab: 2 m / ±15° first
+            "easy": {  # short lobs from the front straight into the arms, clean perception; mjlab: 2 m / ±15° first
                 "throw_distance_range": (2.0, 2.5),
                 "throw_direction_range": (-math.radians(15.0), math.radians(15.0)),
                 "target_lateral_range": (-0.03, 0.03),
                 "target_height_range": (0.85, 0.95),
-                "flight_time_range": (1.0, 1.2),
+                "apex_height_range": (1.85, 1.95),
                 "velocity_noise": 0.0,
                 "secure_steps": 25,                # mjlab raises the required hold time over training
+                "obs_delay_steps_range": (1, 1),
+                "obs_dropout_prob": 0.0,
+                "hide_in_catch_zone_prob": 0.0,
             },
             "final": {  # = BallCommandCfg defaults
                 "throw_distance_range": (2.0, 5.0),
                 "throw_direction_range": (-math.radians(75.0), math.radians(75.0)),
                 "target_lateral_range": (-0.1, 0.1),
                 "target_height_range": (0.8, 1.05),
-                "flight_time_range": (0.8, 1.4),
+                "apex_height_range": (1.75, 2.1),
                 "velocity_noise": 0.1,
                 "secure_steps": 50,
+                "obs_delay_steps_range": (1, 3),
+                "obs_dropout_prob": 0.05,
+                "hide_in_catch_zone_prob": 0.5,
             },
         },
     )

@@ -42,7 +42,7 @@ Date: 2026-09-28.
 | M1 | Medium (✅ fixed 2026-10-16) | `mdp/commands/ball_command.py:114-130`, `phase2/ball_catch_env_cfg.py:308-316` | Pre-throw exploit: hands are rewarded near the parked ball, and the aim point is computed at launch from the robot's current pose |
 | M2 | Medium | `mdp/commands/synced_ball_command.py:117-121`, `ball_command.py:125-130` | Unified: the ball is aimed at a fixed chest point, not at the reference's (left-hand) catch pose |
 | M3 | Medium | `unified/ball_catch_env_cfg.py:42` | `CATCH_MOTION_TIME = 2.0` is unverified; the clip has no retract phase |
-| M4 | Medium | `phase2/ball_catch_env_cfg.py:235,250,271,285-288` | Transfer design: 64 policy inputs that were always informative in Phase 1 become constant zeros in Phase 2 |
+| M4 | Medium (✅ resolved 2026-10-16: actor without placeholders, transfer is Unified → Phase 2) | `phase2/ball_catch_env_cfg.py:235,250,271,285-288` | Transfer design: 64 policy inputs that were always informative in Phase 1 become constant zeros in Phase 2 |
 | L1 | Low | `agents/rsl_rl_ppo_cfg.py:47`, spec, `merge_changes.md` | Documented Hydra override syntax `--agent.policy.init_noise_std=…` is wrong |
 | L2 | Low | `assets/robots/unitree.py:20-21` | Hard-coded absolute asset paths committed |
 | L3 | Low | `phase1/ball_catch_env_cfg.py:53-65`, `.gitignore` | `*.npz` is gitignored, so a fresh clone silently falls back to the Gangnam dance (warning only) |

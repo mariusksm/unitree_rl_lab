@@ -57,7 +57,7 @@ def ball_throw_curriculum(
 ) -> float:
     """Widen the BallCommand throw distribution from ``easy`` to ``final`` values.
 
-    ``easy``/``final`` map BallCommandCfg field names (e.g. ``flight_time_range``,
+    ``easy``/``final`` map BallCommandCfg field names (e.g. ``apex_height_range``,
     ``throw_direction_range``, ``secure_steps``) to values; each field is linearly
     interpolated over training progress. New throws sample from the updated cfg
     immediately. Returns the progress in [0, 1] for logging.

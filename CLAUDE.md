@@ -33,8 +33,9 @@ Not substantial: pure formatting, typos, comments.
 
 ## Key invariants (details in the spec)
 
-- The observation slot contract spans Phase 1 / Phase 2 / Unified. Mirror every change in all tasks and in
-  both groups (policy/critic).
+- The actor observations of Phase 2 and Unified must stay identical (Unified's actor is fine-tuned in Phase 2) and
+  contain only what the real robot has: no motion reference, no hand positions, the ball only as perceived through
+  the VICON model of `BallCommand`. The critic slot layout is shared by all three tasks. Phase 1's actor is separate.
 - Ball and hand observations are in the robot's yaw frame, never in world coordinates.
 - The action scale is `UNITREE_G1_29DOF_MIMIC_ACTION_SCALE` everywhere.
 

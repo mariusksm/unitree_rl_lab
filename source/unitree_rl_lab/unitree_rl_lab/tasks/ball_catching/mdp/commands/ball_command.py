@@ -15,18 +15,29 @@ from isaaclab.utils.math import quat_apply, quat_apply_inverse, sample_uniform, 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+GRAVITY = 9.81
+
+
+def flight_time_from_apex(release_z, target_z, apex_z):
+    """Flight time (s) of a drag-free lob from ``release_z`` over ``apex_z`` down to ``target_z`` (heights in m).
+
+    Works on floats and tensors; the apex must not be below the release or the target height.
+    """
+    return ((2.0 * (apex_z - release_z) / GRAVITY) ** 0.5) + ((2.0 * (apex_z - target_z) / GRAVITY) ** 0.5)
+
 
 class BallCommand(CommandTerm):
     """Single-throw ball command: an underhand lob into a two-arm catch in front of the belly.
 
-    The throw follows the interim report (LocoMuJoCo ch. 7.6.2, mjlab ch. 9.4). On reset (per env) it is
-    sampled in the robot's heading (yaw) frame and frozen, so moving toward the thrower gains nothing:
+    The throw follows the interim report (LocoMuJoCo ch. 7.6.2, mjlab ch. 9.4) and the VICON ball recordings
+    of the mocap sessions. On reset (per env) it is sampled in the robot's heading (yaw) frame and frozen,
+    so moving toward the thrower gains nothing:
 
     - release point: ``throw_distance_range`` m from the root at azimuth ``throw_direction_range``
       around the heading, ``release_height_range`` m above the ground;
     - target point: ``target_forward_range`` / ``target_lateral_range`` in front of the root,
       ``target_height_range`` m above the ground;
-    - flight time from ``flight_time_range``.
+    - apex height from ``apex_height_range``, which fixes the flight time.
 
     The ball is parked at the release point until the launch timer expires, so the policy can settle into
     a stable stance. Then it is launched with the velocity that reaches the target after the flight time
@@ -39,6 +50,16 @@ class BallCommand(CommandTerm):
     - ``secured_steps``: consecutive control steps for which the launched ball is inside the catch box in
       front of the torso, slow relative to the root, above ``secure_min_height`` and in contact with the
       arms (both arms if ``require_both_arms``). Reaching ``cfg.secure_steps`` counts as a confirmed catch.
+
+    It also models how the robot *perceives* the ball through the VICON pipeline (actor observations only;
+    rewards, catch check and critic use the true state). Every control step the tracker produces a
+    measurement of the ball relative to the root in the yaw frame. The measurement is valid once the ball is
+    in flight for ``detection_delay_range``, unless it drops out (``obs_dropout_prob`` per step, or the whole
+    stay in the catch box with probability ``hide_in_catch_zone_prob`` per throw: the arms occlude it).
+    The measurement reaches the robot ``obs_delay_steps_range`` steps late with noise and a per-throw bias.
+    Missing measurements are bridged by ballistic prediction for ``max_coast_steps``; after that the ball
+    counts as lost. Result: ``perceived_pos_b`` / ``perceived_vel_b`` (zero while not visible) and
+    ``ball_visible``.
     """
 
     cfg: BallCommandCfg
@@ -86,6 +107,30 @@ class BallCommand(CommandTerm):
         """k = 0.5 * air density * drag coefficient * cross-section [kg/m]; drag force = -k |v| v."""
         self._ball_mass: torch.Tensor | None = None  # read at the first launch (after the startup mass DR)
         self._ball_area = math.pi * float(self.ball.cfg.spawn.radius) ** 2
+        self._in_zone = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # perception (VICON model): ring buffer of the true measurements, read with a per-throw delay
+        buffer_len = cfg.obs_delay_steps_range[1] + 1
+        self._meas_pos_b = torch.zeros(self.num_envs, buffer_len, 3, device=self.device)
+        self._meas_vel_b = torch.zeros(self.num_envs, buffer_len, 3, device=self.device)
+        self._meas_valid = torch.zeros(self.num_envs, buffer_len, dtype=torch.bool, device=self.device)
+        self._meas_index = 0
+        self._obs_delay = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._detection_delay = torch.zeros(self.num_envs, device=self.device)
+        self._obs_bias = torch.zeros(self.num_envs, 3, device=self.device)
+        self._hide_in_zone = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._steps_since_measurement = torch.full(
+            (self.num_envs,), self._NO_CONTACT, dtype=torch.long, device=self.device
+        )
+        self._dropout_left = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._last_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self._last_vel_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self.perceived_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
+        """Ball position relative to the root in the yaw frame as the robot perceives it (zero if not visible)."""
+        self.perceived_vel_b = torch.zeros(self.num_envs, 3, device=self.device)
+        """Ball velocity in the yaw frame as the robot perceives it (zero if not visible)."""
+        self.ball_visible = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """The robot has a ball estimate (fresh measurement or ballistic coasting)."""
 
         # identity quaternion (w,x,y,z) — ball orientation doesn't matter
         self._default_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
@@ -145,7 +190,10 @@ class BallCommand(CommandTerm):
         target[:, 2] = ground_z + sample_uniform(*self.cfg.target_height_range, (n,), device)
         self._target_pos[env_ids] = target
 
-        self._flight_time[env_ids] = sample_uniform(*self.cfg.flight_time_range, (n,), device)
+        # the lob's apex fixes the flight time; farther throws are then faster, as with a human thrower
+        apex = ground_z + sample_uniform(*self.cfg.apex_height_range, (n,), device)
+        apex = torch.maximum(apex, torch.maximum(spawn[:, 2], target[:, 2]) + 0.05)
+        self._flight_time[env_ids] = flight_time_from_apex(spawn[:, 2], target[:, 2], apex)
         drag_coefficient = sample_uniform(*self.cfg.drag_coefficient_range, (n,), device)
         self._drag_coeff[env_ids] = 0.5 * self.cfg.air_density * drag_coefficient * self._ball_area
 
@@ -160,11 +208,30 @@ class BallCommand(CommandTerm):
         self.time_until_throw[env_ids] = sample_uniform(*self.cfg.throw_delay_range, (len(env_ids),), self.device)
         self.time_since_throw[env_ids] = 0.0
         self._reset_catch_state(env_ids)
+        self._reset_perception(env_ids)
 
     def _reset_catch_state(self, env_ids: Sequence[int]):
         self.secured_steps[env_ids] = 0
         self.arm_contact[env_ids] = False
         self._steps_since_contact[env_ids] = self._NO_CONTACT
+
+    def _reset_perception(self, env_ids: Sequence[int]):
+        """Forget the previous throw and sample the tracker imperfections of the new one."""
+        n = len(env_ids)
+        cfg = self.cfg
+        self._meas_valid[env_ids] = False
+        self._steps_since_measurement[env_ids] = self._NO_CONTACT
+        self._dropout_left[env_ids] = 0
+        self.perceived_pos_b[env_ids] = 0.0
+        self.perceived_vel_b[env_ids] = 0.0
+        self.ball_visible[env_ids] = False
+        # the buffer is sized for the default (= largest) delay range; the curriculum only shrinks it
+        self._obs_delay[env_ids] = torch.randint(
+            cfg.obs_delay_steps_range[0], cfg.obs_delay_steps_range[1] + 1, (n,), device=self.device
+        ).clamp(max=self._meas_valid.shape[1] - 1)
+        self._detection_delay[env_ids] = sample_uniform(*cfg.detection_delay_range, (n,), self.device)
+        self._obs_bias[env_ids] = sample_uniform(-cfg.obs_pos_bias, cfg.obs_pos_bias, (n, 3), self.device)
+        self._hide_in_zone[env_ids] = torch.rand(n, device=self.device) < cfg.hide_in_catch_zone_prob
 
     def _write_parked_state(self, env_ids: Sequence[int]):
         """Hold the ball at its release point with zero velocity."""
@@ -273,6 +340,7 @@ class BallCommand(CommandTerm):
 
         self._apply_drag(in_flight)
         self._update_catch_state(in_flight)
+        self._update_perception()
 
     def _update_arm_contact(self) -> torch.Tensor:
         """Update ``arm_contact`` and return per arm whether the ball touched it within the grace window."""
@@ -303,6 +371,7 @@ class BallCommand(CommandTerm):
 
         ball_b = quat_apply_inverse(yaw_quat(self.robot.data.root_quat_w), ball_pos - root_pos)
         in_zone = torch.all((ball_b >= self._catch_zone_lo) & (ball_b <= self._catch_zone_hi), dim=-1)
+        self._in_zone = in_zone
         rel_speed = torch.norm(ball_vel - self.robot.data.root_lin_vel_w, dim=-1)
         recent_contact = self._update_arm_contact()
         touching = recent_contact.all(dim=-1) if self.cfg.require_both_arms else recent_contact.any(dim=-1)
@@ -320,6 +389,48 @@ class BallCommand(CommandTerm):
         self.metrics["hand_ball_distance"] = torch.norm(ball_pos - hands_mid, dim=-1)
         self.metrics["ball_in_catch_zone"] = in_zone.float()
         self.metrics["ball_arm_contact"] = self.arm_contact.float().mean(dim=-1)
+
+    def _update_perception(self):
+        """Update the ball estimate the robot gets from the VICON pipeline (see the class docstring)."""
+        cfg = self.cfg
+        n = self.num_envs
+        heading = yaw_quat(self.robot.data.root_quat_w)
+        pos_b = quat_apply_inverse(heading, self.ball.data.root_pos_w - self.robot.data.root_pos_w)
+        vel_b = quat_apply_inverse(heading, self.ball.data.root_lin_vel_w)
+
+        # what the tracker measures now; dropouts come in bursts of 1..obs_dropout_max_steps control steps
+        detected = self.launched & (self.time_since_throw >= self._detection_delay)
+        burst_start = (self._dropout_left == 0) & (torch.rand(n, device=self.device) < cfg.obs_dropout_prob)
+        burst_length = torch.randint(1, cfg.obs_dropout_max_steps + 1, (n,), device=self.device)
+        self._dropout_left = torch.where(burst_start, burst_length, self._dropout_left)
+        occluded = (self._dropout_left > 0) | (self._hide_in_zone & self._in_zone)
+        self._dropout_left = (self._dropout_left - 1).clamp(min=0)
+        self._meas_index = (self._meas_index + 1) % self._meas_valid.shape[1]
+        self._meas_pos_b[:, self._meas_index] = pos_b
+        self._meas_vel_b[:, self._meas_index] = vel_b
+        self._meas_valid[:, self._meas_index] = detected & ~occluded
+
+        # what reaches the robot: the measurement of ``delay`` steps ago, noisy and biased
+        env_ids = torch.arange(n, device=self.device)
+        read = (self._meas_index - self._obs_delay) % self._meas_valid.shape[1]
+        valid = self._meas_valid[env_ids, read]
+        meas_pos = self._meas_pos_b[env_ids, read] + self._obs_bias + torch.randn(n, 3, device=self.device) * cfg.obs_pos_noise_std
+        meas_vel = self._meas_vel_b[env_ids, read] + torch.randn(n, 3, device=self.device) * cfg.obs_vel_noise_std
+
+        # missing measurement: coast on the last estimate with the ballistic model
+        self._steps_since_measurement = torch.where(
+            valid, torch.zeros_like(self._steps_since_measurement), self._steps_since_measurement + 1
+        )
+        coast_t = (self._steps_since_measurement.float() * self._env.step_dt).unsqueeze(1)
+        coast_pos = self._last_pos_b + self._last_vel_b * coast_t + 0.5 * self._gravity * coast_t**2
+        coast_vel = self._last_vel_b + self._gravity * coast_t
+        self._last_pos_b = torch.where(valid.unsqueeze(1), meas_pos, self._last_pos_b)
+        self._last_vel_b = torch.where(valid.unsqueeze(1), meas_vel, self._last_vel_b)
+
+        self.ball_visible = self._steps_since_measurement <= cfg.max_coast_steps
+        visible = self.ball_visible.unsqueeze(1).float()
+        self.perceived_pos_b = torch.where(valid.unsqueeze(1), meas_pos, coast_pos) * visible
+        self.perceived_vel_b = torch.where(valid.unsqueeze(1), meas_vel, coast_vel) * visible
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         pass
@@ -343,20 +454,22 @@ class BallCommandCfg(CommandTermCfg):
     """Contact sensor on the ball, filtered against the arm links whose names start with ``left_`` / ``right_``.
     ``None`` drops the contact condition from the catch check."""
 
-    # ── throw generation: underhand lob (interim report ch. 7.6.2 / 9.4), heading frame of the robot ──
+    # ── throw generation: underhand lob, heading frame of the robot. Calibrated on 12 VICON throws of the
+    #    2026-07-06 mocap session (release ≈3.1 m from the catcher at 0.93–1.10 m, apex 1.76–2.03 m, flight
+    #    0.69–0.86 s); distance and direction ranges from mjlab (interim report ch. 9.4) ──
     throw_delay_range: tuple[float, float] = (0.5, 1.5)
     """Time (s) after reset before the ball is launched. The ball is parked at the release point in the
-    meantime so the robot can settle and see the throw origin."""
+    meantime (invisible to the actor, see the perception model) so the robot can settle."""
 
     throw_distance_range: tuple[float, float] = (2.0, 5.0)
-    """Horizontal distance (m) of the release point from the robot root (mjlab: 2 m -> 5 m)."""
+    """Horizontal distance (m) of the release point from the robot root (mjlab: 2 m -> 5 m; VICON throws ≈3.1 m)."""
 
     throw_direction_range: tuple[float, float] = (-math.radians(75.0), math.radians(75.0))
     """Azimuth (rad) of the release point around the robot heading, positive = robot's left
     (mjlab: ±15° -> ±75°)."""
 
-    release_height_range: tuple[float, float] = (1.1, 1.7)
-    """Release height (m) above the ground (LocoMuJoCo)."""
+    release_height_range: tuple[float, float] = (0.85, 1.2)
+    """Release height (m) above the ground (VICON throws: 0.93–1.10 m)."""
 
     target_forward_range: tuple[float, float] = (0.3, 0.4)
     """Aim point distance (m) in front of the robot root (LocoMuJoCo: 0.35 m)."""
@@ -367,18 +480,20 @@ class BallCommandCfg(CommandTermCfg):
     target_height_range: tuple[float, float] = (0.8, 1.05)
     """Aim point height (m) above the ground, in front of the belly (LocoMuJoCo: 0.8–1.05 m)."""
 
-    flight_time_range: tuple[float, float] = (0.8, 1.4)
-    """Flight time (s) from release to the aim point (LocoMuJoCo: 0.8–1.4 s)."""
+    apex_height_range: tuple[float, float] = (1.75, 2.1)
+    """Apex height (m) above the ground of the lob (VICON throws: 1.76–2.03 m). Sets the flight time
+    (here 0.71–1.02 s) and thereby the throw speed for the sampled distance."""
 
     velocity_noise: float = 0.1
     """Std (m/s) of Gaussian noise added per axis to the launch velocity."""
 
-    # ── air drag (matters for a light 15 cm ball: ~0.4 m shorter over a 4 m throw) ──
+    # ── air drag (matters for a light 15 cm ball: ~0.3 m shorter over a real 3 m throw) ──
     air_density: float = 1.2
     """Air density (kg/m³)."""
 
-    drag_coefficient_range: tuple[float, float] = (0.4, 0.6)
-    """Drag coefficient of the ball, sampled per throw (smooth sphere ≈ 0.47). (0, 0) disables drag."""
+    drag_coefficient_range: tuple[float, float] = (0.3, 0.45)
+    """Drag coefficient of the ball, sampled per throw. The VICON throws fit k/m = 0.030–0.040 1/m, i.e.
+    c_d ≈ 0.32–0.42 for the ∅15 cm / 112 g ball. (0, 0) disables drag."""
 
     drag_solver_iterations: int = 3
     """Fixed-point iterations for the drag-compensated launch velocity."""
@@ -411,3 +526,36 @@ class BallCommandCfg(CommandTermCfg):
     secure_steps: int = 50
     """Consecutive held steps for a confirmed catch (50 steps = 1.0 s at 50 Hz; 0.5 s counted balls
     that rolled off afterwards). Curriculum variable."""
+
+    # ── perception: how the robot gets the ball from the VICON pipeline (actor observations only).
+    #    Dropout and noise values are calibrated on the same 12 VICON throws ──
+    detection_delay_range: tuple[float, float] = (0.04, 0.12)
+    """Time (s) after the release until the pipeline reports a ball in flight (ballistic-fit window). Before
+    that, e.g. during the thrower's wind-up, the ball is not visible."""
+
+    obs_delay_steps_range: tuple[int, int] = (1, 3)
+    """Latency (control steps of 20 ms) of the ball observation, sampled per throw (VICON + MQTT + filter;
+    not measured yet). If the deploy filter predicts the latency away, set this to the residual latency."""
+
+    obs_pos_noise_std: float = 0.005
+    """Std (m) of the position noise per axis (VICON throws: 4–5 mm around a drag-fitted parabola)."""
+
+    obs_vel_noise_std: float = 0.1
+    """Std (m/s) of the velocity noise per axis (estimated by the deploy filter; assumption)."""
+
+    obs_pos_bias: float = 0.01
+    """Half range (m) of a per-throw constant position offset per axis (marker centroid, calibration)."""
+
+    obs_dropout_prob: float = 0.05
+    """Probability per control step that a dropout burst starts (VICON throws: 0.047)."""
+
+    obs_dropout_max_steps: int = 3
+    """Burst length is uniform in 1..N control steps (VICON throws: 11×1, 7×2, 2×3; 6.8 % of the steps)."""
+
+    hide_in_catch_zone_prob: float = 0.5
+    """Probability per throw that the arms occlude the ball for its whole stay in the catch box (VICON throws:
+    about a third lost the ball at the catch, the rest tracked it for another 0.25–1.2 s)."""
+
+    max_coast_steps: int = 3
+    """Missing measurements bridged by ballistic prediction (the tracker gives up after 8 frames ≈ 67 ms);
+    after that the ball counts as not visible."""

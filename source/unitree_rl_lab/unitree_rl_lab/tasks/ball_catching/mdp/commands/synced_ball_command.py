@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from isaaclab.utils import configclass
 from isaaclab.utils.math import sample_uniform
 
-from .ball_command import BallCommand, BallCommandCfg
+from .ball_command import BallCommand, BallCommandCfg, flight_time_from_apex
 from .motion_command import MotionCommand
 
 if TYPE_CHECKING:
@@ -72,7 +72,10 @@ class SyncedBallCommand(BallCommand):
     def _validate_catch_time(self):
         motion = self.motion_command
         clip_duration = motion.motion.time_step_total / float(motion.motion.fps)
-        latest_launch = self.cfg.catch_motion_time + self.cfg.arrival_jitter - self.cfg.flight_time_range[0]
+        shortest_flight = flight_time_from_apex(
+            self.cfg.release_height_range[1], self.cfg.target_height_range[1], self.cfg.apex_height_range[0]
+        )
+        latest_launch = self.cfg.catch_motion_time + self.cfg.arrival_jitter - shortest_flight
         if latest_launch >= clip_duration:
             print(
                 f"[SyncedBallCommand] WARNING: catch_motion_time ({self.cfg.catch_motion_time:.2f}s) is at/after "
@@ -95,6 +98,7 @@ class SyncedBallCommand(BallCommand):
         self._write_parked_state(env_ids)
         self.time_since_throw[env_ids] = 0.0
         self._reset_catch_state(env_ids)
+        self._reset_perception(env_ids)
         self._arm(env_ids)
 
     def _resample_command(self, env_ids: Sequence[int]):
@@ -131,6 +135,7 @@ class SyncedBallCommand(BallCommand):
         self.time_since_throw += self._launched.float() * self._env.step_dt
         self._apply_drag(self._launched)
         self._update_catch_state(in_flight=self._launched)
+        self._update_perception()
 
 
 @configclass

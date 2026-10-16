@@ -42,14 +42,15 @@
 |---|---|
 | Motion conversion (.pkl → .npz) | ✅ Fixed on 2026-09-28: the right arm was filled with left-hand finger joints (wrong GMR column selection). **All `.npz` created before that date were corrupt** and have been deleted; verify with `scripts/mimic/check_motion.py`. The training clip in `phase1/motions/` has been regenerated (see Section 5). |
 | Reference motion | ⚠️ The current clip is an **overhand** two-hand chest catch. **Underhand two-arm catch clips** are expected (access pending as of 2026-10-16); the ball tasks already target the underhand catch. |
-| Phase 1 (mimic) on real mocap data | ⚠️ No checkpoint exists (`logs/rsl_rl/…ballcatch_phase1/` is empty). The run on the corrupt clip (`2026-08-31_15-06-41`) is gone and must not be used anyway. Retrain once the underhand clips are converted. |
-| Ball and throw model | ✅ 2026-10-16: mjlab ball (∅15 cm, 112 g), underhand lob from 2–5 m, quadratic air drag with drag-compensated aim, catch = ball held in a box in front of the torso while touching both arms for 1 s. Restitution is a placeholder until the real ball is measured. |
-| Phase 2 (RL catching, transfer from Phase 1) | ⚠️ Code is in place and smoke-tested (2026-10-16), **no training run** yet. |
-| Unified task (mimic + catching simultaneously) | ⚠️ Code is in place and smoke-tested, **never trained**. `CATCH_MOTION_TIME = 2.0` fits the old overhand clip only; do not train before the underhand clips are in. |
+| Phase 1 (mimic) on real mocap data | ⚠️ No checkpoint exists (`logs/rsl_rl/…ballcatch_phase1/` is empty). The run on the corrupt clip (`2026-08-31_15-06-41`) is gone and must not be used anyway. Since 2026-10-16 Phase 1 is a clip trackability check only (actor sees the reference), **not** a warm start for Phase 2. |
+| VICON ball recordings | ✅ Found 2026-10-16: 21 takes of the 2026-07-06 session with ball CSV + retargeted `.pkl` (12 complete underhand throws), see Section 5.1. Used to calibrate throws, drag and the perception model. |
+| Ball and throw model | ✅ 2026-10-16: mjlab ball (∅15 cm, 112 g; drag fits the recordings), underhand lob from 2–5 m released at 0.85–1.2 m with apex 1.75–2.1 m, quadratic air drag with drag-compensated aim, catch = ball held in a box in front of the torso while touching both arms for 1 s. Restitution is a placeholder until the real ball is measured. |
+| Actor observations | ✅ 2026-10-16: deployable actor contract in Phase 2 and Unified (perceived ball + visibility flag + intercept + proprioception, no reference, no hand positions). Ball perceived through a VICON model (detection delay, latency, noise, dropout bursts, occlusion in the catch box, coasting). |
+| Phase 2 (RL catching, stage B) | ⚠️ Code is in place and smoke-tested (2026-10-16), **no training run** yet. Fine-tuning from a Unified actor tested. |
+| Unified task (mimic + catching simultaneously, stage A) | ⚠️ Code is in place and smoke-tested, **never trained**. `CATCH_MOTION_TIME = 2.0` fits the old overhand clip only; do not train before the underhand clips are in. |
 | Catch success in simulation | ❌ not yet demonstrated |
 | Hands (Dex3 / mount) in the model | ❌ not present (intentional, see proposal) |
-| Noise / latency / dropout on ball observations | ❌ not implemented |
-| Sim2Sim (MuJoCo), deployment, live VICON pipeline | ❌ not started for the ball task (`deploy/` is unmodified Unitree upstream) |
+| Sim2Sim (MuJoCo), deployment, live VICON pipeline | ❌ not started for the ball task (`deploy/` is unmodified Unitree upstream; the C++ side has none of the ball observation terms yet) |
 
 ## 3. Repository Layout (relevant parts)
 
@@ -101,12 +102,12 @@ context/                               Project background + this spec (see Secti
 ./unitree_rl_lab.sh -p --task Unitree-G1-29dof-BallCatch-Phase1  # play (loads latest run)
 # Phase 2 from scratch (std 1.0)
 ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Phase2
-# Phase 2 fine-tuned from a Phase 1 checkpoint: loads the actor only, sets the noise std,
-# logs into the Phase 2 folder (NOT into the Phase 1 folder)
+./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Unified # unified = stage A (from scratch, std 1.0)
+# Stage B: Phase 2 fine-tuned from a Unified checkpoint: loads the actor only, sets the noise std,
+# logs into the Phase 2 folder (NOT into the Unified folder). Phase 1 checkpoints do not fit (other actor input).
 ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Phase2 --resume \
-  --resume_experiment unitree_g1_29dof_ballcatch_phase1 --load_run <timestamp> --checkpoint model_<N>.pt \
+  --resume_experiment unitree_g1_29dof_ballcatch_unified --load_run <timestamp> --checkpoint model_<N>.pt \
   --finetune --finetune_std 0.2
-./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Unified # unified (from scratch, std 1.0)
 # Smoke test: --num_envs 16 --max_iterations 2 --experiment_name /tmp/smoke  (absolute path keeps logs/ clean)
 # Hydra overrides are passed without dashes, e.g. agent.policy.init_noise_std=1.0
 tensorboard --logdir logs/rsl_rl/
@@ -159,7 +160,42 @@ BC/robots/g1_29dof/phase1/motions/*.npz   (the alphabetically first file is pick
   - ball position offset or delayed relative to the robot
   - the ball is only usable in few recordings
 
-  The mocap ball trajectory is **not used in training**; the ball is purely synthetic there.
+  The ball in training is synthetic; its distributions are calibrated on the VICON ball recordings (5.1).
+
+### 5.1 VICON ball recordings
+
+- The training `.pkl` files contain **no ball** (all 156 in `pkl_isaac_lab_*`: only `fps`, `root_pos`, `root_rot`,
+  `dof_pos`). The ball is recorded separately by the VICON tracker script (report ch. 4.2.4) as `samples.csv` per take.
+- The retargeting group's GMR fork (`../GMR_for_fbx_files`, branch `fbx`) links them: `third_party/extract_pkl_and_csv.py`
+  keeps `tracked`/`acquired` rows, fills missing VICON frames by **linear interpolation (copying the previous
+  timestamp, so interpolated rows show up as duplicate timestamps)**, drops takes with too large frame gaps or too
+  short flight. Output for the 2026-07-06 session: `recordings/two_results_ver2.7z` with `results/` (unscaled, metres)
+  and `results_scaled/` (positions ×0.9), each 21 × (`<n>_merged_filtered.csv` + `.pkl`). No 7z tool is installed
+  on Marius' machine; the archive was read with a stdlib-only reader.
+- CSV columns: `session_id, frame_index` (VICON frame, ≈120 Hz)`, timestamp_s` (workstation)`, elapsed_s, speed_m_s,
+  event, x_m, y_m, z_m` (VICON world). Ball and retargeted pelvis share the world frame; the catcher's pelvis stands at
+  ≈(0.9, −0.55) facing +x, the thrower at x ≈ 4.5 m. Time alignment between CSV and `.pkl` is only by take (the CSV
+  starts when the tracker acquires the ball).
+- Usable: takes 17, 18, 19, 21, 24, 25, 28, 29, 30, 33, 35, 40 (complete underhand throws). Takes 26, 31, 32, 36 lose
+  the ball near the apex; takes 3–15 are a different setup without a complete throw (catcher at x ≈ −0.7…−1.1,
+  ball mostly static).
+- Measured on the 12 complete throws (unscaled `results/`):
+
+  | Quantity | Value |
+  |---|---|
+  | Release distance from the catcher's pelvis | 3.1 m (2.8–3.3) |
+  | Release height | 1.03 m (0.93–1.10) |
+  | Apex height | 1.9 m (1.76–2.03) |
+  | Flight time release → hands | 0.77 s (0.69–0.86) |
+  | Release speed / arrival speed | 5.2 m/s / 4.4 m/s |
+  | Arrival relative to the pelvis | 0.5–0.7 m in front, 0.3–0.8 m above (human catcher) |
+  | Air drag k/m (quadratic) | 0.035 1/m (0.030–0.040); fit residual 1.2 → 0.65 cm with drag |
+  | Position noise | ≈4–5 mm per axis |
+  | Tracked before release (wind-up) | 0.7–1.7 s, ball moves 0.5–0.9 m |
+  | Control steps (20 ms) in flight without a measurement | 6.8 %, in runs of 1–3 steps (11×1, 7×2, 2×3) |
+  | After the catch | about a third lose the ball at once, the rest track it for 0.25–1.2 s |
+
+  The k/m value matches a light ∅15 cm ball (112 g with c_d ≈ 0.37), not ∅10 cm / 150 g (0.015) or a football (0.025).
 
 ## 6. Common Task Base (all three ball tasks)
 
@@ -169,44 +205,49 @@ BC/robots/g1_29dof/phase1/motions/*.npz   (the alphabetically first file is pick
 | Physics / control | `sim.dt = 0.005`, `decimation = 4`, i.e. **50 Hz policy** |
 | Envs | 4096, spacing 2.5 m, flat plane |
 | Actions | `JointPositionAction`, all joints, `scale = UNITREE_G1_29DOF_MIMIC_ACTION_SCALE` (per joint 0.25·effort/stiffness), `use_default_offset=True` |
-| Ball | `RigidObject` sphere **r = 0.075 m (∅15 cm), 0.112 kg** (= mjlab ball, interim report ch. 9.2), friction 0.5, restitution 0.4 (placeholder, real ball not measured). Startup DR: friction 0.3–0.8, restitution 0.2–0.6, mass ±0.015 kg. Quadratic air drag F = −½ρ c_d A \|v\| v as external force during the flight, c_d 0.4–0.6 per throw (Phase 2 and Unified only) |
+| Ball | `RigidObject` sphere **r = 0.075 m (∅15 cm), 0.112 kg** (= mjlab ball, interim report ch. 9.2), friction 0.5, restitution 0.4 (placeholder, real ball not measured). Startup DR: friction 0.3–0.8, restitution 0.2–0.6, mass ±0.015 kg. Quadratic air drag F = −½ρ c_d A \|v\| v as external force during the flight, c_d 0.3–0.45 per throw (k/m 0.028–0.043 1/m, fitted on the VICON throws: 0.030–0.040) (Phase 2 and Unified only) |
 | "Hands" | `HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]` (the rubber hand collider is merged into these bodies). Midpoint = reach target of the ball rewards |
 | Contact sensors | `contact_forces`: `Robot/.*` (whole body, required by `undesired_contacts`). `ball_contact` (Phase 2, Unified): sensor body = ball, filtered against the 8 arm links `{left,right}_{elbow,wrist_roll,wrist_pitch,wrist_yaw}_link`, history 4 |
 | Observation history | 5 frames (policy and critic) |
 | PPO | Actor/critic `[512,256,128]` ELU, lr 1e-3 adaptive, γ 0.99, λ 0.95, 24 steps/env/iteration, max 30k iterations, save every 500, `empirical_normalization=False` |
 
-### 6.1 Observation Layout (contract across tasks)
+### 6.1 Observation Layout (contracts)
 
-All three tasks share **the same slot order and dimensions**. Where a task has no value for a slot, it
-uses `dummy_zeros`. This keeps checkpoints shape-compatible across tasks.
+Since 2026-10-16 there are two contracts:
+- **Actor contract (Phase 2 = Unified):** identical terms, no placeholders. `--finetune` moves an actor between
+  them (Unified = stage A, Phase 2 = stage B). Only what the real robot has.
+- **Critic layout (all three tasks):** same slots and dimensions, `dummy_zeros` where a task has no value. Not
+  needed for `--finetune` (which loads the actor only), kept for uniformity.
 
-**Policy** (per frame, ×5 history):
+Phase 1 is outside the actor contract: without a ball, only the reference tells its actor where in the clip it is.
 
-| # | Slot | Dim | Phase 1 | Phase 2 | Unified |
-|---|---|---|---|---|---|
-| 1 | `motion_command` (reference joint_pos+vel) | 58 | real | 0 | real |
-| 2 | `ball_state` = `ball_pos_vel_b` | 6 | 0 | real | real |
-| 3 | `ball_relative` = `ball_to_hands_b` | 3 | 0 | real | real |
-| 4 | `hand_pos` = `hand_pos_b` | 6 | 0 | real | real |
-| 5 | `ball_intercept` = `ball_intercept_b` | 3 | 0 | real | real |
-| 6 | `motion_anchor_ori_b` | 6 | real | 0 | real |
-| 7 | `base_ang_vel` (×0.2, noise ±0.2) | 3 | real | real | real |
-| 8 | `projected_gravity` | 3 | real | real | real |
-| 9 | `joint_pos_rel` | 29 | real | real | real |
-| 10 | `joint_vel_rel` (×0.05, noise ±1.5) | 29 | real | real | real |
-| 11 | `last_action` | 29 | real | real | real |
+**Actor, Phase 2 and Unified** (per frame, ×5 history → **103 per frame, 515 in total**):
 
-By my own count this is **175 dims per frame**. `context/changes/merge_changes.md` states 174; verify the
-actual size when loading (`Actor Model: ... input_dim`).
+| # | Slot | Dim | Source |
+|---|---|---|---|
+| 1 | `ball_state` = `ball_perceived_pos_vel_b` | 6 | perceived ball pos (relative to the root) + vel, yaw frame; zero while not visible |
+| 2 | `ball_visible` | 1 | 1 while the robot has a ball estimate (measured or coasted) |
+| 3 | `ball_intercept` = `ball_perceived_intercept_b` | 3 | ballistic crossing of the plane 0.15 m above the root, from the perceived state |
+| 4 | `base_ang_vel` (×0.2, noise ±0.2) | 3 | |
+| 5 | `projected_gravity` (noise ±0.05) | 3 | |
+| 6 | `joint_pos_rel` (noise ±0.01) | 29 | |
+| 7 | `joint_vel_rel` (×0.05, noise ±1.5) | 29 | |
+| 8 | `last_action` | 29 | |
 
-**Critic** (clean, no noise): `command`(58) · `ball_state`(6) · `ball_relative`(3) · `hand_pos`(6) ·
-`ball_intercept`(3) · `motion_anchor_pos_b`(3) · `motion_anchor_ori_b`(6) · `body_pos`(42) · `body_ori`(84) ·
-`base_lin_vel`(3) · `base_ang_vel`(3) · `projected_gravity`(3) · `joint_pos`(29) · `joint_vel`(29) ·
-`actions`(29). That is **307 per frame**. The tasks fill the slots with the same pattern as the policy.
+**Actor, Phase 1** (157 per frame, 785 in total): `motion_command` (58) · `motion_anchor_ori_b` (6, noise ±0.05) ·
+the five proprioception terms above.
+
+**Critic** (clean, no noise; 308 per frame, 1540 in total): `command`(58) · `ball_state`(6) · `ball_visible`(1) ·
+`ball_relative`(3) · `hand_pos`(6) · `ball_intercept`(3) · `motion_anchor_pos_b`(3) · `motion_anchor_ori_b`(6) ·
+`body_pos`(42) · `body_ori`(84) · `base_lin_vel`(3) · `base_ang_vel`(3) · `projected_gravity`(3) · `joint_pos`(29) ·
+`joint_vel`(29) · `actions`(29). Phase 1 has zeros in the ball slots, Phase 2 in the motion slots, Unified none.
+`ball_state` and `ball_intercept` are the true state here; `ball_visible` is what the actor sees.
 
 **Conventions:**
+- The ball perception (VICON model) lives in `BallCommand` (Section 7.2), so all actor ball terms see one consistent
+  estimate. Give them **no** `ObsTerm` noise.
 - `ball_intercept` uses the catch plane **0.15 m above the root** (belly height of the underhand catch; was 0.35 m
-  until 2026-10-16). It is part of the contract: change it in all tasks and both groups at once.
+  until 2026-10-16). Change it in all ball tasks and both groups at once.
 - All ball and hand observations are expressed in the **robot's yaw frame**, relative to the root.
 - They contain no world coordinates; otherwise per-env origins would leak into the observations.
 - This is the same frame that will be computed from VICON on the hardware.
@@ -225,23 +266,28 @@ actual size when loading (`Actor Model: ... input_dim`).
 - Terminations: `anchor_pos` (z > 0.25), `anchor_ori` (0.8), `ee_body_pos` (z > 0.25 at ankles and wrists), timeout.
 - DR: material 0.3–1.6 / 0.3–1.2 / restitution 0–0.5, default joint offset ±0.01, torso CoM, torso mass −1…+3 kg,
   aggressive 6-DoF pushes.
-- No ball in the scene; ball slots are zeros. Runner: `BasePPORunnerCfg` (std 1.0).
+- No ball in the scene. The actor sees the reference (`motion_command`, `motion_anchor_ori_b`) and proprioception,
+  no ball slots; the critic keeps zeros in its ball slots. Runner: `BasePPORunnerCfg` (std 1.0).
+- Role since 2026-10-16: **trackability check for new clips** (can the robot physically follow the reference?). It is
+  no warm start: its actor input (785) differs from the Phase 2 / Unified actor (515), and `--finetune` fails loudly.
 
 ### 7.2 Phase 2: `Unitree-G1-29dof-BallCatch-Phase2` (RL catching)
 
 - Standing and catching without a motion reference. Reset: root randomized ±0.5 m, **yaw ±π**, joints at the
   default pose (`reset_joints_by_scale` scales the zero default velocity, so joint velocities are not randomized).
-- `BallCommand` (one throw per episode): **underhand lob into a two-arm catch in front of the belly**, following the
-  interim report (LocoMuJoCo ch. 7.6.2 for heights and flight time, mjlab ch. 9.4 for distance and direction).
-  The throw is sampled at reset in the robot's heading frame and **frozen** (walking toward the thrower gains nothing):
+- `BallCommand` (one throw per episode): **underhand lob into a two-arm catch in front of the belly**. Distance and
+  direction follow mjlab (report ch. 9.4), the aim point LocoMuJoCo (ch. 7.6.2), release height and apex the VICON
+  recordings (Section 5.1). The throw is sampled at reset in the robot's heading frame and **frozen** (walking toward
+  the thrower gains nothing):
   1. **Park** the ball at the release point: horizontal distance **2–5 m** from the root, azimuth **±75°** around the
-     heading, **1.1–1.7 m above the ground**.
+     heading, **0.85–1.2 m above the ground**.
   2. After `throw_delay_range` of 0.5–1.5 s, launch it toward the aim point:
      - **0.3–0.4 m in front of the root, lateral ±0.1 m, 0.8–1.05 m above the ground** (belly height)
-     - flight time **0.8–1.4 s**, velocity noise σ 0.1 m/s
+     - apex **1.75–2.1 m above the ground**; it fixes the flight time (0.71–1.02 s; recordings 0.69–0.86 s), so farther
+       throws are faster. Velocity noise σ 0.1 m/s.
      - the launch velocity compensates the air drag (fixed-point iteration over the drag displacement, 16 trapezoid
-       nodes). Without compensation the 15 cm ball falls 0.4 m short on average; with it, the PhysX flight passes the
-       aim point within 2 cm on average, at most 4.5 cm (probe 2026-10-16).
+       nodes). Without compensation the 15 cm ball falls ≈0.35 m short on average; with it, the PhysX flight passes
+       the aim point within 2 cm on average, at most 4.5 cm (probe 2026-10-16, with the old c_d range).
   3. The ball counts as **caught** when, for `secure_steps` = **50 consecutive steps (1.0 s)**, all of the following
      hold (counter `secured_steps`):
      - ball inside the catch box x 0–0.6 m, y ±0.35 m, z −0.3…+0.5 m (root yaw frame)
@@ -250,6 +296,15 @@ actual size when loading (`Actor Model: ... input_dim`).
 
      0.5 s counted balls that rolled off afterwards; with 1.0 s every confirmed catch in a static-cradle probe was
      still held 1 s later.
+  4. **Perception (actor only)**, calibrated on the VICON recordings: every control step the tracker measures the ball
+     relative to the root (yaw frame). A measurement is valid once the ball has flown for `detection_delay_range`
+     (0.04–0.12 s; before that, e.g. during the wind-up, the ball is invisible), unless a **dropout burst** runs
+     (starts with p 0.05 per step, lasts 1–3 steps) or the arms occlude it (`hide_in_catch_zone_prob` 0.5 per throw:
+     invisible for its whole stay in the catch box). Measurements arrive `obs_delay_steps_range` (1–3) steps late
+     with noise (5 mm, 0.1 m/s) and a per-throw bias (±1 cm). Gaps are bridged by ballistic prediction for 3 steps;
+     after that the ball counts as not visible (perceived state 0, `ball_visible` 0). Probe (2026-10-16): in flight
+     88.8 % fresh measurements, 8.6 % coasted, 2.6 % not visible; zero noise and fixed delay reproduce the true
+     state of 2 steps earlier exactly.
 - Rewards (mjlab ch. 9.4.1: small proximity < larger contact < largest retention reward; all ball terms are **zero
   before the launch**):
 
@@ -268,24 +323,29 @@ actual size when loading (`Actor Model: ... input_dim`).
   `ball_dropped` (z < 0.1), `ball_missed` (horizontal > 6 m, beyond the 5 m release distance).
 - Curriculum:
   - Throw distribution from easy to final over steps 50k → 250k. Easy: 2.0–2.5 m, ±15°, lateral ±0.03 m, aim height
-    0.85–0.95 m, flight time 1.0–1.2 s, no velocity noise, `secure_steps` 25. Final = `BallCommandCfg` defaults
-    (above), `secure_steps` 50.
+    0.85–0.95 m, apex 1.85–1.95 m, no velocity noise, `secure_steps` 25, and clean perception (delay 1 step, no
+    dropouts, no occlusion). Final = `BallCommandCfg` defaults (above), `secure_steps` 50.
   - Posture tapers over steps 100k → 400k: `base_height` −10 → −2.5, `flat_orientation` −5 → −1,
     arm deviation −0.1 → −0.02.
   - The play cfg sets `curriculum=None` and therefore uses the final distribution.
-- Runner: `BasePPORunnerCfg` (std 1.0, from scratch). Fine-tuning from Phase 1 is done on the command line
-  (`--resume --resume_experiment … --finetune --finetune_std 0.2`, see Section 4): `init_noise_std` in a runner
-  config has no effect after `--resume`, because the std is part of the loaded actor state.
+- Runner: `BasePPORunnerCfg` (std 1.0, from scratch). As stage B it is fine-tuned from a **Unified** actor on the
+  command line (`--resume --resume_experiment unitree_g1_29dof_ballcatch_unified … --finetune --finetune_std 0.2`,
+  see Section 4; tested with a smoke checkpoint): `init_noise_std` in a runner config has no effect after `--resume`,
+  because the std is part of the loaded actor state.
 
-### 7.3 Unified: `Unitree-G1-29dof-BallCatch-Unified` (recommended direction)
+### 7.3 Unified: `Unitree-G1-29dof-BallCatch-Unified` (stage A, recommended direction)
 
-- DeepMimic style: Phase 1 tracking rewards **and** Phase 2 ball rewards at the same time. No dummy slots,
-  **no** posture crutches and no robot reset events (the `MotionCommand` owns resets).
+- DeepMimic style: Phase 1 tracking rewards **and** Phase 2 ball rewards at the same time. **No** posture crutches
+  and no robot reset events (the `MotionCommand` owns resets).
+- The actor has the Phase 2 actor contract (perceived ball, no reference): the reference only enters the rewards,
+  terminations and the critic, so the policy has to time the catch from the ball, as on the real robot. This makes it
+  stage A of the mjlab recipe; stage B = fine-tuning its actor in Phase 2 (Section 4).
 - `SyncedBallCommand`: launch at `launch_time = CATCH_MOTION_TIME ± 0.05 s − flight_time`, so that ball
   arrival coincides with the catch frame of the mocap.
-  - Same ball, throw geometry, drag, catch check, ball rewards, `undesired_contacts` exclusions and throw curriculum
-    as Phase 2 (Section 7.2). The aim point is the configured belly target, **not** the reference catch pose (M2 open).
-  - With flight times of 0.8–1.4 s and `CATCH_MOTION_TIME = 2.0` the launch falls at 0.55–1.25 s, inside the
+  - Same ball, throw geometry, drag, perception, catch check, ball rewards, `undesired_contacts` exclusions and throw
+    curriculum as Phase 2 (Section 7.2). The aim point is the configured belly target, **not** the reference catch
+    pose (M2 open).
+  - With flight times of 0.71–1.02 s and `CATCH_MOTION_TIME = 2.0` the launch falls at ≈0.95–1.35 s, inside the
     standing phase of the current clip.
   - If an episode starts after the launch window, no throw happens; the episode trains pure tracking.
   - When the clip wraps or is resampled, a fresh throw is sampled, the ball is re-parked and re-armed.
@@ -296,8 +356,8 @@ actual size when loading (`Actor Model: ... input_dim`).
   - Throw distribution 50k → 250k.
   - Body tracking tapers (pos/ori 1.0 → 0.4, vel 1.0 → 0.5) over 150k → 500k.
   - Anchor tracking keeps full weight.
-- 6-DoF pushes every 2–5 s. Runner: `BasePPORunnerCfg` (std 1.0).
-  Optional warm start: `--resume --resume_experiment unitree_g1_29dof_ballcatch_phase1 --load_run … --finetune --finetune_std 0.3`.
+- 6-DoF pushes every 2–5 s. Runner: `BasePPORunnerCfg` (std 1.0), from scratch (Phase 1 checkpoints do not fit
+  the actor).
 - **Before serious training:**
   - Bring in the underhand two-arm clips. The current overhand chest clip conflicts with the belly target
     (tracking pulls the hands to the chest, the ball arrives at the belly).
@@ -310,9 +370,9 @@ actual size when loading (`Actor Model: ... input_dim`).
 | File | Contents |
 |---|---|
 | `commands/motion_command.py` | `MotionLoader`, `MotionCommand(Cfg)`: reference states, adaptive bin sampling, metrics `error_*`, `sampling_*` |
-| `commands/ball_command.py` | `BallCommand(Cfg)`: throw sampling (frozen at reset), parking, drag-compensated launch, air drag, catch check, `secured_steps`, `arm_contact`, `launched`. Metrics `ball_height`, `ball_secured_time`, `hand_ball_distance`, `ball_in_catch_zone`, `ball_arm_contact`. Helpers `_sample_throw`, `_write_parked_state`, `_launch`, `_solve_launch_velocity`, `_drag_displacement`, `_apply_drag`, `_update_arm_contact`, `_update_catch_state` |
+| `commands/ball_command.py` | `flight_time_from_apex`. `BallCommand(Cfg)`: throw sampling (frozen at reset), parking, drag-compensated launch, air drag, catch check, perception model, `secured_steps`, `arm_contact`, `launched`, `perceived_pos_b`, `perceived_vel_b`, `ball_visible`. Metrics `ball_height`, `ball_secured_time`, `hand_ball_distance`, `ball_in_catch_zone`, `ball_arm_contact`. Helpers `_sample_throw`, `_write_parked_state`, `_launch`, `_solve_launch_velocity`, `_drag_displacement`, `_apply_drag`, `_update_arm_contact`, `_update_catch_state`, `_reset_perception`, `_update_perception` |
 | `commands/synced_ball_command.py` | `SyncedBallCommand(Cfg)`: launch coupled to the motion phase (Unified only); `_start_cycle` = new throw per motion cycle |
-| `observations.py` | Motion obs (`motion_anchor_*`, `robot_body_*`), ball obs (`ball_pos_vel_b`, `ball_to_hands_b`, `ball_intercept_b`, `hand_pos_b`), `dummy_zeros` |
+| `observations.py` | Motion obs (`motion_anchor_*`, `robot_body_*`), true ball obs for the critic (`ball_pos_vel_b`, `ball_to_hands_b`, `ball_intercept_b`, `hand_pos_b`), perceived ball obs for the actor (`ball_perceived_pos_vel_b`, `ball_visible`, `ball_perceived_intercept_b`), shared `_ballistic_intercept`, `dummy_zeros` |
 | `rewards.py` | Tracking exp rewards, `energy`, `ball_interception_exp` (eq. 9.1, distance-only without `std_vel`), `ball_arm_contact`, `ball_caught_bonus`, `ball_secured`, `ball_height_penalty` |
 | `terminations.py` | Tracking terminations (`bad_anchor_*`, `bad_motion_body_pos*`), `ball_caught`, `ball_below_height`, `ball_far_from_robot` |
 | `events.py` | `randomize_joint_default_pos`, `randomize_rigid_body_com` |
@@ -321,12 +381,15 @@ actual size when loading (`Actor Model: ... input_dim`).
 `ball_intercept_b`: intersection of the (descending) ball parabola with the plane 0.15 m above the root.
 Output `[x_b, y_b, t_go]`, with `t_go` clamped to [0, 3] s. If the plane is never reached, `t_go = 0` and the
 current position is returned. It ignores air drag on purpose (same formula on hardware), so early in the flight it
-predicts the 15 cm ball up to ~0.4 m too far; the error shrinks with `t_go`.
+predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The actor variant
+`ball_perceived_intercept_b` applies the same function to the perceived state and is zero while the ball is not visible.
 
 ## 9. Invariants & Pitfalls
 
-1. **Observation contract:** If you change a slot in one task (order, dim, scale, noise), mirror it in *all*
-   tasks and *both* groups. Otherwise transfer and warm starts break and old checkpoints become incompatible.
+1. **Observation contracts (Section 6.1):** the actor terms of Phase 2 and Unified must stay identical (order, dim,
+   scale, noise), otherwise `--finetune` from Unified into Phase 2 breaks. The critic slot layout is shared by all
+   three tasks; mirror critic changes there too. Phase 1's actor is separate (reference instead of ball).
+   Checkpoints from before 2026-10-16 (actor 875) do not fit any task anymore.
 2. **Action scale** is `UNITREE_G1_29DOF_MIMIC_ACTION_SCALE` in all tasks. A future deploy config must use the same.
 3. Isaac Lab multiplies rewards by `weight × dt` (dt = 0.02). One-time bonuses are therefore weighted as `value / dt`.
 4. Isaac Lab step order: terminations → rewards → reset → command update. Command thresholds and termination
@@ -348,6 +411,8 @@ predicts the 15 cm ball up to ~0.4 m too far; the error shrinks with `t_go`.
 13. `ball_throw_curriculum` sets `BallCommandCfg` fields with `setattr`; a misspelled key is silently ignored.
 14. `ball_missed` (`max_distance`) must exceed the largest release distance, otherwise it fires while the ball is
     still parked.
+15. The perception ring buffer is sized from the default `obs_delay_steps_range` (the largest delay). The curriculum
+    may only shrink the delay range; larger delays are clipped to the buffer.
 
 ## 10. Training History & Artifacts
 
@@ -366,39 +431,39 @@ after the 2026-10-16 changes were logged outside the repo.
 
 ## 11. Open Items & Next Steps (prioritized)
 
-1. **Train Phase 2 from scratch** as the baseline for the new ball, throw and catch definition (needs no new clips).
-   Watch `Episode_Termination/ball_caught` vs. `ball_dropped` / `ball_missed` / `bad_orientation` and
+1. **Train Phase 2 from scratch** as the baseline for the new ball, throw, catch and perception definition (needs no
+   new clips). Watch `Episode_Termination/ball_caught` vs. `ball_dropped` / `ball_missed` / `bad_orientation` and
    `Curriculum/ball_throws`.
 2. **Measure the real ball:** diameter, mass, restitution (drop test, e = √(h_bounce / h_drop)) and friction. Replace
-   the placeholder restitution 0.4 / DR 0.2–0.6 and confirm the mjlab values (∅15 cm, 112 g). Static probes on
-   2026-10-16 showed that restitution decides how many throws stay in the arms (static cradle: 8/45 at e = 0.6,
-   21/45 at e = 0.3, 32/45 at e = 0), and that a ∅10 cm ball falls through the forearm cradle.
-3. **Underhand two-arm clips** (access pending): convert them (ask for ≥ 50 Hz retargeting output), check the
-   legs (knee / pelvis artefacts, Section 5), determine `CATCH_MOTION_TIME` and the reference catch point, aim
-   Unified at the reference catch point (M2). Then retrain Phase 1 and train Unified, with Phase 2 as A/B comparison
-   (fine-tuned from Phase 1 vs. from scratch).
-4. Fit the throw distribution to real VICON throws (`samples.csv` / `parabolas.csv` of the mocap sessions). The
-   current values come from the interim report (LocoMuJoCo ch. 7.6.2, mjlab ch. 9.4).
-5. Remaining review findings M2–M4 and L1–L5 in `context/REVIEW.md` (C1, H1, H2, M1 are fixed).
-6. Establish a catch-rate evaluation (final throw distribution, observation noise on) and decide which line (two
-   phases or Unified) to pursue.
+   the placeholder restitution 0.4 / DR 0.2–0.6 and confirm the mjlab values (∅15 cm, 112 g; the drag of the
+   recorded throws fits such a ball). Static probes on 2026-10-16 showed that restitution decides how many throws
+   stay in the arms (static cradle: 8/45 at e = 0.6, 21/45 at e = 0.3, 32/45 at e = 0), and that a ∅10 cm ball
+   falls through the forearm cradle.
+3. **Underhand two-arm clips** (access pending): convert them (ask for ≥ 50 Hz retargeting output and the matching
+   ball CSVs), check the legs (knee / pelvis artefacts, Section 5), determine `CATCH_MOTION_TIME` and the reference
+   catch point (with ball CSVs: from the recorded throw), aim Unified at the reference catch point (M2). Then train
+   Unified (stage A) and fine-tune its actor in Phase 2 (stage B), A/B against Phase 2 from scratch.
+4. Refine the throw and perception calibration with the new session's ball CSVs (Section 5.1 used 12 throws of
+   2026-07-06 from one thrower at a fixed distance). Measure the latency of the live pipeline (VICON → MQTT →
+   robot) to replace the assumed 1–3 steps.
+5. Remaining review findings M2, M3 and L1–L5 in `context/REVIEW.md` (C1, H1, H2, M1, M4 are resolved).
+6. Establish a catch-rate evaluation (final throw distribution, perception model on) and decide which line (Phase 2
+   from scratch or Unified → Phase 2) to pursue.
 7. End effector: the rubber hands (collider merged into `*_wrist_yaw_link`, 0.17 kg) stay for now. Decide what is
    mounted on the real robot (Inspire FTP hand ≈ 0.88 kg per hand per the `unitree_ros` URDF, or the 3D-printed
    mount from the proposal) and model its mass and collision geometry.
-8. Deployable observations: remove `motion_command` / `motion_anchor_ori_b` (a thrower cannot sync to the clip clock)
-   and `hand_pos` / `ball_relative` (forward kinematics in C++) from the actor, add a ball-visibility flag and show
-   the ball only after the launch.
-9. Sim2real hardening:
-   - noise, 1–3 step delay and dropout on ball observations (compute `ball_intercept` from the corrupted state)
+8. Sim2real hardening:
    - actuator delay as DR
    - states the real robot sees: long pre-throw waiting, holding after the catch, standing after a miss
    - no-walking constraint (foot displacement) and a fall penalty
-10. Sim2Sim in MuJoCo (scene with a ball and a fake VICON publisher), ONNX export, deploy config and C++ ball
-    observation terms. Build the live VICON pipeline:
-    - robot base tracking
-    - ballistic filter with air drag and latency forward prediction
-    - **identical** yaw-frame math to `observations.py`
-11. Select more / better clips (`pkl_isaac_lab_*`). `MotionCommand` currently loads only **one** file.
+9. Sim2Sim in MuJoCo (scene with a ball and a fake VICON publisher), ONNX export, deploy config and C++ ball
+   observation terms (`ball_state`, `ball_visible`, `ball_intercept`). Build the live VICON pipeline so that it
+   produces what the perception model assumes:
+   - robot base tracking; ball relative to the root in the yaw frame (**identical** math to `observations.py`)
+   - release detection (ballistic fit) before the ball becomes visible; nothing during the wind-up
+   - ballistic filter with air drag, bridging gaps of up to 3 control steps, then "not visible"
+   - latency forward prediction (then shrink `obs_delay_steps_range` to the residual latency)
+10. Select more / better clips (`pkl_isaac_lab_*`). `MotionCommand` currently loads only **one** file.
 
 ## 12. Context Documents
 
@@ -414,10 +479,12 @@ after the 2026-10-16 changes were logged outside the repo.
 - `changes/2026-10-16-underhand-catch-p0.md`: P0 of the 2026-10-16 analysis (mjlab ball, underhand lob, air drag,
   arm-contact catch detection), with the report basis, probe results and open placeholders. New change documents
   are named `<date>-<title>-<part>.md`.
+- `changes/2026-10-16-deployable-observations-p1.md`: P1 items 5 and 7 (deployable actor observations, VICON
+  perception model) and the calibration on the VICON ball recordings (Section 5.1).
 - `changes/LATENT_mimic_adjustments.md`: LATENT ideas for the mimic stage (not all adopted yet)
 - `guides/debug_instructions.md`: older debug guide (partly outdated, e.g. debug prints were removed)
 - `guides/replay_guide.md`: step-by-step guide (German) to convert, check (`check_motion.py`) and replay a mocap clip
-- `REVIEW.md`: code review of the ball-catching work (findings C1–L5; C1, H1, H2, M1 fixed)
+- `REVIEW.md`: code review of the ball-catching work (findings C1–L5; C1, H1, H2, M1, M4 resolved)
 
 In case of conflicts: **code > this spec > other context documents.**
 
@@ -554,3 +621,34 @@ In case of conflicts: **code > this spec > other context documents.**
   basis per parameter, problem/change per item, probe and validation results, placeholders). Naming scheme for new
   change documents: `<date>-<title>-<part>.md`.
 - Spec section 12 updated.
+
+### 2026-10-16: Deployable actor observations, VICON perception model, throws calibrated on recorded throws (P1)
+- Why: the actor got the motion reference (Unified; a human thrower cannot sync to the clip clock), hand positions
+  (forward kinematics in C++) and a perfect, always visible ball (a static ball before the throw, no latency, noise or
+  dropouts). The interim report (ch. 10.3) already claimed noise on the policy inputs that the code did not have.
+- VICON ball recordings found: the training `.pkl` have no ball, but `GMR_for_fbx_files/recordings/two_results_ver2.7z`
+  holds 21 takes of 2026-07-06 with ball CSV + `.pkl` (12 complete underhand throws). Analysed: release 3.1 m away at
+  1.03 m, apex 1.9 m, flight 0.77 s, drag k/m 0.035 1/m (fits a light ∅15 cm ball), noise 4–5 mm, 6.8 % of the control
+  steps without a measurement in bursts of 1–3 steps, wind-up visible before the release (new spec section 5.1).
+- Actor contract (Phase 2 = Unified, 103 per frame / 515): perceived ball pos+vel, `ball_visible`, intercept from the
+  perceived state, proprioception. Removed from the actor: `motion_command`, `motion_anchor_ori_b`, `hand_pos`,
+  `ball_relative` (still in the critic). Critic gets `ball_visible` (308 per frame / 1540; Phase 1 has a zero slot).
+  Phase 1's actor keeps the reference and drops the ball slots (157 / 785): it is now a clip trackability check, not
+  a warm start. Stage A → B = Unified → Phase 2 with `--finetune` (tested); Phase 1 → Phase 2 now fails on the shape.
+- Perception model in `BallCommand` (`_reset_perception`, `_update_perception`): detection delay 0.04–0.12 s after the
+  release, latency 1–3 steps, noise 5 mm / 0.1 m/s, per-throw bias ±1 cm, dropout bursts (p 0.05, 1–3 steps),
+  occlusion in the catch box with p 0.5 per throw, ballistic coasting for 3 steps, then not visible. New observation
+  functions `ball_perceived_pos_vel_b`, `ball_visible`, `ball_perceived_intercept_b`; `ball_intercept_b` refactored onto
+  the shared `_ballistic_intercept` (same math for actor and critic).
+- Throws re-calibrated on the recordings: release height 0.85–1.2 m (was 1.1–1.7), `flight_time_range` replaced by
+  `apex_height_range` 1.75–2.1 m (flight time 0.71–1.02 s via `flight_time_from_apex`, farther throws faster), drag
+  coefficient 0.3–0.45 (was 0.4–0.6). Curriculum: apex instead of flight time; easy stage with clean perception
+  (delay 1, no dropouts, no occlusion).
+- Verified: zero-noise probe reproduces the true state of 2 steps earlier exactly (pos, vel, intercept); default
+  probe 88.8 % fresh / 8.6 % coasted / 2.6 % not visible in flight, never visible before the launch; sampled throws
+  0.85–1.20 m release, 0.74–0.98 s flight, apex mean 1.90 m; smoke runs of all three tasks; Unified → Phase 2
+  fine-tuning; exported `deploy.yaml` lists only robot-side terms.
+- Files: `BC/mdp/commands/ball_command.py`, `BC/mdp/commands/synced_ball_command.py`, `BC/mdp/observations.py`,
+  `BC/mdp/curriculums.py`, `BC/robots/g1_29dof/{phase1,phase2,unified}/ball_catch_env_cfg.py`, `CLAUDE.md` (key
+  invariant), `context/REVIEW.md` (M4 resolved), `context/changes/2026-10-16-deployable-observations-p1.md`.
+- Spec sections 2, 4, 5 (+ new 5.1), 6, 6.1, 7.1, 7.2, 7.3, 8, 9, 11 and 12 updated.
