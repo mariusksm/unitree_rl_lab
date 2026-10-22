@@ -346,7 +346,7 @@ class RewardsCfg:
     )
     ball_secured_hold = RewTerm(
         func=mdp.ball_secured,
-        weight=5.0,                 # 0.1/step while held; capped by the ball_caught termination
+        weight=5.0,                 # 0.1/step while held; ball_caught is a truncation (see TerminationsCfg)
         params={"command_name": "ball_throw"},
     )
     ball_height_penalty = RewTerm(
@@ -451,9 +451,13 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_height = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.2})
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 0.8})
+    # A confirmed catch is a truncation (time_out=True): PPO bootstraps the value of the catch state instead of
+    # cutting it to 0. As a plain termination the catch forfeited the hold rewards that follow, so holding the ball
+    # while breaking the secured streak just before secure_steps paid more than the bonus (run 2026-10-22).
     ball_caught = DoneTerm(
         func=mdp.ball_caught,
-        params={"command_name": "ball_throw"},  # [TERM SUCCESS] ball held 0.5s = confirmed catch
+        time_out=True,
+        params={"command_name": "ball_throw"},  # [TERM SUCCESS] secured for secure_steps in a row
     )
     ball_dropped = DoneTerm(
         func=mdp.ball_below_height,

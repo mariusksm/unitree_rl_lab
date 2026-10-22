@@ -462,8 +462,11 @@ class TerminationsCfg:
         },
     )
     # -- ball
+    # A confirmed catch is a truncation (time_out=True), as in Phase 2: it must not forfeit the tracking and hold
+    # rewards that follow, and the adaptive sampler counts only real terminations as failures.
     ball_caught = DoneTerm(
         func=mdp.ball_caught,
+        time_out=True,
         params={"command_name": "ball_throw"},  # [TERM SUCCESS] confirmed catch
     )
     ball_dropped = DoneTerm(

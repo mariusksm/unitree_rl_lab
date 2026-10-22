@@ -36,7 +36,7 @@
 
   Background material (proposal, meeting minutes, plans) lives in `context/` (see [Section 12](#12-context-documents)).
 
-## 2. Status at a Glance (2026-10-16)
+## 2. Status at a Glance (2026-10-22)
 
 | Area | Status |
 |---|---|
@@ -46,9 +46,9 @@
 | VICON ball recordings | ✅ Found 2026-10-16: 21 takes of the 2026-07-06 session with ball CSV + retargeted `.pkl` (12 complete underhand throws), see Section 5.1. Used to calibrate throws, drag and the perception model. |
 | Ball and throw model | ✅ 2026-10-16: mjlab ball (∅15 cm, 112 g; drag fits the recordings), underhand lob from 2–5 m released at 0.85–1.2 m with apex 1.75–2.1 m, quadratic air drag with drag-compensated aim, catch = ball held in a box in front of the torso while touching both arms for 1 s. Restitution is a placeholder until the real ball is measured. |
 | Actor observations | ✅ 2026-10-16: deployable actor contract in Phase 2 and Unified (perceived ball + visibility flag + intercept + proprioception, no reference, no hand positions). Ball perceived through a VICON model (detection delay, latency, noise, dropout bursts, occlusion in the catch box, coasting). |
-| Phase 2 (RL catching, stage B) | ⚠️ Code is in place, no full training run yet. Pilot runs (2026-10-22, 250 iterations) found and fixed a "fall before the throw" optimum (fall penalty + `alive` 1.0); with the fix the robot stands and 86 % of the episodes reach the throw. Fine-tuning from a Unified actor tested. |
+| Phase 2 (RL catching, stage B) | ⚠️ First full run on the workstation (2026-10-22, 4096 envs, Section 10): confirmed catches peaked at 77 % (iteration 2500), then the policy learned to hold the ball without completing the catch (time-outs 0 → 32 %, catches → 54 % at iteration 6900). Fixed by making `ball_caught` a truncation; the run continues from `model_7000.pt`. Earlier pilot runs (250 iterations) found and fixed a "fall before the throw" optimum (fall penalty + `alive` 1.0). Fine-tuning from a Unified actor tested. |
 | Unified task (mimic + catching simultaneously, stage A) | ⚠️ Code is in place and smoke-tested, **never trained**. `CATCH_MOTION_TIME = 2.0` fits the old overhand clip only; do not train before the underhand clips are in. |
-| Catch success in simulation | ❌ not yet demonstrated |
+| Catch success in simulation | ⚠️ Confirmed catches during Phase 2 training (stochastic policy; 77 % at iteration 2500 on near-easy throws, the ball ends ≈ 88 % of the episodes in the catch box later on); no evaluation on the final throw distribution yet |
 | Hands (Dex3 / mount) in the model | ❌ not present (intentional, see proposal) |
 | Sim2Sim (MuJoCo), deployment, live VICON pipeline | ❌ not started for the ball task (`deploy/` is unmodified Unitree upstream; the C++ side has none of the ball observation terms yet) |
 
@@ -102,6 +102,10 @@ context/                               Project background + this spec (see Secti
 ./unitree_rl_lab.sh -p --task Unitree-G1-29dof-BallCatch-Phase1  # play (loads latest run)
 # Phase 2 from scratch (std 1.0)
 ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Phase2
+# Continue an interrupted run (restores actor, critic, optimizer, iteration and curriculum progress).
+# --max_iterations counts ADDITIONAL iterations: 30k in total from model_7000 -> 23000
+./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Phase2 --resume --load_run <timestamp> \
+  --checkpoint model_<N>.pt --max_iterations <30000 - N>
 ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-BallCatch-Unified # unified = stage A (from scratch, std 1.0)
 # Stage B: Phase 2 fine-tuned from a Unified checkpoint: loads the actor only, sets the noise std,
 # logs into the Phase 2 folder (NOT into the Unified folder). Phase 1 checkpoints do not fit (other actor input).
@@ -314,7 +318,7 @@ the five proprioception terms above.
   | `ball_interception` | 2.0 | exp(−d²/0.2² − v²/1.0²), v = ball speed relative to the hands (eq. 9.1, soft catch) |
   | `ball_arm_contact` | 3.0 | fraction of arms touching the ball (eq. 9.2) |
   | `catch_success` | 500 | one-time, effectively 10 |
-  | `ball_secured_hold` | 5.0 | 0.1 per step |
+  | `ball_secured_hold` | 5.0 | 0.1 per step while secured; no incentive to delay the catch because `ball_caught` is a truncation |
   | `ball_height_penalty` | −5 | ball below 0.5 m |
   | `alive` | 1.0 | 0.02 per step; discounted at most ≈2, below the catch bonus |
   | `termination_penalty` | −200 | `is_terminated_term` for `base_height` / `bad_orientation` only: −4 per fall (catch and drop are not penalized) |
@@ -324,8 +328,8 @@ the five proprioception terms above.
   no fall penalty the early per-step penalties (mostly `action_rate` from the exploration noise, ≈20× `alive`) make
   falling before the throw the best policy (pilot runs 2026-10-22, Section 10).
 
-- Terminations: timeout 20 s, `base_height` < 0.2, `bad_orientation` 0.8, **`ball_caught` (success)**,
-  `ball_dropped` (z < 0.1), `ball_missed` (horizontal > 6 m, beyond the 5 m release distance).
+- Terminations: timeout 20 s, `base_height` < 0.2, `bad_orientation` 0.8, **`ball_caught` (success, a truncation with `time_out=True`)**, `ball_dropped` (z < 0.1), `ball_missed` (horizontal > 6 m, beyond the 5 m release distance).
+  - `ball_caught` must stay a truncation: PPO then bootstraps the value of the catch state instead of 0. As a plain termination the catch ended the hold rewards (hold, contact, proximity and `alive`, ≈ 0.2 per step, ≈ 20 discounted at γ 0.99) for a bonus of 10 (≈ 14 in total), so the policy learned to hold the ball and break the secured streak just before `secure_steps` (run 2026-10-22, Section 10).
 - Curriculum:
   - Throw distribution from easy to final over steps 50k → 250k. Easy: 2.0–2.5 m, ±15°, lateral ±0.03 m, aim height
     0.85–0.95 m, apex 1.85–1.95 m, no velocity noise, `secure_steps` 25, and clean perception (delay 1 step, no
@@ -355,8 +359,7 @@ the five proprioception terms above.
   - If an episode starts after the launch window, no throw happens; the episode trains pure tracking.
   - When the clip wraps or is resampled, a fresh throw is sampled, the ball is re-parked and re-armed.
   - **`motion` must be declared before `ball_throw` in `CommandsCfg`.**
-- Terminations: Phase 1 tracking terminations (`ee_body_pos` loosened to 0.3) plus Phase 2 ball terminations.
-  Drops count as failures in the adaptive sampler, which then samples the catch window more often.
+- Terminations: Phase 1 tracking terminations (`ee_body_pos` loosened to 0.3) plus Phase 2 ball terminations (`ball_caught` a truncation, as in Phase 2). The adaptive sampler counts only real terminations as failures: drops, misses and tracking failures make it sample the catch window more often, a confirmed catch does not.
 - Curriculum:
   - Throw distribution 50k → 250k.
   - Body tracking tapers (pos/ori 1.0 → 0.4, vel 1.0 → 0.5) over 150k → 500k.
@@ -406,8 +409,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 8. Curriculum steps assume about 30k iterations (24 steps per iteration). Scale them for other run lengths.
 9. GMR `.pkl` files interleave the hands with the arms (see Section 5). Never slice `dof_pos[:, :29]`; use
    `select_body_joints()` from the conversion scripts.
-10. `--resume` restores actor (incl. noise std), critic, optimizer and iteration unless `--finetune` is given.
-    `--experiment_name` decides where the new run is logged; `--resume_experiment` where the checkpoint is read from.
+10. `--resume` restores actor (incl. noise std), critic, optimizer and iteration unless `--finetune` is given, and then sets `common_step_counter` to iteration × `num_steps_per_env`, so the step-based curricula continue where the checkpoint left off (with `--finetune` they start over). `--max_iterations` counts additional iterations. `--experiment_name` decides where the new run is logged; `--resume_experiment` where the checkpoint is read from. The first logged iteration after a resume still shows the curriculum values of the initial reset.
 11. Isaac Lab reports filtered contacts only **one-to-many**: the `ball_contact` sensor sits on the ball and filters
     against the arm links. `BallCommand` assigns the filter bodies to the arms by their `left_` / `right_` name prefix
     (column order verified with lateral throws on 2026-10-16).
@@ -418,6 +420,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
     still parked.
 15. The perception ring buffer is sized from the default `obs_delay_steps_range` (the largest delay). The curriculum
     may only shrink the delay range; larger delays are clipped to the buffer.
+16. A success termination after which positive per-step rewards would keep flowing (hold, contact, `alive`, tracking) must be a truncation (`time_out=True`). As a plain termination it cuts those rewards, and the policy learns to postpone the success instead of completing it (Phase 2 run 2026-10-22).
 
 ## 10. Training History & Artifacts
 
@@ -427,7 +430,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 | `ballcatch_phase1/2026-07-27_13-41-06` | Phase 1 | – | empty / aborted |
 | `ballcatch_phase1/2026-08-31_14-45-09` | Phase 1 | 143_merged_filtered | model_1 (test run) |
 | `ballcatch_phase1/2026-08-31_15-06-41` | Phase 1 | 143_merged_filtered | model_1500, 1657 iterations, tracking converged, but on the corrupt clip (see Section 2) → unusable |
-| `ballcatch_phase2/` | Phase 2 | – | empty |
+| `ballcatch_phase2/2026-10-22_16-04-10` (workstation) | Phase 2 | – | 4096 envs, stopped after iteration 7000 (`model_7000.pt`): learned to hold the ball without completing the catch (below); continued with the truncation fix |
 | Unified | – | – | never started |
 
 As of 2026-10-16 both `logs/rsl_rl/unitree_g1_29dof_ballcatch_phase1/` and `…_phase2/` are empty: the runs above no
@@ -446,11 +449,22 @@ after the 2026-10-16 changes were logged outside the repo.
 Timing: 2.85 s per iteration at 4096 envs (≈24 h for 30k iterations on an RTX 3080), ≈6.5 GB GPU memory. Two Isaac
 Sim trainings at once do not fit into 10 GB.
 
+**Phase 2 run 2026-10-22** (workstation RTX 3090, 4096 envs, `26b64a3`; logs and checkpoints in `~/unitree_rl_lab/logs/rsl_rl/` on the workstation; 2.65 s per iteration, ≈ 7 GB GPU memory). Values are 50-iteration means:
+
+| Iteration | `ball_caught` | `time_out` | Episode length (steps) | `Episode_Reward/ball_secured_hold` |
+|---|---|---|---|---|
+| 2000 | 73 % | 0 % | 192 | 0.34 |
+| 2500 | 77 % | 1 % | 281 | 0.72 |
+| 3000 | 63 % | 14 % | 439 | 1.35 |
+| 4000 | 55 % | 22 % | 538 | 1.80 |
+| 6000 | 56 % | 30 % | 578 | 2.06 |
+| 6927 | 54 % | 32 % | 608 | 2.20 |
+
+At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball ended ≈ 88 % of the episodes in the catch box. A throw reaches the robot after ≈ 2.5 s, yet the episodes grew to ≈ 12 s and a third ran into the 20 s limit with the ball in the arms: on average the ball was secured ≈ 460 steps per episode, while a confirmed catch needed 39 in a row at that curriculum stage. Cause and fix: Section 7.2 (`ball_caught` as a truncation). The run was continued from `model_7000.pt` with the fix and the curriculum-aware resume.
+
 ## 11. Open Items & Next Steps (prioritized)
 
-1. **Train Phase 2 from scratch** as the baseline for the new ball, throw, catch and perception definition (needs no
-   new clips). Watch `Episode_Termination/ball_caught` vs. `ball_dropped` / `ball_missed` / `bad_orientation` and
-   `Curriculum/ball_throws`.
+1. **Phase 2 baseline** for the new ball, throw, catch and perception definition (needs no new clips): the 2026-10-22 run continues from `model_7000.pt` with `ball_caught` as a truncation. Check that `time_out` falls and `ball_caught` recovers within ≈ 1000–2000 iterations, otherwise restart from scratch. The throw curriculum reaches its final distribution at iteration ≈ 10.4k, the posture tapers at ≈ 16.7k. Watch `Episode_Termination/ball_caught` vs. `ball_dropped` / `ball_missed` / `bad_orientation` / `time_out` and `Curriculum/ball_throws`.
 2. **Measure the real ball:** diameter, mass, restitution (drop test, e = √(h_bounce / h_drop)) and friction. Replace
    the placeholder restitution 0.4 / DR 0.2–0.6 and confirm the mjlab values (∅15 cm, 112 g; the drag of the
    recorded throws fits such a ball). Static probes on 2026-10-16 showed that restitution decides how many throws
@@ -682,3 +696,11 @@ In case of conflicts: **code > this spec > other context documents.**
   affected (episode length → 136 steps, reward → +3.3), so Unified and Phase 1 stay unchanged.
 - Files: `BC/robots/g1_29dof/phase2/ball_catch_env_cfg.py`, `context/changes/2026-10-22-phase2-fall-penalty-p1.md`.
 - Spec sections 2, 7.2 and 10 updated.
+
+### 2026-10-22: Catch as a truncation (hold procrastination) and curriculum-aware resume
+- Why: the first full Phase 2 run (workstation, 4096 envs, `26b64a3`) reached 77 % confirmed catches at iteration 2500 and then learned to hold the ball without completing the catch: by iteration 6900 time-outs rose 0 → 32 %, confirmed catches fell to 54 %, the episode length grew 192 → 608 steps and the ball was secured ≈ 460 steps per episode (a catch needs 39 in a row at that stage). Holding paid ≈ 0.2 per step (hold, contact, proximity, `alive`), ≈ 20 discounted at γ 0.99; the catch ended that stream for a bonus of 10 (≈ 14 in total), so breaking the secured streak just before `secure_steps` was optimal.
+- Change: `ball_caught` is a truncation (`time_out=True`) in Phase 2 and Unified, so PPO bootstraps the value of the catch state and the bonus makes completing the catch strictly better. In Unified this also stops the adaptive sampler from counting confirmed catches as failures (it counts `terminated` only). Logging is unchanged.
+- `train.py`: a full `--resume` sets `common_step_counter` to iteration × `num_steps_per_env`; before, a resumed run restarted the step-based curricula (throws, posture tapers) at the easy settings.
+- Verified on the workstation (64 envs, resume from `model_7000.pt`): `ball_caught` is listed as a time-out term, the iterations continue at 7000, and from the third iteration on the curriculum is at 0.59 (throws) and −8.30 (`base_height`).
+- Files: `BC/robots/g1_29dof/{phase2,unified}/ball_catch_env_cfg.py`, `scripts/rsl_rl/train.py`.
+- Spec sections 2, 4, 7.2, 7.3, 9, 10 and 11 updated.

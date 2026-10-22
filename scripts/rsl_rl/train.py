@@ -202,6 +202,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             runner.load(resume_path, load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": False})
         else:
             runner.load(resume_path)
+            # step-based curricula read common_step_counter, which a new process starts at 0: continue them at the
+            # checkpoint's iteration instead of restarting from the easy settings (not with --finetune: new task)
+            env.unwrapped.common_step_counter = runner.current_learning_iteration * agent_cfg.num_steps_per_env
+            print(f"[INFO]: Curriculum step counter set to {env.unwrapped.common_step_counter}")
         if args_cli.finetune_std is not None:
             # the noise std is part of the actor state dict, so init_noise_std has no effect after loading
             runner.alg.actor.distribution.std_param.data.fill_(args_cli.finetune_std)
