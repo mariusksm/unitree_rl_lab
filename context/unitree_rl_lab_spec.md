@@ -46,7 +46,7 @@
 | VICON ball recordings | ✅ Found 2026-10-16: 21 takes of the 2026-07-06 session with ball CSV + retargeted `.pkl` (12 complete underhand throws), see Section 5.1. Used to calibrate throws, drag and the perception model. |
 | Ball and throw model | ✅ 2026-10-16: mjlab ball (∅15 cm, 112 g; drag fits the recordings), underhand lob from 2–5 m released at 0.85–1.2 m with apex 1.75–2.1 m, quadratic air drag with drag-compensated aim, catch = ball held in a box in front of the torso while touching both arms for 1 s. Restitution is a placeholder until the real ball is measured. |
 | Actor observations | ✅ 2026-10-16: deployable actor contract in Phase 2 and Unified (perceived ball + visibility flag + intercept + proprioception, no reference, no hand positions). Ball perceived through a VICON model (detection delay, latency, noise, dropout bursts, occlusion in the catch box, coasting). |
-| Phase 2 (RL catching, stage B) | ⚠️ Code is in place and smoke-tested (2026-10-16), **no training run** yet. Fine-tuning from a Unified actor tested. |
+| Phase 2 (RL catching, stage B) | ⚠️ Code is in place, no full training run yet. Pilot runs (2026-10-22, 250 iterations) found and fixed a "fall before the throw" optimum (fall penalty + `alive` 1.0); with the fix the robot stands and 86 % of the episodes reach the throw. Fine-tuning from a Unified actor tested. |
 | Unified task (mimic + catching simultaneously, stage A) | ⚠️ Code is in place and smoke-tested, **never trained**. `CATCH_MOTION_TIME = 2.0` fits the old overhand clip only; do not train before the underhand clips are in. |
 | Catch success in simulation | ❌ not yet demonstrated |
 | Hands (Dex3 / mount) in the model | ❌ not present (intentional, see proposal) |
@@ -316,8 +316,13 @@ the five proprioception terms above.
   | `catch_success` | 500 | one-time, effectively 10 |
   | `ball_secured_hold` | 5.0 | 0.1 per step |
   | `ball_height_penalty` | −5 | ball below 0.5 m |
-  | `alive` | 0.15 | |
+  | `alive` | 1.0 | 0.02 per step; discounted at most ≈2, below the catch bonus |
+  | `termination_penalty` | −200 | `is_terminated_term` for `base_height` / `bad_orientation` only: −4 per fall (catch and drop are not penalized) |
   | Posture crutches | | `base_height` −10 @0.76 m, `flat_orientation` −5, `joint_deviation_*`, `feet_slide`, `undesired_contacts` −1 (excluding ankles, elbow and wrist links, torso: the ball rests there), further locomotion regularization |
+
+  `alive` and `termination_penalty` are required: Phase 2 has no other positive dense reward, so with `alive` 0.15 and
+  no fall penalty the early per-step penalties (mostly `action_rate` from the exploration noise, ≈20× `alive`) make
+  falling before the throw the best policy (pilot runs 2026-10-22, Section 10).
 
 - Terminations: timeout 20 s, `base_height` < 0.2, `bad_orientation` 0.8, **`ball_caught` (success)**,
   `ball_dropped` (z < 0.1), `ball_missed` (horizontal > 6 m, beyond the 5 m release distance).
@@ -428,6 +433,18 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 As of 2026-10-16 both `logs/rsl_rl/unitree_g1_29dof_ballcatch_phase1/` and `…_phase2/` are empty: the runs above no
 longer exist, and there is **no ball-catching checkpoint**. Smoke runs (64 envs, 5 iterations) of all three tasks
 after the 2026-10-16 changes were logged outside the repo.
+
+**Pilot runs 2026-10-22** (Marius' RTX 3080, logged outside the repo, no checkpoints kept):
+
+| Run | Envs / iterations | Result |
+|---|---|---|
+| Phase 2 as of `24d448d` (`alive` 0.15, no fall penalty) | 4096 / 108 (stopped) | 100 % of the episodes end by `bad_orientation`; episode length 12.5 → ≈9 steps while the mean reward rises: the policy learns to fall before the throw, all ball rewards stay 0 |
+| Variant B: + fall penalty −200 | 2048 / 250 | episode length 86 steps, 76 % falls, 25 % reach the throw (ball dropped) |
+| Variant A: + fall penalty −200, `alive` 1.0 (**adopted**) | 2048 / 250 | episode length 104 steps, 15 % falls, 86 % reach the throw, hands–ball distance 2.1 → 0.7 m, no catches yet |
+| Unified, unchanged config, overhand clip | 2048 / 250 | not affected: episode length 12.8 → 6.3 → 136 steps, mean reward −1.03 → +3.30 (dense tracking rewards); episodes still end by `ee_body_pos` / `anchor_pos` |
+
+Timing: 2.85 s per iteration at 4096 envs (≈24 h for 30k iterations on an RTX 3080), ≈6.5 GB GPU memory. Two Isaac
+Sim trainings at once do not fit into 10 GB.
 
 ## 11. Open Items & Next Steps (prioritized)
 
@@ -652,3 +669,16 @@ In case of conflicts: **code > this spec > other context documents.**
   `BC/mdp/curriculums.py`, `BC/robots/g1_29dof/{phase1,phase2,unified}/ball_catch_env_cfg.py`, `CLAUDE.md` (key
   invariant), `context/REVIEW.md` (M4 resolved), `context/changes/2026-10-16-deployable-observations-p1.md`.
 - Spec sections 2, 4, 5 (+ new 5.1), 6, 6.1, 7.1, 7.2, 7.3, 8, 9, 11 and 12 updated.
+
+### 2026-10-22: Phase 2 fall penalty and larger alive bonus (pilot runs)
+- Why: a 4096-env pilot of Phase 2 at `24d448d` converged to falling before the throw. 100 % of the episodes ended
+  by `bad_orientation`, the episode length dropped to ≈9 steps while the mean reward rose, and all ball rewards stayed 0.
+  Phase 2 has no positive dense reward apart from `alive`; early per-step penalties (mostly `action_rate` from the
+  exploration noise) were ≈20× `alive` (0.15), and falling cost nothing.
+- Change: `alive` 0.15 → 1.0 (discounted at most ≈2, below the catch bonus 10) and `termination_penalty`
+  (`is_terminated_term` on `base_height` / `bad_orientation` only, weight −200 = −4 per fall).
+- Evidence (2048 envs, 250 iterations): with both terms, episode length 104 steps, 15 % falls, 86 % of the episodes
+  reach the throw; the fall penalty alone gives 86 steps and 76 % falls. A Unified pilot with unchanged config is not
+  affected (episode length → 136 steps, reward → +3.3), so Unified and Phase 1 stay unchanged.
+- Files: `BC/robots/g1_29dof/phase2/ball_catch_env_cfg.py`, `context/changes/2026-10-22-phase2-fall-penalty-p1.md`.
+- Spec sections 2, 7.2 and 10 updated.

@@ -357,7 +357,14 @@ class RewardsCfg:
             "min_height": 0.5,       # [CATCH ZONE] penalize ball dropping below 0.5m
         },
     )
-    alive = RewTerm(func=mdp.is_alive, weight=0.15)
+    # -- staying up: without these the per-step penalties (mostly action_rate from the exploration noise) outweigh
+    #    alive, falling costs nothing and the policy learns to fall before the throw (pilot run 2026-10-22)
+    alive = RewTerm(func=mdp.is_alive, weight=1.0)  # 0.02/step; discounted at most ~2 < catch bonus 10
+    termination_penalty = RewTerm(
+        func=mdp.is_terminated_term,
+        weight=-200.0,              # -4 per fall
+        params={"term_keys": ["base_height", "bad_orientation"]},  # falls only: catch and drop are not penalized
+    )
 
     # -- regularization
     base_linear_velocity = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
