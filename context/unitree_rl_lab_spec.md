@@ -63,6 +63,9 @@ scripts/
                                        (--finetune), noise std override after loading (--finetune_std);
                                        play.py adapted to Isaac Lab 2.3 / rsl-rl 5 (exports policy.pt/.onnx
                                        to <run>/exported/)
+  rsl_rl/eval_catch.py                 Evaluation suite: one checkpoint, one stress-test scenario (Phase 2, Unified),
+                                       metrics as JSON (outcomes, feet, posture, hold geometry, joint limits, torques)
+  rsl_rl/eval_catch_all.sh             All scenarios of a checkpoint + comparison table (eval_catch_report.py)
   list_envs.py
   pkl_to_csv_without_hands.py          GMR .pkl → CSV (29 body joints: cols 0-21 + 34-40, hands dropped)
   mimic/csv_to_npz.py                  CSV → .npz (Isaac replay, upstream)
@@ -124,6 +127,9 @@ context/                               Project background + this spec (see Secti
 # Smoke test: --num_envs 16 --max_iterations 2 --experiment_name /tmp/smoke  (absolute path keeps logs/ clean)
 # Hydra overrides are passed without dashes, e.g. agent.policy.init_noise_std=1.0
 tensorboard --logdir logs/rsl_rl/
+# Evaluation suite (stress tests of a checkpoint; ~4 min per scenario, absolute checkpoint path):
+scripts/rsl_rl/eval_catch_all.sh Unitree-G1-29dof-BallCatch-Phase2 logs/rsl_rl/<exp>/<run>/model_<N>.pt eval/<run>
+python scripts/rsl_rl/eval_catch_report.py eval/<run_a> eval/<run_b>     # compare runs
 ```
 
 ## 5. Data Pipeline (mocap → training clip)
@@ -479,7 +485,7 @@ Sim trainings at once do not fit into 10 GB.
 
 At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball ended ≈ 88 % of the episodes in the catch box. A throw reaches the robot after ≈ 2.5 s, yet the episodes grew to ≈ 12 s and a third ran into the 20 s limit with the ball in the arms: on average the ball was secured ≈ 460 steps per episode, while a confirmed catch needed 39 in a row at that curriculum stage. Cause and fix: Section 7.2 (`ball_caught` as a truncation). The run was continued from `model_7000.pt` with the fix and the curriculum-aware resume.
 
-**Phase 2 baseline, final evaluation 2026-10-27** (`model_29999.pt`, deterministic policy, play config; 512 robots × 60 s per scenario with an evaluation script that is not in the repo yet). Training catch rate (stochastic) 92–95 % from iteration ≈ 15k on; `Policy/mean_std` rose from 0.69 to 0.93 during the run. Full findings, ranking of fixes and the method: `context/analysis/2026-10-27-phase2-final.md`; videos, raw JSON and the script are kept outside the repo in `analysis/2026-10-27_phase2_final/` on Marius' laptop.
+**Phase 2 baseline, final evaluation 2026-10-27** (`model_29999.pt`, deterministic policy, play config; 512 robots × 60 s per scenario with the predecessor of `scripts/rsl_rl/eval_catch.py`). Training catch rate (stochastic) 92–95 % from iteration ≈ 15k on; `Policy/mean_std` rose from 0.69 to 0.93 during the run. Full findings, ranking of fixes and the method: `context/analysis/2026-10-27-phase2-final.md`; videos, raw JSON and the script are kept outside the repo in `analysis/2026-10-27_phase2_final/` on Marius' laptop.
 
 | Scenario | Caught | Dropped | Fell |
 |---|---|---|---|
@@ -509,8 +515,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    2026-07-06 from one thrower at a fixed distance). Measure the latency of the live pipeline (VICON → MQTT →
    robot) to replace the assumed 1–3 steps.
 5. Remaining review findings L1–L4 in `context/REVIEW.md` (C1, H1, H2, M1–M4 and L5 are resolved).
-6. Establish a catch-rate evaluation (final throw distribution, perception model on) and decide which line (Phase 2
-   from scratch or Unified → Phase 2) to pursue.
+6. Evaluate every run with the suite (`scripts/rsl_rl/eval_catch_all.sh`, Section 4) instead of the training catch rate, and decide on that basis which line (Phase 2 from scratch or Unified → Phase 2) to pursue. For Unified the suite still lacks a long-wait scenario (its throws follow the clip timing).
 7. End effector: the rubber hands (collider merged into `*_wrist_yaw_link`, 0.17 kg) stay for now. Decide what is
    mounted on the real robot (Inspire FTP hand ≈ 0.88 kg per hand per the `unitree_ros` URDF, or the 3D-printed
    mount from the proposal) and model its mass and collision geometry.
@@ -759,3 +764,8 @@ In case of conflicts: **code > this spec > other context documents.**
 - New `scripts/mimic/check_npz_fk.py` (Isaac: forward kinematics of the clips on the training asset vs their stored body positions) and `scripts/mimic/check_dataset.py` (numpy: robot elbows/hands vs the human points of the VICON recordings). `motion_data.align_recording` factored out of `compute_catch_info` (shared by both).
 - Result: joint and body order match the asset (< 0.1 mm; negative control 0.27–0.39 m), elbows and hands follow the human on the right side in 87 of 89 clips (51 and 52 deviate through their time alignment), no static arms; knees below the soft limit in 93–98 % of the frames.
 - Spec sections 3, 5.2, 9 and 11 updated.
+
+### 2026-10-27: Evaluation suite in the repository
+- Why: the training catch rate (≈ 95 %) hid the weaknesses that the stress tests of the Phase 2 baseline exposed (long waits, joint-stop exploit, latency, pushes); every run needs the same comparable measurement.
+- New `scripts/rsl_rl/eval_catch.py` (one checkpoint and scenario: base, fric_high, fric_low, hold, wait, push, lateral, delay; deterministic policy in the play config; JSON with outcomes, foot behavior incl. gliding vs. pivoting and foot tilt, posture, hold geometry incl. torso contact, joints at their limits, torque saturation; optional full-body video), `scripts/rsl_rl/eval_catch_all.sh` (all scenarios of a task) and `scripts/rsl_rl/eval_catch_report.py` (comparison table). Works for Phase 2 and Unified; `wait` and `lateral` are refused for Unified.
+- Spec sections 3, 4, 10 and 11 updated; `CLAUDE.md` lists the command.

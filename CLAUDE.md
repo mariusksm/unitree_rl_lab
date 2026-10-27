@@ -43,3 +43,4 @@ Not substantial: pure formatting, typos, comments.
 
 - Python: `/home/marius/miniconda3/envs/env_isaaclab_downgrade/bin/python`
 - Train: `./unitree_rl_lab.sh -t --task <Task>` · Play: `-p` · List: `-l`
+- Evaluate a checkpoint (stress tests, Phase 2 / Unified): `scripts/rsl_rl/eval_catch_all.sh <Task> <abs/path/model.pt> <out_dir>`
