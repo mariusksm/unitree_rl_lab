@@ -100,6 +100,43 @@ def _yaw_wxyz(q: np.ndarray) -> np.ndarray:
     return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def align_recording(clip: np.lib.npyio.NpzFile, rec: np.lib.npyio.NpzFile, joint_names: Sequence[str]) -> dict | None:
+    """Time alignment of a recording with its clip by the best joint-angle match.
+
+    Returns ``None`` if the recording lacks clip joints or does not overlap the clip, else a dict with ``shift``
+    (clip frame of the recording's first resampled frame), ``fps``, ``window_times`` / ``window_q`` (the recording's
+    joints resampled to the clip's frame period, in the clip's joint order), the overlap ``j0:j1`` in window frames
+    and the ``rmse`` over it.
+    """
+    fps = float(np.asarray(clip["fps"]).reshape(-1)[0])
+    joint_pos = clip["joint_pos"].astype(np.float64)
+    num_frames = joint_pos.shape[0]
+    rec_fps = float(np.asarray(rec["fps"]).reshape(-1)[0])
+    rec_names = [str(n) for n in rec["joint_names"]]
+    if any(n not in rec_names for n in joint_names):
+        return None
+    rec_q = rec["dof_pos"][:, [rec_names.index(n) for n in joint_names]].astype(np.float64)
+    rec_times = np.arange(rec_q.shape[0]) / rec_fps
+    window_times = np.arange(0.0, rec_times[-1] + 1e-9, 1.0 / fps)
+    window_q = np.stack([np.interp(window_times, rec_times, rec_q[:, k]) for k in range(rec_q.shape[1])], axis=-1)
+    num_window = len(window_times)
+
+    best_rmse, best_shift = np.inf, None
+    for shift in range(-num_window + 1, num_frames):  # window frame j sits at clip frame shift + j
+        j0, j1 = max(0, -shift), min(num_window, num_frames - shift)
+        if j1 - j0 < num_window // 2:
+            continue
+        err = window_q[j0:j1] - joint_pos[shift + j0 : shift + j1]
+        rmse = float(np.sqrt(np.mean(err**2)))
+        if rmse < best_rmse:
+            best_rmse, best_shift = rmse, shift
+    if best_shift is None:
+        return None
+    j0, j1 = max(0, -best_shift), min(num_window, num_frames - best_shift)
+    return {"shift": best_shift, "fps": fps, "rec_fps": rec_fps, "rec_times": rec_times, "window_times": window_times,
+            "window_q": window_q, "j0": j0, "j1": j1, "rmse": best_rmse}
+
+
 def compute_catch_info(
     clip_file: str, ball_file: str, joint_names: Sequence[str], hand_body_indexes: Sequence[int]
 ) -> dict:
@@ -122,37 +159,16 @@ def compute_catch_info(
     """
     clip = np.load(clip_file)
     rec = np.load(ball_file)
-    fps = float(np.asarray(clip["fps"]).reshape(-1)[0])
-    joint_pos = clip["joint_pos"].astype(np.float64)
-    num_frames = joint_pos.shape[0]
-    rec_fps = float(np.asarray(rec["fps"]).reshape(-1)[0])
-    rec_names = [str(n) for n in rec["joint_names"]]
-    if any(n not in rec_names for n in joint_names):
-        return {"valid": False, "reason": "recording lacks some clip joints"}
-    rec_q = rec["dof_pos"][:, [rec_names.index(n) for n in joint_names]].astype(np.float64)
-    rec_times = np.arange(rec_q.shape[0]) / rec_fps
-
-    # recording resampled onto the clip's frame period
-    window_times = np.arange(0.0, rec_times[-1] + 1e-9, 1.0 / fps)
-    window_q = np.stack([np.interp(window_times, rec_times, rec_q[:, k]) for k in range(rec_q.shape[1])], axis=-1)
-    num_window = len(window_times)
-
-    best_rmse, best_shift = np.inf, None
-    for shift in range(-num_window + 1, num_frames):  # window frame j sits at clip frame shift + j
-        j0, j1 = max(0, -shift), min(num_window, num_frames - shift)
-        if j1 - j0 < num_window // 2:
-            continue
-        err = window_q[j0:j1] - joint_pos[shift + j0 : shift + j1]
-        rmse = float(np.sqrt(np.mean(err**2)))
-        if rmse < best_rmse:
-            best_rmse, best_shift = rmse, shift
-    if best_shift is None:
-        return {"valid": False, "reason": "no overlap between recording and clip"}
+    alignment = align_recording(clip, rec, joint_names)
+    if alignment is None:
+        return {"valid": False, "reason": "recording lacks clip joints or does not overlap the clip"}
+    fps, rec_fps, rec_times = alignment["fps"], alignment["rec_fps"], alignment["rec_times"]
+    best_shift, best_rmse, j0, j1 = alignment["shift"], alignment["rmse"], alignment["j0"], alignment["j1"]
+    num_frames = clip["joint_pos"].shape[0]
     offset = best_shift / fps  # clip time of the recording's first frame
 
-    j0, j1 = max(0, -best_shift), min(num_window, num_frames - best_shift)
     clip_idx = np.arange(best_shift + j0, best_shift + j1)
-    rec_t = window_times[j0:j1]
+    rec_t = alignment["window_times"][j0:j1]
     rec_root = np.stack([np.interp(rec_t, rec_times, rec["root_pos"][:, k]) for k in range(3)], axis=-1)
     rec_yaw = np.interp(rec_t, rec_times, np.unwrap(_yaw_wxyz(rec["root_rot_xyzw"][:, [3, 0, 1, 2]])))
     clip_yaw = np.unwrap(_yaw_wxyz(clip["body_quat_w"][clip_idx, 0]))

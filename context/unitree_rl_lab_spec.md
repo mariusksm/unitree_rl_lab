@@ -71,6 +71,10 @@ scripts/
   mimic/replay_npz.py                  Visually inspect a .npz
   mimic/catch_info.py                  Numpy-only: catch time / flight time / catch point per clip from the ball
                                        recordings, with the validity check of the Unified task (Section 5.2)
+  mimic/check_dataset.py               Numpy-only: robot elbows/hands of each clip vs the human elbows/palms of its
+                                       VICON recording (right arm motion, right side; no hand data in an arm)
+  mimic/check_npz_fk.py                Isaac: clips posed on the training asset, forward kinematics vs the stored
+                                       body positions (joint and body order), excess over hard and soft joint limits
 source/unitree_rl_lab/unitree_rl_lab/
   assets/robots/unitree.py             UNITREE_G1_29DOF_MIMIC_CFG, UNITREE_G1_29DOF_MIMIC_ACTION_SCALE,
                                        local paths UNITREE_MODEL_DIR / UNITREE_ROS_DIR
@@ -213,7 +217,10 @@ data/imitation/g1/*.npz   (all clips are used; search order and the group datase
 - Alignment (`motion_data.compute_catch_info`): time offset by the best joint-angle match of the recording inside the clip (RMSE 0.18–0.30 rad, the two retargets differ; offset ≈ 0 for all but two takes), frame by the mean yaw rotation (≈ −93.5°, spread 0.3–3.6°) and translation (spread ≈ 5 cm) between the recording's root and the clip's pelvis.
 - Result for the 89 recordings: launch 0.85 s, catch 1.73 s (0.84–2.16), flight 0.88 s (0.59–1.11) into the clip (medians); catch point 0.33 m in front of the pelvis, laterally centred, 1.04 m high (0.30 m above the pelvis), ball 0.21 m from the wrist midpoint and 0.13 m above the wrists (palms-up two-hand catch). Release 0.81 m high, apex 1.71 m (underhand lob). 86 recordings are usable; rejected: one catch outside its clip and two with the ball more than 0.3 m from the hands.
 - Search order of the clips (`motion_data.find_motion_data`): `$HREACT_MOTION_DIR` (+ `$HREACT_BALL_DIR`), `data/imitation/g1/` (local copy, ball recordings in `data/imitation/ball/`), `../imitation-data/isaaclab/g1/` (dataset repo next to this one), `phase1/motions/` (no recordings). LFS pointer files are detected and stop the import with a hint. On the workstations the dataset lies in `~/imitation-data/isaaclab/` (next to `~/unitree_rl_lab`).
-- Check: `python scripts/mimic/catch_info.py` (numpy only) prints the per-clip table with the validity decision of the Unified task.
+- Checks: `python scripts/mimic/catch_info.py` (numpy only) prints the per-clip catch table with the validity decision of the Unified task. Joint assignment (the C1 failure mode, hand data in an arm) is checked in two steps, run on 2026-10-27:
+  - `scripts/mimic/check_npz_fk.py --headless` (Isaac): all 108 clips posed on UNITREE_G1_29DOF_MIMIC_CFG reproduce their stored body positions to < 0.1 mm, so `joint_pos` is in the asset's joint order and `body_pos_w` in its body order (negative control: swapped elbow columns or SDK order give 0.27–0.39 m). The clips exceed the hard limits by at most 0.08 rad (right wrist roll).
+  - `scripts/mimic/check_dataset.py` (numpy): the clips' elbows and hands follow the human elbows and palms of the recordings (scale 0.84) with 4–6 cm RMSE, on the same side, and the other side never fits better; only clips 51 and 52 (unusual time offset) deviate by 0.12–0.22 m. No clip has a static arm. Joint angles are no test here: the recordings' own retarget distributes the arm motion differently (less elbow, more wrist roll).
+  - The knees stay below the soft limit (0.06 rad) in 93–98 % of the frames (the person stands with straight knees), as with the old clip: the `joint_limit` penalty of Phase 1 and Unified acts during the whole clip.
 
 ## 6. Common Task Base (all three ball tasks)
 
@@ -428,7 +435,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
     may only shrink the delay range; larger delays are clipped to the buffer.
 16. A success termination after which positive per-step rewards would keep flowing (hold, contact, `alive`, tracking) must be a truncation (`time_out=True`). As a plain termination it cuts those rewards, and the policy learns to postpone the success instead of completing it (Phase 2 run 2026-10-22).
 17. Reference clips must run at the control rate (50 Hz, one frame per control step) and use the Isaac joint and body order of our G1 asset; `MotionCommand` refuses other frame rates. The dataset's `.npz` files are Git LFS objects: without `git lfs pull` only pointer files are checked out, which `motion_data.py` detects.
-18. A VICON recording and its clip are two retargets of the same take with different time windows and frames; use the catch data only through `compute_catch_info` (alignment), never by frame index.
+18. A VICON recording and its clip are two retargets of the same take with different time windows and frames; use the catch data only through `compute_catch_info` (alignment), never by frame index. Check new clips with `check_npz_fk.py` (joint and body order against the asset) and `check_dataset.py` (arm motion against the human).
 
 ## 10. Training History & Artifacts
 
@@ -497,7 +504,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    recorded throws fits such a ball). Static probes on 2026-10-16 showed that restitution decides how many throws
    stay in the arms (static cradle: 8/45 at e = 0.6, 21/45 at e = 0.3, 32/45 at e = 0), and that a ∅10 cm ball
    falls through the forearm cradle.
-3. **Train with the underhand clips** (integrated 2026-10-27, Section 5.2): Phase 1 as a trackability check of the 108 clips (legs, knee / pelvis artefacts), then Unified (stage A) with the fixes of item 1 and fine-tuning of its actor in Phase 2 (stage B), A/B against Phase 2 from scratch. Consider starting more Unified cycles before the launch moment (only ≈ 29 % of the cycles throw).
+3. **Train with the underhand clips** (integrated 2026-10-27, Section 5.2): Phase 1 as a trackability check of the 108 clips (legs, knee / pelvis artefacts), then Unified (stage A) with the fixes of item 1 and fine-tuning of its actor in Phase 2 (stage B), A/B against Phase 2 from scratch. Consider starting more Unified cycles before the launch moment (only ≈ 29 % of the cycles throw), and decide on the knees: the references sit below the soft knee limit almost all the time, so either exempt the knees from `joint_limit` in the tracking tasks or accept a slightly bent-knee tracking.
 4. Refine the throw and perception calibration with the new session's ball CSVs (Section 5.1 used 12 throws of
    2026-07-06 from one thrower at a fixed distance). Measure the latency of the live pipeline (VICON → MQTT →
    robot) to replace the assumed 1–3 steps.
@@ -746,3 +753,9 @@ In case of conflicts: **code > this spec > other context documents.**
 - Verified on workstation 1: `catch_info.py` (86 of 108 usable), Phase 1 and Unified smoke runs (64 envs, 3 iterations), and a kinematic replay of the references in Unified (ball within 0.23 m of the reference wrists around the arrival; ≈ 29 % of the cycles throw).
 - Files: `BC/motion_data.py`, `BC/mdp/commands/{motion_command,synced_ball_command}.py`, `BC/robots/g1_29dof/{phase1,unified}/ball_catch_env_cfg.py`, `BC/robots/g1_29dof/phase1/motions/README.md`, `scripts/mimic/{catch_info,pkl_to_npz}.py`, `data/imitation/README.md`, `context/REVIEW.md`.
 - Spec sections 2, 3, 5 (+ new 5.2), 7.1, 7.3, 8, 9, 11 and 12 updated.
+
+### 2026-10-27: Joint-assignment checks for the dataset clips
+- Why: make sure Phase 1 / Unified get the right joints (no repeat of C1, hand data in an arm) for clips that have no GMR `.pkl` to compare with (`check_motion.py`).
+- New `scripts/mimic/check_npz_fk.py` (Isaac: forward kinematics of the clips on the training asset vs their stored body positions) and `scripts/mimic/check_dataset.py` (numpy: robot elbows/hands vs the human points of the VICON recordings). `motion_data.align_recording` factored out of `compute_catch_info` (shared by both).
+- Result: joint and body order match the asset (< 0.1 mm; negative control 0.27–0.39 m), elbows and hands follow the human on the right side in 87 of 89 clips (51 and 52 deviate through their time alignment), no static arms; knees below the soft limit in 93–98 % of the frames.
+- Spec sections 3, 5.2, 9 and 11 updated.
