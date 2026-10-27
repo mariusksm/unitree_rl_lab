@@ -1,10 +1,11 @@
 """Unified ball-catching task: motion imitation + catching in ONE environment.
 
 DeepMimic-style combination of the former Phase 1 (mimic) and Phase 2 (RL):
-the policy tracks the reference catching motion *while* a physics ball is thrown
-so that it arrives exactly when the mocap reaches its catch frame
-(:class:`SyncedBallCommand`). The mocap supplies the "how" (whole-body catching
-form), RL learns the "when/where" corrections for off-nominal balls.
+the policy tracks a reference catching clip *while* a physics ball is thrown so that
+it arrives where and when the human caught the ball in that take (catch time and
+catch point from the take's VICON recording, :class:`SyncedBallCommand`). The mocap
+supplies the "how" (whole-body catching form), RL learns the "when/where" corrections
+for off-nominal balls.
 
 The actor sees the ball and proprioception only (the reference is critic-only), so it
 must react to the ball as on the real robot. Its observations equal Phase 2's, which
@@ -35,9 +36,18 @@ import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
 
-# single source of truth for the catching motion (auto-discovered drop-in directory,
-# see phase1/motions/README.md)
-from ..phase1.ball_catch_env_cfg import MOTION_FILE
+from unitree_rl_lab.tasks.ball_catching.motion_data import ball_file_for
+
+# single source of truth for the reference clips (auto-discovered, see motion_data.py)
+from ..phase1.ball_catch_env_cfg import BALL_DATA_DIR, MOTION_FILES
+
+# Unified trains on the clips that come with a VICON recording of their take; clips whose recording cannot be
+# aligned are kept but get no throw (SyncedBallCommand prints how many)
+CATCH_MOTION_FILES = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)] or MOTION_FILES
+
+# Fixed mode only (no usable recordings, e.g. the old single overhand clip in phase1/motions/): catch time (s)
+# into every clip. With recordings, every clip brings its own catch time and catch point.
+FALLBACK_CATCH_MOTION_TIME = 2.0
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 # forearm + hand links the ball may rest on in the two-arm underhand catch (left first, then right)
@@ -46,11 +56,6 @@ ARM_CONTACT_BODY_NAMES = [
     for side in ("left", "right")
     for link in ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
 ]
-
-# [CATCH FRAME] Time (s) into the motion clip at which the mocap catch (ball-hand
-# contact) happens. READ THIS OFF YOUR RETARGETED CLIP (scripts/mimic/replay_npz.py)
-# and update it when the real catching mocap lands in phase1/motions/.
-CATCH_MOTION_TIME = 2.0
 
 VELOCITY_RANGE = {
     "x": (-0.5, 0.5),
@@ -128,7 +133,7 @@ class CommandsCfg:
 
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
-        motion_file=MOTION_FILE,
+        motion_files=CATCH_MOTION_FILES,
         anchor_body_name="torso_link",
         resampling_time_range=(1.0e9, 1.0e9),
         debug_vis=True,
@@ -166,8 +171,10 @@ class CommandsCfg:
         hand_body_names=HAND_BODY_NAMES,
         contact_sensor_name="ball_contact",
         motion_command_name="motion",
-        catch_motion_time=CATCH_MOTION_TIME,
+        ball_data_dir=BALL_DATA_DIR,
+        catch_motion_time=FALLBACK_CATCH_MOTION_TIME,
         arrival_jitter=0.05,
+        catch_point_jitter=(0.05, 0.05, 0.05),
         debug_vis=False,
     )
 

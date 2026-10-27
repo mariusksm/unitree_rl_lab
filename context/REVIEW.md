@@ -40,14 +40,14 @@ Date: 2026-09-28.
 | H1 | High (✅ fixed 2026-09-28) | `tasks/ball_catching/agents/rsl_rl_ppo_cfg.py:39-55` | `Phase2PPORunnerCfg.init_noise_std=0.2` has no effect on resume and is too low from scratch; resume also loads the Phase 1 critic, optimizer and iteration |
 | H2 | High (✅ fixed 2026-09-28) | `scripts/rsl_rl/cli_args.py:88-89` | `--experiment_name` override sends Phase 2 fine-tuning runs into the Phase 1 log folder; `play` then silently loads the wrong policy |
 | M1 | Medium (✅ fixed 2026-10-16) | `mdp/commands/ball_command.py:114-130`, `phase2/ball_catch_env_cfg.py:308-316` | Pre-throw exploit: hands are rewarded near the parked ball, and the aim point is computed at launch from the robot's current pose |
-| M2 | Medium | `mdp/commands/synced_ball_command.py:117-121`, `ball_command.py:125-130` | Unified: the ball is aimed at a fixed chest point, not at the reference's (left-hand) catch pose |
-| M3 | Medium | `unified/ball_catch_env_cfg.py:42` | `CATCH_MOTION_TIME = 2.0` is unverified; the clip has no retract phase |
+| M2 | Medium (✅ resolved 2026-10-27: the ball is aimed at the reference catch point of each clip from its VICON recording) | `mdp/commands/synced_ball_command.py:117-121`, `ball_command.py:125-130` | Unified: the ball is aimed at a fixed chest point, not at the reference's (left-hand) catch pose |
+| M3 | Medium (✅ resolved 2026-10-27: catch time per clip from its VICON recording; `CATCH_MOTION_TIME` removed) | `unified/ball_catch_env_cfg.py:42` | `CATCH_MOTION_TIME = 2.0` is unverified; the clip has no retract phase |
 | M4 | Medium (✅ resolved 2026-10-16: actor without placeholders, transfer is Unified → Phase 2) | `phase2/ball_catch_env_cfg.py:235,250,271,285-288` | Transfer design: 64 policy inputs that were always informative in Phase 1 become constant zeros in Phase 2 |
 | L1 | Low | `agents/rsl_rl_ppo_cfg.py:47`, spec, `merge_changes.md` | Documented Hydra override syntax `--agent.policy.init_noise_std=…` is wrong |
 | L2 | Low | `assets/robots/unitree.py:20-21` | Hard-coded absolute asset paths committed |
 | L3 | Low | `phase1/ball_catch_env_cfg.py:53-65`, `.gitignore` | `*.npz` is gitignored, so a fresh clone silently falls back to the Gangnam dance (warning only) |
 | L4 | Low | `tasks/ball_catching/mdp/*` | Mimic MDP code is copied verbatim (`MotionCommand`, rewards, terminations, events), so two copies can drift apart |
-| L5 | Low | `mdp/commands/synced_ball_command.py:66,70` | `float(motion.motion.fps)` on a shape-(1,) ndarray (NumPy deprecation) |
+| L5 | Low (✅ resolved 2026-10-27: `MotionLoader.fps` is a float) | `mdp/commands/synced_ball_command.py:66,70` | `float(motion.motion.fps)` on a shape-(1,) ndarray (NumPy deprecation) |
 
 ## 3. Details
 

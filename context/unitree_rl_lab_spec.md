@@ -36,19 +36,19 @@
 
   Background material (proposal, meeting minutes, plans) lives in `context/` (see [Section 12](#12-context-documents)).
 
-## 2. Status at a Glance (2026-10-22)
+## 2. Status at a Glance (2026-10-27)
 
 | Area | Status |
 |---|---|
-| Motion conversion (.pkl → .npz) | ✅ Fixed on 2026-09-28: the right arm was filled with left-hand finger joints (wrong GMR column selection). **All `.npz` created before that date were corrupt** and have been deleted; verify with `scripts/mimic/check_motion.py`. The training clip in `phase1/motions/` has been regenerated (see Section 5). |
-| Reference motion | ⚠️ The current clip is an **overhand** two-hand chest catch. **Underhand two-arm catch clips** are expected (access pending as of 2026-10-16); the ball tasks already target the underhand catch. |
-| Phase 1 (mimic) on real mocap data | ⚠️ No checkpoint exists (`logs/rsl_rl/…ballcatch_phase1/` is empty). The run on the corrupt clip (`2026-08-31_15-06-41`) is gone and must not be used anyway. Since 2026-10-16 Phase 1 is a clip trackability check only (actor sees the reference), **not** a warm start for Phase 2. |
+| Motion conversion (.pkl → .npz) | ✅ Fixed on 2026-09-28 (the right arm was filled with left-hand finger joints; all `.npz` created before that date were corrupt and have been deleted). Since 2026-10-27 the reference clips come prepared from the group's dataset (Section 5.2); `pkl_to_npz.py` remains for new takes. |
+| Reference motion | ✅ 2026-10-27: the group's **underhand-catch dataset** (GitLab `imitation-data`: 108 clips at 50 Hz, 89 of them with a VICON recording of the take) replaces the single overhand clip. Phase 1 and Unified train on all clips; Unified throws at the recorded catch time and catch point of each clip (86 usable recordings). Section 5.2. |
+| Phase 1 (mimic) on real mocap data | ⚠️ No checkpoint; runs on the 108 underhand clips (smoke test 2026-10-27). Since 2026-10-16 Phase 1 is a clip trackability check only (actor sees the reference), **not** a warm start for Phase 2. |
 | VICON ball recordings | ✅ Found 2026-10-16: 21 takes of the 2026-07-06 session with ball CSV + retargeted `.pkl` (12 complete underhand throws), see Section 5.1. Used to calibrate throws, drag and the perception model. |
 | Ball and throw model | ✅ 2026-10-16: mjlab ball (∅15 cm, 112 g; drag fits the recordings), underhand lob from 2–5 m released at 0.85–1.2 m with apex 1.75–2.1 m, quadratic air drag with drag-compensated aim, catch = ball held in a box in front of the torso while touching both arms for 1 s. Restitution is a placeholder until the real ball is measured. |
 | Actor observations | ✅ 2026-10-16: deployable actor contract in Phase 2 and Unified (perceived ball + visibility flag + intercept + proprioception, no reference, no hand positions). Ball perceived through a VICON model (detection delay, latency, noise, dropout bursts, occlusion in the catch box, coasting). |
-| Phase 2 (RL catching, stage B) | ⚠️ First full run on the workstation (2026-10-22, 4096 envs, Section 10): confirmed catches peaked at 77 % (iteration 2500), then the policy learned to hold the ball without completing the catch (time-outs 0 → 32 %, catches → 54 % at iteration 6900). Fixed by making `ball_caught` a truncation; the run continues from `model_7000.pt`. Earlier pilot runs (250 iterations) found and fixed a "fall before the throw" optimum (fall penalty + `alive` 1.0). Fine-tuning from a Unified actor tested. |
-| Unified task (mimic + catching simultaneously, stage A) | ⚠️ Code is in place and smoke-tested, **never trained**. `CATCH_MOTION_TIME = 2.0` fits the old overhand clip only; do not train before the underhand clips are in. |
-| Catch success in simulation | ⚠️ Confirmed catches during Phase 2 training (stochastic policy; 77 % at iteration 2500 on near-easy throws, the ball ends ≈ 88 % of the episodes in the catch box later on); no evaluation on the final throw distribution yet |
+| Phase 2 (RL catching, stage B) | ⚠️ Baseline trained to 30k iterations (runs `2026-10-22_16-04-10` → `2026-10-22_21-14-31` → `2026-10-23_03-35-20`, final `model_29999.pt` on workstation 2): 99.6 % catches on the final throw distribution. The 2026-10-27 stress tests and video analysis (Section 10) show it is **not deployable as is**: joint-stop exploit at the ankle-roll joints (feet on their edges, torque saturated), a throw after 6–9 s of waiting gives 28 % catches and 28 % falls, latency and pushes cost 6 points each, the ball is squeezed to the left chest. Prioritized fixes in Section 11 and `context/analysis/2026-10-27-phase2-final.md`. |
+| Unified task (mimic + catching simultaneously, stage A) | ⚠️ Ready to train since 2026-10-27, **never trained**: 89 underhand clips with recordings; the ball arrives at the recorded catch point at the recorded catch time (kinematic replay check: ball within 0.23 m of the reference wrists, 0.21 m in the recordings). Only ≈ 29 % of the motion cycles throw (cycles that start after the launch moment train tracking only). |
+| Catch success in simulation | ⚠️ 99.6 % (Phase 2, deterministic policy, final throw distribution), but only within the trained episode structure (short wait, 1 s hold); see Section 10 |
 | Hands (Dex3 / mount) in the model | ❌ not present (intentional, see proposal) |
 | Sim2Sim (MuJoCo), deployment, live VICON pipeline | ❌ not started for the ball task (`deploy/` is unmodified Unitree upstream; the C++ side has none of the ball observation terms yet) |
 
@@ -69,30 +69,35 @@ scripts/
   mimic/pkl_to_npz.py                  GMR .pkl → .npz directly, whole folder in one Isaac session
   mimic/check_motion.py                Numpy-only check: .npz joints vs .pkl columns, static-arm warning
   mimic/replay_npz.py                  Visually inspect a .npz
+  mimic/catch_info.py                  Numpy-only: catch time / flight time / catch point per clip from the ball
+                                       recordings, with the validity check of the Unified task (Section 5.2)
 source/unitree_rl_lab/unitree_rl_lab/
   assets/robots/unitree.py             UNITREE_G1_29DOF_MIMIC_CFG, UNITREE_G1_29DOF_MIMIC_ACTION_SCALE,
                                        local paths UNITREE_MODEL_DIR / UNITREE_ROS_DIR
   tasks/locomotion/, tasks/mimic/      Upstream tasks (Velocity, Gangnam, Dance)
   tasks/ball_catching/                 ← PROJECT TASK (= BC/)
     agents/rsl_rl_ppo_cfg.py           BasePPORunnerCfg (used by all three tasks)
+    motion_data.py                     Clip discovery (search order in 5.2), LFS-pointer check, alignment of a
+                                       take's VICON recording with its clip (numpy only)
     mdp/                               commands/, observations, rewards, terminations, events, curriculums
-    robots/g1_29dof/phase1/            Env cfg + motions/ (drop-in folder for .npz, README)
+    robots/g1_29dof/phase1/            Env cfg (owns the clip discovery) + motions/ (fallback folder, README)
     robots/g1_29dof/phase2/            Env cfg
     robots/g1_29dof/unified/           Env cfg
 pkl_isaac_lab_fixed_27_07_26/          150 retargeted GMR .pkl (pkl_to_npz.py writes to npz/ inside), gitignored
 pkl_isaac_lab_17_08_26/                7 newer .pkl (as of 17 Aug), gitignored
+data/imitation/{g1,ball}/              Local copy of the group's clips and ball recordings (gitignored, README)
 logs/rsl_rl/<experiment>/<timestamp>/  Checkpoints model_*.pt, params/, tfevents
 deploy/                                C++ deployment (ONNX, unitree_sdk2), upstream, untouched for the ball task
 context/                               Project background + this spec (see Section 12)
 ```
 
-`.npz` files are excluded globally via `.gitignore`. The training clip in `phase1/motions/` is therefore
-**not in git** and must be copied to each machine separately.
+`.npz` files are excluded globally via `.gitignore`. The reference clips are therefore **not in git** and must not be (private group data, public repository); copy them to each machine as described in `data/imitation/README.md`.
 
 ## 4. Environment & Commands
 
 - Python env (Marius' machine): `/home/marius/miniconda3/envs/env_isaaclab_downgrade/bin/python`
   (Isaac Lab 2.3.0, Isaac Sim 5.1.0). The system Python has no numpy.
+- Group workstations (`ssh workstation` = uni.yakyaz.dev with an RTX 3090, `ssh workstation2` = uni2.yakyaz.dev with an RTX 4080; Cloudflare Access login, GPUs are reserved per person): shared conda env `/opt/miniconda3/envs/env_isaaclab` (Isaac Lab 2.3.2, Isaac Sim 5.0, rsl-rl 5.0.1) plus a per-user overlay `python -m venv --system-site-packages ~/envs/hreact` with this repo installed editable; its `activate` exports `UNITREE_MODEL_DIR=~/unitree_model`, `TMPDIR=~/tmp` and `OMNI_KIT_ACCEPT_EULA=YES`. Activate with `conda activate env_isaaclab && source ~/envs/hreact/bin/activate`, train with `python scripts/rsl_rl/train.py … --headless` (not `unitree_rl_lab.sh`, which uses the conda Python), long runs in tmux. The workstations check out branch `workstation` (= `main` + reading `UNITREE_MODEL_DIR` from the environment), rebased onto `main` and pulled with `git pull --rebase`. Camera rendering (videos) needs `LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6` and `--kit_args="--portable-root $HOME/tmp/kitroot"`, because the shared env is read-only.
 - Registered tasks: `Unitree-G1-29dof-BallCatch-Phase1`, `-Phase2`, `-Unified`
   (plus upstream: `Unitree-G1-29dof-Velocity`, `-Mimic-Gangnanm-Style`, `-Mimic-Dance-102`, Go2/H1 Velocity).
 
@@ -135,10 +140,10 @@ VICON Shogun (+Manus) ──(other repos: cleaning, GMR retargeting)──► *_
       ▼
 scripts/mimic/check_motion.py --pkl <file>.pkl --npz <file>.npz   → must print "RESULT: OK"
       ▼
-BC/robots/g1_29dof/phase1/motions/*.npz   (the alphabetically first file is picked automatically)
+data/imitation/g1/*.npz   (all clips are used; search order and the group dataset: Section 5.2)
 ```
 
-- **Current clip:** `143_merged_filtered.npz`, 155 frames at 50 fps, i.e. **3.1 s**. Regenerated on 2026-09-28
+- **Previous clip (until 2026-10-27):** `143_merged_filtered.npz`, 155 frames at 50 fps, i.e. **3.1 s**. Regenerated on 2026-09-28
   with the fixed `pkl_to_npz.py` from `pkl_isaac_lab_fixed_27_07_26/143_merged_filtered.pkl`; `check_motion.py`
   reports `RESULT: OK`, and a Phase 1 probe shows no more torso/arm self-contact (feet only).
   - Content (analysed 2026-10-16): overhand two-hand chest catch. Stand still until ≈1.3 s, both hands rise
@@ -147,13 +152,12 @@ BC/robots/g1_29dof/phase1/motions/*.npz   (the alphabetically first file is pick
   - Leg artefacts: knees at ≈0 rad (below the 0.9 soft limit of 0.06 rad, so `joint_limit` penalizes tracking
     the whole clip) and pelvis pitched back by 13–20°.
   - The source `.pkl` has only 30 fps (mjlab gets 120 Hz retargeting output).
-  - To be replaced by the **underhand two-arm** clips (access pending).
+  - Replaced on 2026-10-27 by the group's underhand clips (Section 5.2).
 - Known quirk: `pkl_to_npz.py` hangs while Isaac Sim shuts down after printing `[DONE]`. The files are
   complete at that point; stop it with Ctrl+C.
 - The `.npz` column order is the Isaac articulation joint order (not SDK order);
   `check_motion.py` contains both orders.
-- If no `.npz` is in `motions/`, Phase 1 (and therefore Unified) falls back to the Gangnam placeholder and
-  prints a loud warning.
+- Without any clips (search order in Section 5.2), Phase 1 and Unified fall back to the Gangnam placeholder and print a loud warning.
 - Quality check before training (see `phase1/motions/README.md`):
   - full reach–catch–retract cycle
   - wrist height at the catch matches `catch_height_range`
@@ -200,6 +204,16 @@ BC/robots/g1_29dof/phase1/motions/*.npz   (the alphabetically first file is pick
   | After the catch | about a third lose the ball at once, the rest track it for 0.25–1.2 s |
 
   The k/m value matches a light ∅15 cm ball (112 g with c_d ≈ 0.37), not ∅10 cm / 150 g (0.015) or a football (0.025).
+
+### 5.2 Group dataset: underhand-catch clips with ball recordings (current reference)
+
+- Source: GitLab `pg-681-h-react/data/imitation-data`, folder `isaaclab/` (dataset commit `e1704e4`, as of 2026-10-27; the `.npz` files are Git LFS objects, so `git lfs pull` is needed after cloning). Maik's Isaac Lab repository (`pg-681-h-react/ml/isaac-lab`, task `g1mimic`) trains on the same files.
+- `g1/<take>.npz`: 108 clips, 50 Hz, 1.9–4.6 s (median 3.1 s), BeyondMimic format in the Isaac joint and body order of our G1 asset (verified: 30 bodies, hands = bodies 28/29). The person stands still (pelvis travel ≤ 0.10 m per clip).
+- `ball/<take>.npz`: 89 VICON recordings of the same takes, 120 Hz, 2.08 s each. Besides the ball (`ball_pos`, `ball_visible`, `ball_speed_m_s`) and the catch moment (`ball_catch_time_s`, `ball_catch_distance_m`, `palm_ball_distance_m`) they carry an own retarget of the take (`dof_pos` with `joint_names`, `root_pos`, `root_rot_xyzw`, finger joints, human skeleton, hand calibration) in the VICON world frame. Neither time window nor frame matches the clip.
+- Alignment (`motion_data.compute_catch_info`): time offset by the best joint-angle match of the recording inside the clip (RMSE 0.18–0.30 rad, the two retargets differ; offset ≈ 0 for all but two takes), frame by the mean yaw rotation (≈ −93.5°, spread 0.3–3.6°) and translation (spread ≈ 5 cm) between the recording's root and the clip's pelvis.
+- Result for the 89 recordings: launch 0.85 s, catch 1.73 s (0.84–2.16), flight 0.88 s (0.59–1.11) into the clip (medians); catch point 0.33 m in front of the pelvis, laterally centred, 1.04 m high (0.30 m above the pelvis), ball 0.21 m from the wrist midpoint and 0.13 m above the wrists (palms-up two-hand catch). Release 0.81 m high, apex 1.71 m (underhand lob). 86 recordings are usable; rejected: one catch outside its clip and two with the ball more than 0.3 m from the hands.
+- Search order of the clips (`motion_data.find_motion_data`): `$HREACT_MOTION_DIR` (+ `$HREACT_BALL_DIR`), `data/imitation/g1/` (local copy, ball recordings in `data/imitation/ball/`), `../imitation-data/isaaclab/g1/` (dataset repo next to this one), `phase1/motions/` (no recordings). LFS pointer files are detected and stop the import with a hint. On the workstations the dataset lies in `~/imitation-data/isaaclab/` (next to `~/unitree_rl_lab`).
+- Check: `python scripts/mimic/catch_info.py` (numpy only) prints the per-clip table with the validity decision of the Unified task.
 
 ## 6. Common Task Base (all three ball tasks)
 
@@ -261,8 +275,7 @@ the five proprioception terms above.
 
 ### 7.1 Phase 1: `Unitree-G1-29dof-BallCatch-Phase1` (motion tracking)
 
-- BeyondMimic style: `MotionCommand` with anchor `torso_link`, 14 tracked bodies, adaptive failure-bin
-  sampling, teleport reset at clip end, episode length 30 s.
+- BeyondMimic style: `MotionCommand` with anchor `torso_link`, 14 tracked bodies, teleport reset at clip end, episode length 30 s. Since 2026-10-27 it loads all clips (Section 5.2, 108 underhand clips): every reset or clip end draws a new clip uniformly and a start bin from that clip's failure statistics (adaptive sampling per clip, one bin per second of the longest clip on each clip's normalized time).
 - Rewards:
   - Tracking exp kernels: anchor pos/ori 0.5 each; body pos/ori/lin_vel/ang_vel 1.0 each.
   - Regularization: joint_acc, joint_torque, action_rate −0.1, joint_limit −10, undesired_contacts −0.1
@@ -349,15 +362,12 @@ the five proprioception terms above.
 - The actor has the Phase 2 actor contract (perceived ball, no reference): the reference only enters the rewards,
   terminations and the critic, so the policy has to time the catch from the ball, as on the real robot. This makes it
   stage A of the mjlab recipe; stage B = fine-tuning its actor in Phase 2 (Section 4).
-- `SyncedBallCommand`: launch at `launch_time = CATCH_MOTION_TIME ± 0.05 s − flight_time`, so that ball
-  arrival coincides with the catch frame of the mocap.
-  - Same ball, throw geometry, drag, perception, catch check, ball rewards, `undesired_contacts` exclusions and throw
-    curriculum as Phase 2 (Section 7.2). The aim point is the configured belly target, **not** the reference catch
-    pose (M2 open).
-  - With flight times of 0.71–1.02 s and `CATCH_MOTION_TIME = 2.0` the launch falls at ≈0.95–1.35 s, inside the
-    standing phase of the current clip.
-  - If an episode starts after the launch window, no throw happens; the episode trains pure tracking.
-  - When the clip wraps or is resampled, a fresh throw is sampled, the ball is re-parked and re-armed.
+- Clips: the 89 clips with a VICON recording (Section 5.2); the three with an unusable recording get no throw.
+- `SyncedBallCommand` (recorded mode): launch at `launch_time = catch_time[clip] ± 0.05 s − flight_time[clip]`, both from the take's recording, so the ball arrives when the human caught it and the human's reaction to the release stays consistent. The release point is sampled as in Phase 2 (distance, direction, height, drag); at the launch the target is the recorded catch point re-anchored to the robot exactly like the tracked bodies (robot anchor xy and yaw, reference anchor height) plus ±0.05 m per axis. A kinematic replay of the reference (robot = reference) puts the ball 0.23 m (median) from the reference wrists around the arrival, as in the recordings (0.21 m).
+  - Same ball, drag, perception, catch check, ball rewards, `undesired_contacts` exclusions and throw curriculum as Phase 2 (Section 7.2); in recorded mode the curriculum's target and apex ranges have no effect.
+  - If a cycle starts after its launch moment (adaptive sampling can start anywhere in the clip), no throw happens and the cycle trains pure tracking: ≈ 29 % of the cycles throw.
+  - A new cycle (reset or clip end) is detected through `MotionCommand.resample_count`, samples a fresh throw and re-parks and re-arms the ball.
+  - Fixed mode (no usable recordings, e.g. the old single clip in `phase1/motions/`): one catch time for all clips (`FALLBACK_CATCH_MOTION_TIME = 2.0`, fits the old overhand clip), target and flight time sampled from the `BallCommandCfg` ranges.
   - **`motion` must be declared before `ball_throw` in `CommandsCfg`.**
 - Terminations: Phase 1 tracking terminations (`ee_body_pos` loosened to 0.3) plus Phase 2 ball terminations (`ball_caught` a truncation, as in Phase 2). The adaptive sampler counts only real terminations as failures: drops, misses and tracking failures make it sample the catch window more often, a confirmed catch does not.
 - Curriculum:
@@ -366,24 +376,20 @@ the five proprioception terms above.
   - Anchor tracking keeps full weight.
 - 6-DoF pushes every 2–5 s. Runner: `BasePPORunnerCfg` (std 1.0), from scratch (Phase 1 checkpoints do not fit
   the actor).
-- **Before serious training:**
-  - Bring in the underhand two-arm clips. The current overhand chest clip conflicts with the belly target
-    (tracking pulls the hands to the chest, the ball arrives at the belly).
-  - Set `CATCH_MOTION_TIME` (in `unified/ball_catch_env_cfg.py`) to the ball-contact moment of the new clip.
-    For the current clip 2.0 s fits (hands stop at ≈1.96–2.0 s).
-  - Check that the reference catch point matches the aim point (`target_*_range`), or aim at the reference (M2).
+- Before serious training: run Phase 1 on the clips as a trackability check (legs), and carry over the joint-stop fix from Section 11 (Unified has the same unclipped actions).
 
 ## 8. MDP Building Blocks (`BC/mdp/`)
 
 | File | Contents |
 |---|---|
-| `commands/motion_command.py` | `MotionLoader`, `MotionCommand(Cfg)`: reference states, adaptive bin sampling, metrics `error_*`, `sampling_*` |
+| `commands/motion_command.py` | `MotionLoader` (all clips as padded tensors (clip, frame, …), per-clip lengths, one frame rate), `MotionCommand(Cfg)`: reference states of each env's clip, per-clip adaptive bin sampling, `clip_ids`, `resample_count`, metrics `error_*`, `sampling_*` |
 | `commands/ball_command.py` | `flight_time_from_apex`. `BallCommand(Cfg)`: throw sampling (frozen at reset), parking, drag-compensated launch, air drag, catch check, perception model, `secured_steps`, `arm_contact`, `launched`, `perceived_pos_b`, `perceived_vel_b`, `ball_visible`. Metrics `ball_height`, `ball_secured_time`, `hand_ball_distance`, `ball_in_catch_zone`, `ball_arm_contact`. Helpers `_sample_throw`, `_write_parked_state`, `_launch`, `_solve_launch_velocity`, `_drag_displacement`, `_apply_drag`, `_update_arm_contact`, `_update_catch_state`, `_reset_perception`, `_update_perception` |
-| `commands/synced_ball_command.py` | `SyncedBallCommand(Cfg)`: launch coupled to the motion phase (Unified only); `_start_cycle` = new throw per motion cycle |
+| `commands/synced_ball_command.py` | `SyncedBallCommand(Cfg)` (Unified only): launch coupled to the motion phase; recorded mode with per-clip catch time, flight time and re-anchored catch point from the take's VICON recording, fixed mode with one catch time; `_start_cycle` = new throw per motion cycle |
 | `observations.py` | Motion obs (`motion_anchor_*`, `robot_body_*`), true ball obs for the critic (`ball_pos_vel_b`, `ball_to_hands_b`, `ball_intercept_b`, `hand_pos_b`), perceived ball obs for the actor (`ball_perceived_pos_vel_b`, `ball_visible`, `ball_perceived_intercept_b`), shared `_ballistic_intercept`, `dummy_zeros` |
 | `rewards.py` | Tracking exp rewards, `energy`, `ball_interception_exp` (eq. 9.1, distance-only without `std_vel`), `ball_arm_contact`, `ball_caught_bonus`, `ball_secured`, `ball_height_penalty` |
 | `terminations.py` | Tracking terminations (`bad_anchor_*`, `bad_motion_body_pos*`), `ball_caught`, `ball_below_height`, `ball_far_from_robot` |
 | `events.py` | `randomize_joint_default_pos`, `randomize_rigid_body_com` |
+| `../motion_data.py` | `find_motion_data` (search order), `is_lfs_pointer`, `ball_file_for`, `compute_catch_info` / `catch_infos` (recording ↔ clip alignment, validity limits) |
 | `curriculums.py` | `modify_reward_weight_linear`, `ball_throw_curriculum` (linear interpolation over `common_step_counter`; int fields such as `secure_steps` are rounded) |
 
 `ball_intercept_b`: intersection of the (descending) ball parabola with the plane 0.15 m above the root.
@@ -421,6 +427,8 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 15. The perception ring buffer is sized from the default `obs_delay_steps_range` (the largest delay). The curriculum
     may only shrink the delay range; larger delays are clipped to the buffer.
 16. A success termination after which positive per-step rewards would keep flowing (hold, contact, `alive`, tracking) must be a truncation (`time_out=True`). As a plain termination it cuts those rewards, and the policy learns to postpone the success instead of completing it (Phase 2 run 2026-10-22).
+17. Reference clips must run at the control rate (50 Hz, one frame per control step) and use the Isaac joint and body order of our G1 asset; `MotionCommand` refuses other frame rates. The dataset's `.npz` files are Git LFS objects: without `git lfs pull` only pointer files are checked out, which `motion_data.py` detects.
+18. A VICON recording and its clip are two retargets of the same take with different time windows and frames; use the catch data only through `compute_catch_info` (alignment), never by frame index.
 
 ## 10. Training History & Artifacts
 
@@ -431,6 +439,8 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 | `ballcatch_phase1/2026-08-31_14-45-09` | Phase 1 | 143_merged_filtered | model_1 (test run) |
 | `ballcatch_phase1/2026-08-31_15-06-41` | Phase 1 | 143_merged_filtered | model_1500, 1657 iterations, tracking converged, but on the corrupt clip (see Section 2) → unusable |
 | `ballcatch_phase2/2026-10-22_16-04-10` (workstation) | Phase 2 | – | 4096 envs, stopped after iteration 7000 (`model_7000.pt`): learned to hold the ball without completing the catch (below); continued with the truncation fix |
+| `ballcatch_phase2/2026-10-22_21-14-31` (workstation 1) | Phase 2 | – | resumed from `model_7000.pt` with the truncation fix; slowed to 11 s per iteration by a second job on the GPU, ended at ≈ iteration 8935 when the tmux session was closed; last checkpoint `model_8500.pt` |
+| `ballcatch_phase2/2026-10-23_03-35-20` (workstation 2, RTX 4080) | Phase 2 | – | resumed from `model_8500.pt`, ran to `model_29999.pt` (2.7 s per iteration); **current Phase 2 baseline**, evaluated on 2026-10-27 (below) |
 | Unified | – | – | never started |
 
 As of 2026-10-16 both `logs/rsl_rl/unitree_g1_29dof_ballcatch_phase1/` and `…_phase2/` are empty: the runs above no
@@ -462,22 +472,36 @@ Sim trainings at once do not fit into 10 GB.
 
 At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball ended ≈ 88 % of the episodes in the catch box. A throw reaches the robot after ≈ 2.5 s, yet the episodes grew to ≈ 12 s and a third ran into the 20 s limit with the ball in the arms: on average the ball was secured ≈ 460 steps per episode, while a confirmed catch needed 39 in a row at that curriculum stage. Cause and fix: Section 7.2 (`ball_caught` as a truncation). The run was continued from `model_7000.pt` with the fix and the curriculum-aware resume.
 
+**Phase 2 baseline, final evaluation 2026-10-27** (`model_29999.pt`, deterministic policy, play config; 512 robots × 60 s per scenario with an evaluation script that is not in the repo yet). Training catch rate (stochastic) 92–95 % from iteration ≈ 15k on; `Policy/mean_std` rose from 0.69 to 0.93 during the run. Full findings, ranking of fixes and the method: `context/analysis/2026-10-27-phase2-final.md`; videos, raw JSON and the script are kept outside the repo in `analysis/2026-10-27_phase2_final/` on Marius' laptop.
+
+| Scenario | Caught | Dropped | Fell |
+|---|---|---|---|
+| Base (play config) | 99.6 % | 0.4 % | 0.03 % |
+| Throw after 6–9 s of waiting (training: 0.5–1.5 s) | 27.9 % | 43.9 % | 28.3 % |
+| Pushes ±0.5 m/s every 1–2 s | 93.6 % | 6.3 % | 0.2 % |
+| Perception latency 4–6 steps (training: 1–3) | 93.6 % | 6.3 % | 0.07 % |
+| Throws aimed ±0.3 m sideways (training: ±0.1 m) | 99.5 % | 0.5 % | 0.06 % |
+| Friction fixed high (1.0/0.8) or low (0.4/0.3) | 99.7–99.8 % | 0.2–0.3 % | ≤ 0.1 % |
+| No catch termination, 12 s episodes | 99.4 % still hold the ball at the end | 0.1 % | 0.6 % |
+
+- Joint-stop exploit: the ankle-roll targets lie 2–4 rad outside the joint range in 98–99 % of the steps; the joints sit on their stops with torque above 80 % of the limit during 100 % of the waiting time, and the feet stand tilted by 14–21° (on their edges). Real gliding is rare (< 1 % of the contact steps); the visible "sliding" is pivoting on the foot edges, tapping (1.9 lift-offs per second while waiting, 7.7 while catching) and drifting (≈ 15° rotation per second while waiting, 33 cm per catch). Cause: unclipped actions in all three tasks, and Phase 2 has no torque penalty (only `energy`, which ignores static torque).
+- Hold: the ball touches only the hand links but is pressed against the left chest (0.20 m in front of, 0.14 m left of the pelvis) with a mean torso contact force of 236 N; the right arm crosses over, right shoulder yaw and wrist pitch are above 80 % of their torque limit for most of the hold. In 12 s episodes the robot keeps the ball but walks off by ≈ 4 m.
+- Posture: waits in a deep knee bend (72° instead of the default 38°) with abducted arms; bends the pelvis forward by 34° while holding.
+- `push_robot` (every 4–8 s) practically never fired: the interval timer restarts at every reset and episodes last ≈ 4 s since the truncation fix.
+
 ## 11. Open Items & Next Steps (prioritized)
 
-1. **Phase 2 baseline** for the new ball, throw, catch and perception definition (needs no new clips): the 2026-10-22 run continues from `model_7000.pt` with `ball_caught` as a truncation. Check that `time_out` falls and `ball_caught` recovers within ≈ 1000–2000 iterations, otherwise restart from scratch. The throw curriculum reaches its final distribution at iteration ≈ 10.4k, the posture tapers at ≈ 16.7k. Watch `Episode_Termination/ball_caught` vs. `ball_dropped` / `ball_missed` / `bad_orientation` / `time_out` and `Curriculum/ball_throws`.
+1. **Fix the Phase 2 baseline, then retrain** (ranking and reasons in `context/analysis/2026-10-27-phase2-final.md`): clamp joint targets to the joint range, add a torque penalty and a flat-feet term (all tasks share the unclipped actions); random long waits before the throw (e.g. 0.5–8 s) and a hold phase after the confirmed catch with stand-still terms (bonus once per episode); pushes that fire within episodes; perception latency up to the measured value plus margin (default `obs_delay_steps_range`, the ring buffer is sized from it); lower `entropy_coef`; a ready pose before the throw. 15–20k iterations suffice. Evaluate with the stress-test scenarios, not the training catch rate.
 2. **Measure the real ball:** diameter, mass, restitution (drop test, e = √(h_bounce / h_drop)) and friction. Replace
    the placeholder restitution 0.4 / DR 0.2–0.6 and confirm the mjlab values (∅15 cm, 112 g; the drag of the
    recorded throws fits such a ball). Static probes on 2026-10-16 showed that restitution decides how many throws
    stay in the arms (static cradle: 8/45 at e = 0.6, 21/45 at e = 0.3, 32/45 at e = 0), and that a ∅10 cm ball
    falls through the forearm cradle.
-3. **Underhand two-arm clips** (access pending): convert them (ask for ≥ 50 Hz retargeting output and the matching
-   ball CSVs), check the legs (knee / pelvis artefacts, Section 5), determine `CATCH_MOTION_TIME` and the reference
-   catch point (with ball CSVs: from the recorded throw), aim Unified at the reference catch point (M2). Then train
-   Unified (stage A) and fine-tune its actor in Phase 2 (stage B), A/B against Phase 2 from scratch.
+3. **Train with the underhand clips** (integrated 2026-10-27, Section 5.2): Phase 1 as a trackability check of the 108 clips (legs, knee / pelvis artefacts), then Unified (stage A) with the fixes of item 1 and fine-tuning of its actor in Phase 2 (stage B), A/B against Phase 2 from scratch. Consider starting more Unified cycles before the launch moment (only ≈ 29 % of the cycles throw).
 4. Refine the throw and perception calibration with the new session's ball CSVs (Section 5.1 used 12 throws of
    2026-07-06 from one thrower at a fixed distance). Measure the latency of the live pipeline (VICON → MQTT →
    robot) to replace the assumed 1–3 steps.
-5. Remaining review findings M2, M3 and L1–L5 in `context/REVIEW.md` (C1, H1, H2, M1, M4 are resolved).
+5. Remaining review findings L1–L4 in `context/REVIEW.md` (C1, H1, H2, M1–M4 and L5 are resolved).
 6. Establish a catch-rate evaluation (final throw distribution, perception model on) and decide which line (Phase 2
    from scratch or Unified → Phase 2) to pursue.
 7. End effector: the rubber hands (collider merged into `*_wrist_yaw_link`, 0.17 kg) stay for now. Decide what is
@@ -494,7 +518,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    - release detection (ballistic fit) before the ball becomes visible; nothing during the wind-up
    - ballistic filter with air drag, bridging gaps of up to 3 control steps, then "not visible"
    - latency forward prediction (then shrink `obs_delay_steps_range` to the residual latency)
-10. Select more / better clips (`pkl_isaac_lab_*`). `MotionCommand` currently loads only **one** file.
+10. Curate the clips: `MotionCommand` loads all of them with equal weight; drop clips that Phase 1 cannot track, or weight them.
 
 ## 12. Context Documents
 
@@ -515,7 +539,10 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
 - `changes/LATENT_mimic_adjustments.md`: LATENT ideas for the mimic stage (not all adopted yet)
 - `guides/debug_instructions.md`: older debug guide (partly outdated, e.g. debug prints were removed)
 - `guides/replay_guide.md`: step-by-step guide (German) to convert, check (`check_motion.py`) and replay a mocap clip
-- `REVIEW.md`: code review of the ball-catching work (findings C1–L5; C1, H1, H2, M1, M4 resolved)
+- `analysis/2026-10-27-phase2-final.md`: evaluation of the Phase 2 baseline (stress tests, joint-stop exploit, hold and wait behavior) with a ranked list of fixes for Phase 2, Unified and the training setup
+- `REVIEW.md`: code review of the ball-catching work (findings C1–L5; C1, H1, H2, M1–M4 and L5 resolved)
+
+Outside `context/`: `data/imitation/README.md` (where the reference clips come from and how to install them on a machine).
 
 In case of conflicts: **code > this spec > other context documents.**
 
@@ -704,3 +731,18 @@ In case of conflicts: **code > this spec > other context documents.**
 - Verified on the workstation (64 envs, resume from `model_7000.pt`): `ball_caught` is listed as a time-out term, the iterations continue at 7000, and from the third iteration on the curriculum is at 0.59 (throws) and −8.30 (`base_height`).
 - Files: `BC/robots/g1_29dof/{phase2,unified}/ball_catch_env_cfg.py`, `scripts/rsl_rl/train.py`.
 - Spec sections 2, 4, 7.2, 7.3, 9, 10 and 11 updated.
+
+### 2026-10-27: Phase 2 baseline finished and evaluated
+- The Phase 2 run with the truncation fix ran to 30k iterations (workstation 1 → workstation 2, final `model_29999.pt`): 99.6 % catches on the final throw distribution (deterministic).
+- Stress tests (long waits, pushes, latency, wider aim, friction, holding without termination) and full-body videos show a joint-stop exploit at the ankle-roll joints, failures after long waits (28 % catches, 28 % falls), sensitivity to latency and pushes, and a squeeze-to-the-chest hold; pushes practically never fired in training.
+- No code change. New context document `context/analysis/2026-10-27-phase2-final.md` (ranked fixes); workstation setup documented in Section 4; spec sections 2, 4, 10, 11 and 12 updated.
+
+### 2026-10-27: Underhand-catch dataset as reference motion (all clips, recorded catch timing)
+- Why: the single overhand chest clip did not match the underhand catch the ball tasks target, and the group now provides prepared underhand clips with VICON ball recordings (GitLab `imitation-data`, also used by Maik's `g1mimic` task).
+- Data: 108 clips (50 Hz) and 89 recordings (120 Hz) of the same takes; the recordings are aligned with their clips by joint angles (time) and root pose (frame); 86 are usable (Section 5.2). Local copy in `data/imitation/` (gitignored, README committed; the repository is public, the data is private group data).
+- `MotionLoader` / `MotionCommand`: all clips as padded tensors; each env tracks one clip, drawn uniformly at every reset or clip end, with adaptive start-bin sampling per clip; `resample_count` marks new cycles; the frame rate must equal the control rate.
+- `SyncedBallCommand`: recorded mode with per-clip catch time, recorded flight time and the recorded catch point re-anchored to the robot at the launch (resolves review findings M2 and M3; `CATCH_MOTION_TIME` removed, fixed mode kept as a fallback); new cycles detected via `resample_count` instead of a backward jump of the motion time; `fps` is a float (L5).
+- New `tasks/ball_catching/motion_data.py` (discovery, LFS check, alignment) and `scripts/mimic/catch_info.py`; Phase 1 uses all clips, Unified the clips with recordings.
+- Verified on workstation 1: `catch_info.py` (86 of 108 usable), Phase 1 and Unified smoke runs (64 envs, 3 iterations), and a kinematic replay of the references in Unified (ball within 0.23 m of the reference wrists around the arrival; ≈ 29 % of the cycles throw).
+- Files: `BC/motion_data.py`, `BC/mdp/commands/{motion_command,synced_ball_command}.py`, `BC/robots/g1_29dof/{phase1,unified}/ball_catch_env_cfg.py`, `BC/robots/g1_29dof/phase1/motions/README.md`, `scripts/mimic/{catch_info,pkl_to_npz}.py`, `data/imitation/README.md`, `context/REVIEW.md`.
+- Spec sections 2, 3, 5 (+ new 5.2), 7.1, 7.3, 8, 9, 11 and 12 updated.

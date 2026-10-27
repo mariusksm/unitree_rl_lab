@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import glob
 import os
 
 import isaaclab.sim as sim_utils
@@ -24,6 +23,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
+from unitree_rl_lab.tasks.ball_catching.motion_data import find_motion_data
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
 
 ##
@@ -39,28 +39,22 @@ VELOCITY_RANGE = {
     "yaw": (-0.78, 0.78),
 }
 
-# ── Catching motion file ────────────────────────────────────────────────
-# Drop the retargeted catching motion (single .npz) into the `motions/` directory
-# next to this file — it is picked up automatically. Pipeline:
-#   VICON Shogun → GMR retarget (.pkl) → scripts/pkl_to_csv_without_hands.py
-#   → scripts/mimic/csv_to_npz.py  (see motions/README.md)
-# Until it exists, training falls back to the Gangnam-style placeholder so the
-# task stays runnable, with a loud warning.
-_MOTION_DIR = os.path.join(os.path.dirname(__file__), "motions")
+# ── Reference motions ───────────────────────────────────────────────────
+# All clips found by motion_data.find_motion_data(): the group's underhand-catch dataset (local copy in
+# data/imitation/, see its README, or the imitation-data repository next to this one), else the old drop-in
+# folder motions/. Each env tracks one clip, drawn anew at every resample. Without any clip the task falls back
+# to the Gangnam-style placeholder so that it stays importable, with a loud warning.
 _PLACEHOLDER_MOTION = os.path.normpath(
     f"{os.path.dirname(__file__)}/../../../../mimic/robots/g1_29dof/gangnanm_style/G1_gangnam_style_V01.bvh_60hz.npz"
 )
-_motion_candidates = sorted(glob.glob(os.path.join(_MOTION_DIR, "*.npz")))
-if _motion_candidates:
-    MOTION_FILE = _motion_candidates[0]
-    if len(_motion_candidates) > 1:
-        print(f"[ball_catching/phase1] Multiple motion files in {_MOTION_DIR}; using: {MOTION_FILE}")
+MOTION_FILES, BALL_DATA_DIR, MOTION_SOURCE = find_motion_data()
+if MOTION_FILES:
+    print(f"[ball_catching] {len(MOTION_FILES)} reference clips from {MOTION_SOURCE}; ball recordings: {BALL_DATA_DIR}")
 else:
-    MOTION_FILE = _PLACEHOLDER_MOTION
+    MOTION_FILES = [_PLACEHOLDER_MOTION]
     print(
-        "\n[ball_catching/phase1] WARNING: no catching motion found in "
-        f"{_MOTION_DIR} — falling back to the Gangnam-style PLACEHOLDER motion. "
-        "The policy will imitate dancing, not catching!\n"
+        "\n[ball_catching] WARNING: no reference clips found (see data/imitation/README.md) — falling back to the "
+        "Gangnam-style PLACEHOLDER motion. The policy will imitate dancing, not catching!\n"
     )
 
 
@@ -111,7 +105,7 @@ class CommandsCfg:
 
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
-        motion_file=MOTION_FILE,
+        motion_files=MOTION_FILES,
         anchor_body_name="torso_link",
         resampling_time_range=(1.0e9, 1.0e9),
         debug_vis=True,

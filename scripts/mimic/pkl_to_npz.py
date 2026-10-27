@@ -271,9 +271,9 @@ def main():
 
     print(f"\n[DONE] npz files in: {out_dir}")
     print(
-        "Next: pick ONE good take, verify it with scripts/mimic/replay_npz.py, then copy it to\n"
-        "  source/unitree_rl_lab/unitree_rl_lab/tasks/ball_catching/robots/g1_29dof/phase1/motions/\n"
-        "and set CATCH_MOTION_TIME in the unified task config to the ball-contact moment of that clip."
+        "Next: verify the clips with scripts/mimic/replay_npz.py, then copy them to data/imitation/g1/ (the\n"
+        "VICON recordings of the same takes to data/imitation/ball/, same file names) and check the catch timing\n"
+        "with scripts/mimic/catch_info.py. See data/imitation/README.md."
     )
 
 

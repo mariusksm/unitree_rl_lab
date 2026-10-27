@@ -1,9 +1,6 @@
-# Catching Motion Files
+# Catching Motion Files (fallback folder)
 
-Place the retargeted **catching** motion here as a single `.npz` file — Phase 1
-(`ball_catch_env_cfg.py`) picks up the first `*.npz` in this directory automatically.
-Until one exists, training falls back to the Gangnam-style placeholder and prints a
-warning (the policy then imitates dancing, not catching).
+Since 2026-10-27 the reference clips come from the group's underhand-catch dataset: Phase 1 and Unified load **all** clips found by `tasks/ball_catching/motion_data.py` (local copy in `data/imitation/g1/`, see `data/imitation/README.md`, or the `imitation-data` repository next to this one). This folder is only used if no dataset is found; then every `*.npz` here is loaded (without ball recordings, so Unified falls back to a fixed catch time). With neither, training falls back to the Gangnam-style placeholder and prints a warning.
 
 ## Pipeline (VICON Shogun → npz)
 
@@ -23,7 +20,7 @@ warning (the policy then imitates dancing, not catching).
    python scripts/mimic/check_motion.py --pkl <file>.pkl --npz <npz_out>/<file>.npz
    ```
 
-4. Verify it visually, then copy it into this directory:
+4. Verify it visually, then copy it into `data/imitation/g1/` (or this directory):
 
    ```bash
    python scripts/mimic/replay_npz.py -f <npz_out>/<file>.npz
