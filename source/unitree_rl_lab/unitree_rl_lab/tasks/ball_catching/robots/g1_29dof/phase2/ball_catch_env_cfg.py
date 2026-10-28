@@ -21,6 +21,7 @@ from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_S
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+FEET_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
 # forearm + hand links the ball may rest on in the two-arm underhand catch (left first, then right)
 ARM_CONTACT_BODY_NAMES = [
     f"{side}_{link}"
@@ -234,7 +235,7 @@ class ActionsCfg:
 
     # NOTE: must match Phase 1 exactly, otherwise transferred policies command
     # different joint targets for the same network output.
-    JointPositionAction = mdp.JointPositionActionCfg(
+    JointPositionAction = mdp.ClampedJointPositionActionCfg(
         asset_name="robot", joint_names=[".*"], scale=UNITREE_G1_29DOF_MIMIC_ACTION_SCALE, use_default_offset=True
     )
 
@@ -373,6 +374,11 @@ class RewardsCfg:
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-5.0)
+    # the 2026-10-27 baseline pressed the ankle-roll targets 2-4 rad past the joint stops (feet on their edges,
+    # torque saturated while waiting); the clamp removes the lever, these two terms the incentive
+    # targets beyond the joint limits change nothing since the clamp (ClampedJointPositionAction): keep them inside
+    joint_target_excess = RewTerm(func=mdp.joint_target_excess, weight=-1.0)
+    joint_torque = RewTerm(func=mdp.joint_torques_l2, weight=-1e-5)  # as Phase 1 / Unified; energy ignores static torque
     energy = RewTerm(func=mdp.energy, weight=-2e-5)
 
     joint_deviation_arms = RewTerm(
@@ -419,6 +425,14 @@ class RewardsCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+        },
+    )
+    feet_flat = RewTerm(
+        func=mdp.feet_flat,
+        weight=-2.0,  # sin² of the tilt per foot in firm contact: 15° -> 0.067; baseline 14-21°, target < 5°
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET_BODY_NAMES, preserve_order=True),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET_BODY_NAMES, preserve_order=True),
         },
     )
     # TEMP: removed foot_clearance_reward — only in locomotion MDP, not ball_catching.

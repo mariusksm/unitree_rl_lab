@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_error_magnitude
+from isaaclab.utils.math import quat_apply_inverse, quat_error_magnitude
 
 from unitree_rl_lab.tasks.ball_catching.mdp.commands import MotionCommand
 
@@ -81,6 +81,33 @@ def motion_global_body_angular_velocity_error_exp(
         torch.square(command.body_ang_vel_w[:, body_indexes] - command.robot_body_ang_vel_w[:, body_indexes]), dim=-1
     )
     return torch.exp(-error.mean(-1) / std**2)
+
+
+def joint_target_excess(env: ManagerBasedRLEnv, action_name: str = "JointPositionAction") -> torch.Tensor:
+    """How far (rad, summed over the joints) the policy's joint targets lie beyond the clamp of a
+    :class:`ClampedJointPositionAction` (the joint limits). Beyond the clamp the reward has no other gradient."""
+    return env.action_manager.get_term(action_name).target_excess
+
+
+def feet_flat(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    force_threshold: float = 50.0,
+) -> torch.Tensor:
+    """Tilt of the feet that carry weight: sum over the feet in firm ground contact of |gravity_xy|² in the foot frame.
+
+    That is sin² of the tilt angle per foot (15° -> 0.067). The ``*_ankle_roll_link`` frame is level when the sole is
+    flat on the ground. Contact counts above ``force_threshold`` N (as in the evaluation suite), so a foot that only
+    touches down or lifts off is not penalized for rolling over its edge.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)
+    asset: Articulation = env.scene[asset_cfg.name]
+    feet_quat = asset.data.body_quat_w[:, asset_cfg.body_ids]
+    gravity = asset.data.GRAVITY_VEC_W.unsqueeze(1).expand(-1, feet_quat.shape[1], -1)
+    gravity_feet = quat_apply_inverse(feet_quat, gravity)
+    return torch.sum(torch.sum(torch.square(gravity_feet[..., :2]), dim=-1) * (forces > force_threshold), dim=-1)
 
 
 def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:

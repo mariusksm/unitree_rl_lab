@@ -183,7 +183,7 @@ class CommandsCfg:
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    JointPositionAction = mdp.JointPositionActionCfg(
+    JointPositionAction = mdp.ClampedJointPositionActionCfg(
         asset_name="robot", joint_names=[".*"], scale=UNITREE_G1_29DOF_MIMIC_ACTION_SCALE, use_default_offset=True
     )
 
@@ -421,6 +421,8 @@ class RewardsCfg:
         weight=-10.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
+    # targets beyond the joint limits change nothing since the clamp (ClampedJointPositionAction): keep them inside
+    joint_target_excess = RewTerm(func=mdp.joint_target_excess, weight=-1.0)
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-0.1,

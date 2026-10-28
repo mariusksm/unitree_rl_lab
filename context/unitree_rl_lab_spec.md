@@ -86,7 +86,7 @@ source/unitree_rl_lab/unitree_rl_lab/
     agents/rsl_rl_ppo_cfg.py           BasePPORunnerCfg (used by all three tasks)
     motion_data.py                     Clip discovery (search order in 5.2), LFS-pointer check, alignment of a
                                        take's VICON recording with its clip (numpy only)
-    mdp/                               commands/, observations, rewards, terminations, events, curriculums
+    mdp/                               actions, commands/, observations, rewards, terminations, events, curriculums
     robots/g1_29dof/phase1/            Env cfg (owns the clip discovery) + motions/ (fallback folder, README)
     robots/g1_29dof/phase2/            Env cfg
     robots/g1_29dof/unified/           Env cfg
@@ -236,7 +236,7 @@ data/imitation/g1/*.npz   (all clips are used; search order and the group datase
 | Robot | `UNITREE_G1_29DOF_MIMIC_CFG` (29 DoF, no hands) |
 | Physics / control | `sim.dt = 0.005`, `decimation = 4`, i.e. **50 Hz policy** |
 | Envs | 4096, spacing 2.5 m, flat plane |
-| Actions | `JointPositionAction`, all joints, `scale = UNITREE_G1_29DOF_MIMIC_ACTION_SCALE` (per joint 0.25·effort/stiffness), `use_default_offset=True` |
+| Actions | Term `JointPositionAction` = `ClampedJointPositionActionCfg` (since 2026-10-28), all joints, `scale = UNITREE_G1_29DOF_MIMIC_ACTION_SCALE` (per joint 0.25·effort/stiffness), `use_default_offset=True`. The joint targets are clamped to the asset's **hard** joint limits (not the soft ones, which would forbid straight knees) through the `clip` of Isaac Lab's `JointAction`; `export_deploy_cfg` writes the limits into `deploy.yaml` (`actions.JointPositionAction.clip`) and the C++ `JointAction` clamps the same way. Penalty `joint_target_excess` −1 in all tasks (sum over the joints of how far the unclamped target lies beyond the limit, rad). |
 | Ball | `RigidObject` sphere **r = 0.075 m (∅15 cm), 0.112 kg** (= mjlab ball, interim report ch. 9.2), friction 0.5, restitution 0.4 (placeholder, real ball not measured). Startup DR: friction 0.3–0.8, restitution 0.2–0.6, mass ±0.015 kg. Quadratic air drag F = −½ρ c_d A \|v\| v as external force during the flight, c_d 0.3–0.45 per throw (k/m 0.028–0.043 1/m, fitted on the VICON throws: 0.030–0.040) (Phase 2 and Unified only) |
 | "Hands" | `HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]` (the rubber hand collider is merged into these bodies). Midpoint = reach target of the ball rewards |
 | Contact sensors | `contact_forces`: `Robot/.*` (whole body, required by `undesired_contacts`). `ball_contact` (Phase 2, Unified): sensor body = ball, filtered against the 8 arm links `{left,right}_{elbow,wrist_roll,wrist_pitch,wrist_yaw}_link`, history 4 |
@@ -292,7 +292,7 @@ the five proprioception terms above.
 - BeyondMimic style: `MotionCommand` with anchor `torso_link`, 14 tracked bodies, teleport reset at clip end, episode length 30 s. Since 2026-10-27 it loads all clips (Section 5.2, 108 underhand clips): every reset or clip end draws a new clip uniformly and a start bin from that clip's failure statistics (adaptive sampling per clip, one bin per second of the longest clip on each clip's normalized time).
 - Rewards:
   - Tracking exp kernels: anchor pos/ori 0.5 each; body pos/ori/lin_vel/ang_vel 1.0 each.
-  - Regularization: joint_acc, joint_torque, action_rate −0.1, joint_limit −10, undesired_contacts −0.1
+  - Regularization: joint_acc, joint_torque, action_rate −0.1, joint_limit −10, joint_target_excess −1, undesired_contacts −0.1
     (excluding ankles and wrists).
 - Terminations: `anchor_pos` (z > 0.25), `anchor_ori` (0.8), `ee_body_pos` (z > 0.25 at ankles and wrists), timeout.
 - DR: material 0.3–1.6 / 0.3–1.2 / restitution 0–0.5, default joint offset ±0.01, torso CoM, torso mass −1…+3 kg,
@@ -350,7 +350,10 @@ the five proprioception terms above.
   | `ball_height_penalty` | −5 | ball below 0.5 m |
   | `alive` | 1.0 | 0.02 per step; discounted at most ≈2, below the catch bonus |
   | `termination_penalty` | −200 | `is_terminated_term` for `base_height` / `bad_orientation` only: −4 per fall (catch and drop are not penalized) |
-  | Posture crutches | | `base_height` −10 @0.76 m, `flat_orientation` −5, `joint_deviation_*`, `feet_slide`, `undesired_contacts` −1 (excluding ankles, elbow and wrist links, torso: the ball rests there), further locomotion regularization |
+  | `joint_target_excess` | −1.0 | joint targets beyond the clamp (Section 6): the baseline pressed the ankle-roll targets 2–4 rad past the stops |
+  | `joint_torque` | −1e-5 | Σ torque², as in Phase 1 / Unified (`energy` ignores static torque; the baseline stood with saturated ankle torque) |
+  | `feet_flat` | −2.0 | Σ over the feet in firm contact (> 50 N) of sin² of their tilt (projected gravity xy of `*_ankle_roll_link`); baseline 14–21° on the foot edges |
+  | Posture crutches | | `base_height` −10 @0.76 m, `flat_orientation` −5, `joint_deviation_*`, `feet_slide`, `undesired_contacts` −1 (excluding ankles, elbow and wrist links, torso: the ball rests there), further locomotion regularization (`energy`, `action_rate`, `dof_pos_limits`, …) |
 
   `alive` and `termination_penalty` are required: Phase 2 has no other positive dense reward, so with `alive` 0.15 and
   no fall penalty the early per-step penalties (mostly `action_rate` from the exploration noise, ≈20× `alive`) make
@@ -391,7 +394,8 @@ the five proprioception terms above.
   - Anchor tracking keeps full weight.
 - 6-DoF pushes every 2–5 s. Runner: `BasePPORunnerCfg` (std 1.0), from scratch (Phase 1 checkpoints do not fit
   the actor).
-- Before serious training: run Phase 1 on the clips as a trackability check (legs), and carry over the joint-stop fix from Section 11 (Unified has the same unclipped actions).
+- Regularization: Phase 1 set (`joint_torque`, `action_rate`, `joint_limit` −10, `joint_target_excess` −1, …). No `feet_flat`: the feet are tracked bodies, their orientation is rewarded already; add it if the suite shows tilted feet.
+- Before serious training: run Phase 1 on the clips as a trackability check (legs).
 
 ## 8. MDP Building Blocks (`BC/mdp/`)
 
@@ -401,7 +405,8 @@ the five proprioception terms above.
 | `commands/ball_command.py` | `flight_time_from_apex`. `BallCommand(Cfg)`: throw sampling (frozen at reset), parking, drag-compensated launch, air drag, catch check, perception model, `secured_steps`, `arm_contact`, `launched`, `perceived_pos_b`, `perceived_vel_b`, `ball_visible`. Metrics `ball_height`, `ball_secured_time`, `hand_ball_distance`, `ball_in_catch_zone`, `ball_arm_contact`. Helpers `_sample_throw`, `_write_parked_state`, `_launch`, `_solve_launch_velocity`, `_drag_displacement`, `_apply_drag`, `_update_arm_contact`, `_update_catch_state`, `_reset_perception`, `_update_perception` |
 | `commands/synced_ball_command.py` | `SyncedBallCommand(Cfg)` (Unified only): launch coupled to the motion phase; recorded mode with per-clip catch time, flight time and re-anchored catch point from the take's VICON recording, fixed mode with one catch time; `_start_cycle` = new throw per motion cycle |
 | `observations.py` | Motion obs (`motion_anchor_*`, `robot_body_*`), true ball obs for the critic (`ball_pos_vel_b`, `ball_to_hands_b`, `ball_intercept_b`, `hand_pos_b`), perceived ball obs for the actor (`ball_perceived_pos_vel_b`, `ball_visible`, `ball_perceived_intercept_b`), shared `_ballistic_intercept`, `dummy_zeros` |
-| `rewards.py` | Tracking exp rewards, `energy`, `ball_interception_exp` (eq. 9.1, distance-only without `std_vel`), `ball_arm_contact`, `ball_caught_bonus`, `ball_secured`, `ball_height_penalty` |
+| `actions.py` | `ClampedJointPositionAction(Cfg)`: `JointPositionAction` with the targets clamped to the hard joint limits (via `clip`, exported to `deploy.yaml`), `target_excess` per env |
+| `rewards.py` | Tracking exp rewards, `energy`, `joint_target_excess`, `feet_flat`, `ball_interception_exp` (eq. 9.1, distance-only without `std_vel`), `ball_arm_contact`, `ball_caught_bonus`, `ball_secured`, `ball_height_penalty` |
 | `terminations.py` | Tracking terminations (`bad_anchor_*`, `bad_motion_body_pos*`), `ball_caught`, `ball_below_height`, `ball_far_from_robot` |
 | `events.py` | `randomize_joint_default_pos`, `randomize_rigid_body_com` |
 | `../motion_data.py` | `find_motion_data` (search order), `is_lfs_pointer`, `ball_file_for`, `align_recording`, `compare_with_human` (clip arms vs the human of the recording), `compute_catch_info` / `catch_infos` (recording ↔ clip alignment, validity limits), G1 asset constants `G1_JOINT_NAMES`, `G1_HAND_BODY_INDEXES`, `G1_ARM_POINTS` (numpy only) |
@@ -445,6 +450,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 16. A success termination after which positive per-step rewards would keep flowing (hold, contact, `alive`, tracking) must be a truncation (`time_out=True`). As a plain termination it cuts those rewards, and the policy learns to postpone the success instead of completing it (Phase 2 run 2026-10-22).
 17. Reference clips must run at the control rate (50 Hz, one frame per control step) and use the Isaac joint and body order of our G1 asset; `MotionCommand` refuses other frame rates. The dataset's `.npz` files are Git LFS objects: without `git lfs pull` only pointer files are checked out, which `motion_data.py` detects.
 18. A VICON recording and its clip are two retargets of the same take with different time windows and frames; use the catch data only through `compute_catch_info` (alignment), never by frame index. Check new clips with `check_npz_fk.py` (joint and body order against the asset) and `check_dataset.py` (arm motion against the human).
+19. Joint targets are clamped to the hard joint limits (`ClampedJointPositionAction`, Section 6). Without the clamp the policy can press a joint against its stop with a target far beyond it: the PD controller then delivers saturated torque at no visible cost (Phase 2 baseline, ankle roll). Keep the action term's `clip` set (it carries the clamp into `deploy.yaml`), and keep `joint_target_excess`, otherwise the raw actions behind the clamp can grow without effect.
 
 ## 10. Training History & Artifacts
 
@@ -508,8 +514,8 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
 ## 11. Open Items & Next Steps (prioritized)
 
 1. **Fix the Phase 2 baseline, then retrain** (ranking and reasons in `context/analysis/2026-10-27-phase2-final.md`, implementation plan for fixes 1–4 in `context/planning/2026-10-27-fixes-unified-phase2-plan.md`, branch `fixes-2026-10-28`).
-   - Implemented on 2026-10-28, tests pending: perception latency 1–5 steps (fix 3); recordings whose clip arms deviate from the human are no longer used (fix 4, verified: 84 of 108).
-   - Still open: clamp joint targets to the joint range, add a torque penalty and a flat-feet term (all tasks share the unclipped actions); random long waits before the throw (e.g. 0.5–8 s) and a hold phase after the confirmed catch with stand-still terms (bonus once per episode); pushes that fire within episodes; lower `entropy_coef`; a ready pose before the throw.
+   - Implemented on 2026-10-28, tests pending: perception latency 1–5 steps (fix 3); recordings whose clip arms deviate from the human are no longer used (fix 4, verified: 84 of 108); joint targets clamped to the hard joint limits in all tasks with an excess penalty, Phase 2 additionally with torque and flat-feet terms (fix 2, smoke run only).
+   - Still open: random long waits before the throw (e.g. 0.5–8 s) and a hold phase after the confirmed catch with stand-still terms (bonus once per episode); pushes that fire within episodes; lower `entropy_coef`; a ready pose before the throw.
    - 15–20k iterations suffice. Evaluate with the stress-test scenarios, not the training catch rate.
 2. **Measure the real ball:** diameter, mass, restitution (drop test, e = √(h_bounce / h_drop)) and friction. Replace
    the placeholder restitution 0.4 / DR 0.2–0.6 and confirm the mjlab values (∅15 cm, 112 g; the drag of the
@@ -530,7 +536,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    - states the real robot sees: long pre-throw waiting, holding after the catch, standing after a miss
    - no-walking constraint (foot displacement) and a fall penalty
 9. Sim2Sim in MuJoCo (scene with a ball and a fake VICON publisher), ONNX export, deploy config and C++ ball
-   observation terms (`ball_state`, `ball_visible`, `ball_intercept`). Build the live VICON pipeline so that it
+   observation terms (`ball_state`, `ball_visible`, `ball_intercept`). The joint-target clamp is already covered: `deploy.yaml` carries the joint limits as `clip`, which the C++ `JointAction` applies (check it on the real robot). Build the live VICON pipeline so that it
    produces what the perception model assumes:
    - robot base tracking; ball relative to the root in the yaw frame (**identical** math to `observations.py`)
    - release detection (ballistic fit) before the ball becomes visible; nothing during the wind-up
@@ -790,3 +796,12 @@ In case of conflicts: **code > this spec > other context documents.**
 - Verified on workstation 2 (numpy): 84 of 108 clips usable (86 before). Besides 51, the check rejects clip 82, whose time offset is normal (−0.08 s) but whose right hand drifts 0.11–0.15 m off the human's palm in the second half; the plan expected only 51 (85 clips) and assumed all other clips within 0.07 m. All accepted clips stay within 0.07 m. `check_dataset.py` uses the same limit and now reports 86 of 89 (51, 52, 82).
 - Files: `BC/motion_data.py`, `BC/mdp/commands/synced_ball_command.py` (reason summary), `scripts/mimic/{catch_info,check_dataset}.py`.
 - Spec sections 2, 5.2, 7.3, 8 and 11 updated.
+
+### 2026-10-28: Joint targets clamped to the joint limits (fix 2; implemented, tests pending)
+- Why: the actions were unbounded in all three tasks. The Phase 2 baseline drove the ankle-roll targets 2–4 rad past the joint range in 98–99 % of the steps, stood on the joint stops with saturated torque during the whole wait and with its feet tilted by 14–21°; Phase 2 had no torque penalty (`energy` ignores static torque).
+- New `BC/mdp/actions.py`: `ClampedJointPositionAction(Cfg)`, a `JointPositionAction` whose targets are clamped to the asset's hard joint limits (the reachable range stays the same; the soft limits would have forbidden straight knees) through Isaac Lab's `clip`. `export_deploy_cfg` writes the limits into `deploy.yaml`, and the C++ `JointAction` already applies `clip`, so the robot clamps identically (smoke run: 29 ranges, e.g. ankle roll ±0.262 rad, knee −0.087…2.88 rad). `target_excess` (sum of |unclamped − clamped| per env) feeds the new reward `joint_target_excess`.
+- All three tasks use the clamped term (term name `JointPositionAction` unchanged) with `joint_target_excess` −1. Phase 2 additionally gets `joint_torque` −1e-5 (as Phase 1 / Unified) and the new `feet_flat` −2 (sin² of the tilt of each foot in firm contact > 50 N).
+- Old checkpoints still load (same network), but behave differently on the clamped targets; train new runs from scratch.
+- Verified so far: smoke runs of all three tasks on workstation 2 (64 envs, 3 iterations), terms active, `deploy.yaml` with the limits; Unified reports recorded catches for 84 of 89 clips (fix 4).
+- Files: `BC/mdp/{actions,rewards,__init__}.py`, `BC/robots/g1_29dof/{phase1,phase2,unified}/ball_catch_env_cfg.py`.
+- Spec sections 3, 6, 7.1, 7.2, 7.3, 8, 9 (new pitfall 19) and 11 updated.
