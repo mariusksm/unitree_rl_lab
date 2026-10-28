@@ -172,6 +172,9 @@ class CommandsCfg:
         start_hold_prob=START_HOLD_PROB,
         hold_from_s=HOLD_FROM_S,
         end_hold_s=END_HOLD_S,
+        # a dropped or missed ball counts where its cycle started (before the throw), not after the throw, where
+        # restarted cycles would get no ball: clips where the ball falls get more throws instead of fewer
+        start_bin_failure_terms=["ball_dropped", "ball_missed"],
         body_names=[
             "pelvis",
             "left_hip_roll_link",

@@ -126,6 +126,9 @@ class MotionCommand(CommandTerm):
         self.resample_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         """Incremented whenever clip and time are resampled (reset or clip end), so that other terms can detect a
         new cycle even when the new start time lies after the old one."""
+        self.cycle_start_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        """Time step at which each env's current cycle started."""
+        self._start_bin_terms: list[str] | None = None  # resolved at the first failure (no termination manager yet)
         self.body_pos_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 3, device=self.device)
         self.body_quat_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 4, device=self.device)
         self.body_quat_relative_w[:, :, 0] = 1.0
@@ -271,7 +274,13 @@ class MotionCommand(CommandTerm):
         if torch.any(episode_failed):
             failed = env_ids[episode_failed]
             lengths = self.motion.time_step_total[self.clip_ids[failed]].clamp(min=1)
-            bins = torch.clamp((self.time_steps[failed] * self.bin_count) // lengths, 0, self.bin_count - 1)
+            steps = self.time_steps[failed]
+            # failures that only a cycle starting earlier can repeat (a dropped ball: cycles that start after the
+            # throw get no ball) are counted in the bin where the failed cycle started
+            for name in self._resolve_start_bin_terms():
+                at_start = self._env.termination_manager.get_term(name)[failed]
+                steps = torch.where(at_start, self.cycle_start_steps[failed], steps)
+            bins = torch.clamp((steps * self.bin_count) // lengths, 0, self.bin_count - 1)
             flat = torch.bincount(self.clip_ids[failed] * self.bin_count + bins, minlength=num_clips * self.bin_count)
             self._current_bin_failed[:] = flat.view(num_clips, self.bin_count).float()
 
@@ -302,6 +311,7 @@ class MotionCommand(CommandTerm):
             else:
                 waiting = env_ids[torch.rand(len(env_ids), device=self.device) < self.cfg.start_hold_prob]
                 self.time_steps[waiting] = torch.randint(0, lead_in, (len(waiting),), device=self.device)
+        self.cycle_start_steps[env_ids] = self.time_steps[env_ids]
 
         # Metrics (of the clip each resampled env now tracks)
         H = -(clip_probabilities * (clip_probabilities + 1e-12).log()).sum(dim=1)
@@ -309,6 +319,16 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_entropy"][env_ids] = H / math.log(self.bin_count) if self.bin_count > 1 else H
         self.metrics["sampling_top1_prob"][env_ids] = pmax
         self.metrics["sampling_top1_bin"][env_ids] = imax.float() / self.bin_count
+
+    def _resolve_start_bin_terms(self) -> list[str]:
+        """Active terms of ``cfg.start_bin_failure_terms``; disabled terms are skipped, unknown names raise."""
+        if self._start_bin_terms is None:
+            unknown = [n for n in self.cfg.start_bin_failure_terms if not hasattr(self._env.cfg.terminations, n)]
+            if unknown:
+                raise ValueError(f"MotionCommandCfg.start_bin_failure_terms: no termination term named {unknown}")
+            active = self._env.termination_manager.active_terms
+            self._start_bin_terms = [n for n in self.cfg.start_bin_failure_terms if n in active]
+        return self._start_bin_terms
 
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
@@ -456,6 +476,12 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_lambda: float = 0.8
     adaptive_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
+
+    start_bin_failure_terms: list[str] = []
+    """Termination terms whose failures are counted in the bin where the failed cycle started, not where it ended
+    (Unified: the ball terms). A cycle that starts after the throw gets no ball, so counting a drop where it happens
+    steers the starts away from the throws; counted at the start, a clip where the ball falls gets more cycles with a
+    throw. Disabled terms are skipped, unknown names raise."""
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
