@@ -533,9 +533,11 @@ class BallCommandCfg(CommandTermCfg):
     """Time (s) after the release until the pipeline reports a ball in flight (ballistic-fit window). Before
     that, e.g. during the thrower's wind-up, the ball is not visible."""
 
-    obs_delay_steps_range: tuple[int, int] = (1, 3)
+    obs_delay_steps_range: tuple[int, int] = (1, 5)
     """Latency (control steps of 20 ms) of the ball observation, sampled per throw (VICON + MQTT + filter;
-    not measured yet). If the deploy filter predicts the latency away, set this to the residual latency."""
+    not measured yet, so up to 100 ms: 80-120 ms cost the 2026-10-27 baseline, trained on 1-3 steps, 6 points of
+    catch rate). The default sizes the perception buffer and must hold the largest delay. If the deploy filter
+    predicts the latency away, set this to the residual latency."""
 
     obs_pos_noise_std: float = 0.005
     """Std (m) of the position noise per axis (VICON throws: 4–5 mm around a drag-fitted parabola)."""

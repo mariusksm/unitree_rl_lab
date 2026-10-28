@@ -330,8 +330,9 @@ the five proprioception terms above.
      relative to the root (yaw frame). A measurement is valid once the ball has flown for `detection_delay_range`
      (0.04–0.12 s; before that, e.g. during the wind-up, the ball is invisible), unless a **dropout burst** runs
      (starts with p 0.05 per step, lasts 1–3 steps) or the arms occlude it (`hide_in_catch_zone_prob` 0.5 per throw:
-     invisible for its whole stay in the catch box). Measurements arrive `obs_delay_steps_range` (1–3) steps late
-     with noise (5 mm, 0.1 m/s) and a per-throw bias (±1 cm). Gaps are bridged by ballistic prediction for 3 steps;
+     invisible for its whole stay in the catch box). Measurements arrive `obs_delay_steps_range` (1–5, i.e. up to
+     100 ms; 1–3 until 2026-10-27) steps late with noise (5 mm, 0.1 m/s) and a per-throw bias (±1 cm). The real latency
+     is not measured yet; 80–120 ms cost the 2026-10-27 baseline (trained on 1–3) 6 points of catch rate. Gaps are bridged by ballistic prediction for 3 steps;
      after that the ball counts as not visible (perceived state 0, `ball_visible` 0). Probe (2026-10-16): in flight
      88.8 % fresh measurements, 8.6 % coasted, 2.6 % not visible; zero noise and fixed delay reproduce the true
      state of 2 steps earlier exactly.
@@ -437,8 +438,9 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 13. `ball_throw_curriculum` sets `BallCommandCfg` fields with `setattr`; a misspelled key is silently ignored.
 14. `ball_missed` (`max_distance`) must exceed the largest release distance, otherwise it fires while the ball is
     still parked.
-15. The perception ring buffer is sized from the default `obs_delay_steps_range` (the largest delay). The curriculum
-    may only shrink the delay range; larger delays are clipped to the buffer.
+15. The perception ring buffer is sized from the default `obs_delay_steps_range` (the largest delay, 5 steps). The
+    curriculum may only shrink the delay range; larger delays are clipped to the buffer. Scenarios with a longer delay
+    (`eval_catch.py --scenario delay`) set the range before the env is built.
 16. A success termination after which positive per-step rewards would keep flowing (hold, contact, `alive`, tracking) must be a truncation (`time_out=True`). As a plain termination it cuts those rewards, and the policy learns to postpone the success instead of completing it (Phase 2 run 2026-10-22).
 17. Reference clips must run at the control rate (50 Hz, one frame per control step) and use the Isaac joint and body order of our G1 asset; `MotionCommand` refuses other frame rates. The dataset's `.npz` files are Git LFS objects: without `git lfs pull` only pointer files are checked out, which `motion_data.py` detects.
 18. A VICON recording and its clip are two retargets of the same take with different time windows and frames; use the catch data only through `compute_catch_info` (alignment), never by frame index. Check new clips with `check_npz_fk.py` (joint and body order against the asset) and `check_dataset.py` (arm motion against the human).
@@ -504,7 +506,10 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
 
 ## 11. Open Items & Next Steps (prioritized)
 
-1. **Fix the Phase 2 baseline, then retrain** (ranking and reasons in `context/analysis/2026-10-27-phase2-final.md`): clamp joint targets to the joint range, add a torque penalty and a flat-feet term (all tasks share the unclipped actions); random long waits before the throw (e.g. 0.5–8 s) and a hold phase after the confirmed catch with stand-still terms (bonus once per episode); pushes that fire within episodes; perception latency up to the measured value plus margin (default `obs_delay_steps_range`, the ring buffer is sized from it); lower `entropy_coef`; a ready pose before the throw. 15–20k iterations suffice. Evaluate with the stress-test scenarios, not the training catch rate.
+1. **Fix the Phase 2 baseline, then retrain** (ranking and reasons in `context/analysis/2026-10-27-phase2-final.md`, implementation plan for fixes 1–4 in `context/planning/2026-10-27-fixes-unified-phase2-plan.md`, branch `fixes-2026-10-28`).
+   - Implemented on 2026-10-28, tests pending: perception latency 1–5 steps (fix 3).
+   - Still open: clamp joint targets to the joint range, add a torque penalty and a flat-feet term (all tasks share the unclipped actions); random long waits before the throw (e.g. 0.5–8 s) and a hold phase after the confirmed catch with stand-still terms (bonus once per episode); pushes that fire within episodes; lower `entropy_coef`; a ready pose before the throw.
+   - 15–20k iterations suffice. Evaluate with the stress-test scenarios, not the training catch rate.
 2. **Measure the real ball:** diameter, mass, restitution (drop test, e = √(h_bounce / h_drop)) and friction. Replace
    the placeholder restitution 0.4 / DR 0.2–0.6 and confirm the mjlab values (∅15 cm, 112 g; the drag of the
    recorded throws fits such a ball). Static probes on 2026-10-16 showed that restitution decides how many throws
@@ -513,7 +518,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
 3. **Train with the underhand clips** (integrated 2026-10-27, Section 5.2): Phase 1 as a trackability check of the 108 clips (legs, knee / pelvis artefacts), then Unified (stage A) with the fixes of item 1 and fine-tuning of its actor in Phase 2 (stage B), A/B against Phase 2 from scratch. Consider starting more Unified cycles before the launch moment (only ≈ 29 % of the cycles throw), and decide on the knees: the references sit below the soft knee limit almost all the time, so either exempt the knees from `joint_limit` in the tracking tasks or accept a slightly bent-knee tracking.
 4. Refine the throw and perception calibration with the new session's ball CSVs (Section 5.1 used 12 throws of
    2026-07-06 from one thrower at a fixed distance). Measure the latency of the live pipeline (VICON → MQTT →
-   robot) to replace the assumed 1–3 steps.
+   robot) to replace the assumed 1–5 steps.
 5. Remaining review findings L1–L4 in `context/REVIEW.md` (C1, H1, H2, M1–M4 and L5 are resolved).
 6. Evaluate every run with the suite (`scripts/rsl_rl/eval_catch_all.sh`, Section 4) instead of the training catch rate, and decide on that basis which line (Phase 2 from scratch or Unified → Phase 2) to pursue. For Unified the suite still lacks a long-wait scenario (its throws follow the clip timing).
 7. End effector: the rubber hands (collider merged into `*_wrist_yaw_link`, 0.17 kg) stay for now. Decide what is
@@ -542,6 +547,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
 - `protocols/`: weekly meeting minutes from 22 May to 10 Aug 2026 (German; team split, status of other subgroups)
 - `planning/g1_catching_optimization_plan.md`: analysis, findings F-1…F-13, roadmap P0–P3 (sim2real, Dex3 concept)
 - `planning/Phase2_BallCommand_plan.md`: early Phase 2 plan (partly outdated, e.g. multi-throw logic was removed)
+- `planning/2026-10-27-fixes-unified-phase2-plan.md`: implementation plan (German) for fixes 1–4 of the Phase 2 analysis in Phase 2 and Unified (waiting and holding, joint-target clamp, latency, clip 51), with the test procedure and the baseline values
 - `changes/p0_changes.md`, `changes/p1_changes.md`, `changes/merge_changes.md`: changelogs of the 10 Aug implementation
 - `changes/2026-10-16-underhand-catch-p0.md`: P0 of the 2026-10-16 analysis (mjlab ball, underhand lob, air drag,
   arm-contact catch detection), with the report basis, probe results and open placeholders. New change documents
@@ -769,3 +775,10 @@ In case of conflicts: **code > this spec > other context documents.**
 - Why: the training catch rate (≈ 95 %) hid the weaknesses that the stress tests of the Phase 2 baseline exposed (long waits, joint-stop exploit, latency, pushes); every run needs the same comparable measurement.
 - New `scripts/rsl_rl/eval_catch.py` (one checkpoint and scenario: base, fric_high, fric_low, hold, wait, push, lateral, delay; deterministic policy in the play config; JSON with outcomes, foot behavior incl. gliding vs. pivoting and foot tilt, posture, hold geometry incl. torso contact, joints at their limits, torque saturation; optional full-body video), `scripts/rsl_rl/eval_catch_all.sh` (all scenarios of a task) and `scripts/rsl_rl/eval_catch_report.py` (comparison table). Works for Phase 2 and Unified; `wait` and `lateral` are refused for Unified.
 - Spec sections 3, 4, 10 and 11 updated; `CLAUDE.md` lists the command.
+
+### 2026-10-28: Perception latency up to 5 steps (fix 3; implemented, tests pending)
+- Why: 4–6 steps of perception latency cost the 2026-10-27 baseline (trained on 1–3) 6 points of catch rate (93.6 % vs. 99.6 %), and the latency of the live chain VICON → MQTT → robot is not measured yet.
+- `BallCommandCfg.obs_delay_steps_range` default (1, 3) → (1, 5) (it sizes the perception ring buffer), and the final curriculum stage of Phase 2 and Unified likewise; the easy stage keeps 1 step. The suite's `delay` scenario (4–6 steps) stays unchanged for comparison with the baseline.
+- First of the fixes 1–4 on branch `fixes-2026-10-28` (plan: `context/planning/2026-10-27-fixes-unified-phase2-plan.md`, added to the repository).
+- Files: `BC/mdp/commands/ball_command.py`, `BC/robots/g1_29dof/{phase2,unified}/ball_catch_env_cfg.py`, `scripts/rsl_rl/eval_catch.py` (docstring).
+- Spec sections 7.2, 9, 11 and 12 updated.

@@ -519,7 +519,7 @@ class CurriculumCfg:
                 "apex_height_range": (1.75, 2.1),
                 "velocity_noise": 0.1,
                 "secure_steps": 50,
-                "obs_delay_steps_range": (1, 3),
+                "obs_delay_steps_range": (1, 5),
                 "obs_dropout_prob": 0.05,
                 "hide_in_catch_zone_prob": 0.5,
             },

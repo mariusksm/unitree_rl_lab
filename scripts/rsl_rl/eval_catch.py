@@ -13,7 +13,7 @@ the env is built:
   wait       throw after 6-9 s instead of 0.5-1.5 s, as on the real robot      (Phase 2 only: Unified throws with the clip)
   push       velocity pushes of ±0.5 m/s every 1-2 s
   lateral    throws aimed ±0.3 m sideways instead of ±0.1 m                    (Phase 2 only: Unified aims at the clip)
-  delay      perception latency 4-6 control steps instead of 1-3
+  delay      perception latency 4-6 control steps (training until 2026-10-27: 1-3, since then 1-5; kept for comparison)
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
 
