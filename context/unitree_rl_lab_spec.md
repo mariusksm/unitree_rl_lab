@@ -42,7 +42,7 @@
 |---|---|
 | Motion conversion (.pkl → .npz) | ✅ Fixed on 2026-09-28 (the right arm was filled with left-hand finger joints; all `.npz` created before that date were corrupt and have been deleted). Since 2026-10-27 the reference clips come prepared from the group's dataset (Section 5.2); `pkl_to_npz.py` remains for new takes. |
 | Reference motion | ✅ 2026-10-27: the group's **underhand-catch dataset** (GitLab `imitation-data`: 108 clips at 50 Hz, 89 of them with a VICON recording of the take) replaces the single overhand clip. Phase 1 and Unified train on all clips; Unified throws at the recorded catch time and catch point of each clip (84 usable recordings since 2026-10-28, 86 before). Section 5.2. |
-| Phase 1 (mimic) on real mocap data | ⚠️ No checkpoint; runs on the 108 underhand clips (smoke test 2026-10-27). Since 2026-10-16 Phase 1 is a clip trackability check only (actor sees the reference), **not** a warm start for Phase 2. |
+| Phase 1 (mimic) on real mocap data | ✅ 2026-10-28: trained on the 108 underhand clips (workstation 2, 10k iterations, run `2026-10-28_14-28-00`, code before fixes 1–4). Every clip is tracked from start to end without a tracking termination, body error 5 cm, almost all of it from a height offset of the clips (Section 5.2). Since 2026-10-16 Phase 1 is a clip trackability check only (actor sees the reference), **not** a warm start for Phase 2. |
 | VICON ball recordings | ✅ Found 2026-10-16: 21 takes of the 2026-07-06 session with ball CSV + retargeted `.pkl` (12 complete underhand throws), see Section 5.1. Used to calibrate throws, drag and the perception model. |
 | Ball and throw model | ✅ 2026-10-16: mjlab ball (∅15 cm, 112 g; drag fits the recordings), underhand lob from 2–5 m released at 0.85–1.2 m with apex 1.75–2.1 m, quadratic air drag with drag-compensated aim, catch = ball held in a box in front of the torso while touching both arms for 1 s. Restitution is a placeholder until the real ball is measured. |
 | Actor observations | ✅ 2026-10-16: deployable actor contract in Phase 2 and Unified (perceived ball + visibility flag + intercept + proprioception, no reference, no hand positions). Ball perceived through a VICON model (detection delay, latency, noise, dropout bursts, occlusion in the catch box, coasting). |
@@ -227,7 +227,8 @@ data/imitation/g1/*.npz   (all clips are used; search order and the group datase
   - `scripts/mimic/check_npz_fk.py --headless` (Isaac): all 108 clips posed on UNITREE_G1_29DOF_MIMIC_CFG reproduce their stored body positions to < 0.1 mm, so `joint_pos` is in the asset's joint order and `body_pos_w` in its body order (negative control: swapped elbow columns or SDK order give 0.27–0.39 m). The clips exceed the hard limits by at most 0.08 rad (right wrist roll).
   - `scripts/mimic/check_dataset.py` (numpy): the clips' elbows and hands follow the human elbows and palms of the recordings (scale 0.84) with 4–6 cm RMSE (worst point ≤ 0.07 m), on the same side, and the other side never fits better. Clips 51 and 52 (unusual time offsets of +0.76 s and +1.2 s) deviate by 0.12–0.22 m, and clip 82's right hand drifts 0.11 m off the human's palm although its offset is normal. No clip has a static arm. Joint angles are no test here: the recordings' own retarget distributes the arm motion differently (less elbow, more wrist roll).
   - Since 2026-10-28 this comparison (`motion_data.compare_with_human`) is part of the validity check of a recording: the worst of the four points must stay within `MAX_ARM_RMSE` = 0.10 m, otherwise the recorded catch point does not belong to the clip's hands.
-  - The knees stay below the soft limit (0.06 rad) in 93–98 % of the frames (the person stands with straight knees), as with the old clip: the `joint_limit` penalty of Phase 1 and Unified acts during the whole clip.
+  - The knees stay below the soft limit (0.06 rad) in 93–98 % of the frames (the person stands with straight knees), as with the old clip: the `joint_limit` penalty of Phase 1 and Unified acts during the whole clip. The Phase 1 run of 2026-10-28 bends its knees by 9.7° on average (reference 1.3°) at a penalty of −0.004 and tracks every clip (Section 10).
+- **Height offset:** the clips sit about 4.5 cm too low. Their ankle links reach 1.2–1.8 cm below the ground plane, those of the standing robot are at about +3 cm, so the torso and feet of a robot standing on the ground are 4.4–4.6 cm above its reference in every clip (Phase 1 run of 2026-10-28). Consequences: a floor of about 5 cm in the body position error; every start from the reference pose (each reset and clip end) puts the robot 4.5 cm into the ground, and physics pushes it out by 4.2–4.8 cm within 0.2 s; in Unified the recorded catch point, which lives in the clip frame, is 4.5 cm too low relative to the robot. Not corrected yet (Section 11).
 
 ## 6. Common Task Base (all three ball tasks)
 
@@ -480,6 +481,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 | `ballcatch_phase2/2026-10-22_16-04-10` (workstation) | Phase 2 | – | 4096 envs, stopped after iteration 7000 (`model_7000.pt`): learned to hold the ball without completing the catch (below); continued with the truncation fix |
 | `ballcatch_phase2/2026-10-22_21-14-31` (workstation 1) | Phase 2 | – | resumed from `model_7000.pt` with the truncation fix; slowed to 11 s per iteration by a second job on the GPU, ended at ≈ iteration 8935 when the tmux session was closed; last checkpoint `model_8500.pt` |
 | `ballcatch_phase2/2026-10-23_03-35-20` (workstation 2, RTX 4080) | Phase 2 | – | resumed from `model_8500.pt`, ran to `model_29999.pt` (2.7 s per iteration); **current Phase 2 baseline**, evaluated on 2026-10-27 (below) |
+| `ballcatch_phase1/2026-10-28_14-28-00` (workstation 2) | Phase 1 | 108 dataset clips | 10k iterations, 4096 envs, 4.9 h (1.5 s per iteration), code `71c1767` (before fixes 1–4). End of training: 99.4 % of the episodes run the full 30 s, body error 6.2 cm. Per-clip check (every clip once from its first frame, deterministic, no pushes or noise): no clip triggers a tracking termination, body error 5.0 cm (worst clip 5.7 cm), hands and feet at most 6.8 cm (worst 13 cm) off in height, feet in firm contact slide 1.2 cm/s, knees at 9.7° (reference 1.3°), torso and feet 4.5 cm above the reference (height offset of the clips, Section 5.2); deep squats (clips 28, 41, 15) are tracked less deep; ankle targets beyond the hard limits in 0.2 % of the steps (single clips up to ≈ 13 %). Side-by-side video, contact sheets, per-clip table and scripts: `analysis/2026-10-28_phase1/` on Marius' laptop |
 | Unified | – | – | never started |
 
 As of 2026-10-16 both `logs/rsl_rl/unitree_g1_29dof_ballcatch_phase1/` and `…_phase2/` are empty: the runs above no
@@ -548,7 +550,8 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    recorded throws fits such a ball). Static probes on 2026-10-16 showed that restitution decides how many throws
    stay in the arms (static cradle: 8/45 at e = 0.6, 21/45 at e = 0.3, 32/45 at e = 0), and that a ∅10 cm ball
    falls through the forearm cradle.
-3. **Train with the underhand clips** (integrated 2026-10-27, Section 5.2): Phase 1 as a trackability check of the 108 clips (legs, knee / pelvis artefacts), then Unified (stage A) with the fixes of item 1 and fine-tuning of its actor in Phase 2 (stage B), A/B against Phase 2 from scratch. Decide on the knees: the references sit below the soft knee limit almost all the time, so either exempt the knees from `joint_limit` in the tracking tasks or accept a slightly bent-knee tracking.
+3. **Train with the underhand clips** (integrated 2026-10-27, Section 5.2): Phase 1 trackability check done on 2026-10-28 (all 108 clips tracked, Section 10). Next: Unified (stage A) with the fixes of item 1 and fine-tuning of its actor in Phase 2 (stage B), A/B against Phase 2 from scratch. Knees: keep `joint_limit` as is; the robot tracks with ~10° bent knees at a negligible penalty.
+   - Correct the height offset of the clips (≈ +4.5 cm, or per clip from the standing foot height) together with the recorded catch point, which lives in the same clip frame: in the dataset (also used by Maik's task) or when loading (`MotionLoader`, `motion_data.catch_data`). Decide before or after the first Unified run.
 4. Refine the throw and perception calibration with the new session's ball CSVs (Section 5.1 used 12 throws of
    2026-07-06 from one thrower at a fixed distance). Measure the latency of the live pipeline (VICON → MQTT →
    robot) to replace the assumed 1–5 steps.
@@ -568,7 +571,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    - release detection (ballistic fit) before the ball becomes visible; nothing during the wind-up
    - ballistic filter with air drag, bridging gaps of up to 3 control steps, then "not visible"
    - latency forward prediction (then shrink `obs_delay_steps_range` to the residual latency)
-10. Curate the clips: `MotionCommand` loads all of them with equal weight; drop clips that Phase 1 cannot track, or weight them.
+10. Curate the clips: `MotionCommand` loads all of them with equal weight. Phase 1 tracks all 108 (2026-10-28), so none has to go for trackability; weighting stays an option.
 
 ## 12. Context Documents
 
@@ -859,3 +862,10 @@ In case of conflicts: **code > this spec > other context documents.**
 - Verified on workstation 2: smoke runs of Unified and Phase 1; kinematic replay of Unified in which every throw is dropped (2048 envs, 2500 steps): with option B 98 % of the failure mass lies before the clips' launch bins and 75 % of the cycles throw (0.156 throws per robot and second), without it 100 % lies after them and 54 % throw (0.113).
 - Files: `BC/mdp/commands/motion_command.py`, `BC/robots/g1_29dof/unified/ball_catch_env_cfg.py`, `context/planning/2026-10-27-fixes-unified-phase2-plan.md`.
 - Spec sections 7.3, 8 and 9 (pitfall 23) updated.
+
+### 2026-10-28: Phase 1 trained on the 108 dataset clips
+- Run `unitree_g1_29dof_ballcatch_phase1/2026-10-28_14-28-00` on workstation 2: 10k iterations, 4096 envs, 4.9 h, code `71c1767` (before fixes 1–4). End of training: 99.4 % of the episodes without a tracking termination, body error 6.2 cm.
+- Per-clip check of `model_9999.pt` (each clip once from its first frame, deterministic, no pushes or noise): all 108 clips are tracked without a tracking termination, body error 5.0 cm (worst 5.7 cm), no foot sliding, knees at 9.7° vs. 1.3° in the reference at a negligible `joint_limit` penalty; deep squats are tracked less deep.
+- Found: the clips sit about 4.5 cm too low (reference ankles below the ground plane); the robot stands 4.5 cm higher than its reference, is pushed out of the ground after every start from the reference pose, and in Unified the recorded catch point is 4.5 cm too low relative to the robot. Not corrected yet.
+- No code change. Side-by-side video (policy next to the reference), contact sheets, per-clip table and the scripts in `analysis/2026-10-28_phase1/` outside the repository.
+- Spec sections 2, 5.2, 10 and 11 updated.
