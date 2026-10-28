@@ -355,8 +355,8 @@ the five proprioception terms above.
   | `ball_height_penalty` | −5 | ball below 0.5 m |
   | `alive` | 1.0 | 0.02 per step; discounted at most ≈2, below the catch bonus |
   | `termination_penalty` | −200 | `is_terminated_term` for `base_height` / `bad_orientation` only: −4 per fall (catch and drop are not penalized) |
-  | `stand_still_root` | −10 | before the launch and during the hold phase: \|v_xy\|² + 0.25·ω_z² of the root (baseline while waiting: 0.16 m/s, 15°/s) |
-  | `stand_still_feet` | −5 | same phases: summed horizontal speed of the feet in firm contact > 50 N (baseline ≈ 0.08 m/s per foot) |
+  | `stand_still_root` | 0 → −10 | ramped in over steps 50k → 250k (see Curriculum); before the launch and during the hold phase: \|v_xy\|² + 0.25·ω_z² of the root (baseline while waiting: 0.16 m/s, 15°/s) |
+  | `stand_still_feet` | 0 → −5 | ramped like `stand_still_root`; same phases: summed horizontal speed of the feet in firm contact > 50 N (baseline ≈ 0.08 m/s per foot) |
   | `joint_target_excess` | −1.0 | joint targets beyond the clamp (Section 6): the baseline pressed the ankle-roll targets 2–4 rad past the stops |
   | `joint_torque` | −1e-5 | Σ torque², as in Phase 1 / Unified (`energy` ignores static torque; the baseline stood with saturated ankle torque) |
   | `feet_flat` | −2.0 | Σ over the feet in firm contact (> 50 N) of sin² of their tilt (projected gravity xy of `*_ankle_roll_link`); baseline 14–21° on the foot edges |
@@ -373,6 +373,8 @@ the five proprioception terms above.
     0.85–0.95 m, apex 1.85–1.95 m, no velocity noise, `secure_steps` 25, and clean perception (delay 1 step, no
     dropouts, no occlusion), wait 0.5–1.5 s. Final = the values of `CommandsCfg.ball_throw` (`BallCommandCfg` defaults
     plus the 0.5–8 s wait), `secure_steps` 50.
+  - Stand-still terms ramped in over steps 50k → 250k (with the waits): `stand_still_root` 0 → −10, `stand_still_feet`
+    0 → −5. Active from the start, they made a 250-iteration pilot (2026-10-28) learn to fall within 7 steps (Section 10).
   - Posture tapers over steps 100k → 400k: `base_height` −10 → −2.5, `flat_orientation` −5 → −1,
     arm deviation −0.1 → −0.02.
   - The play cfg sets `curriculum=None` and therefore uses the final distribution.
@@ -464,6 +466,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 19. Joint targets are clamped to the hard joint limits (`ClampedJointPositionAction`, Section 6). Without the clamp the policy can press a joint against its stop with a target far beyond it: the PD controller then delivers saturated torque at no visible cost (Phase 2 baseline, ankle roll). Keep the action term's `clip` set (it carries the clamp into `deploy.yaml`), and keep `joint_target_excess`, otherwise the raw actions behind the clamp can grow without effect.
 20. The adaptive sampling of `MotionCommand` draws start times where episodes fail. A static part of a cycle (the lead-in) never fails, so without a fixed share of starts (`start_hold_prob`) it would vanish from training, and with it the long waits.
 21. In Unified the held catch pose (`end_hold_s`) must outlast the confirmation plus the hold phase (`hold_after_catch_s`). If the clip ends first, the robot is reset onto the next cycle and the catch never completes.
+22. Penalties that grow with motion (quadratic stand-still terms) are large for an untrained, flailing robot. Active from the start they make an early fall cheaper than flailing, and the policy learns to fall at once (Phase 2 pilot 2026-10-28, as with the missing fall penalty on 2026-10-22). Ramp such terms in once the robot can stand.
 
 ## 10. Training History & Artifacts
 
@@ -490,6 +493,13 @@ after the 2026-10-16 changes were logged outside the repo.
 | Variant B: + fall penalty −200 | 2048 / 250 | episode length 86 steps, 76 % falls, 25 % reach the throw (ball dropped) |
 | Variant A: + fall penalty −200, `alive` 1.0 (**adopted**) | 2048 / 250 | episode length 104 steps, 15 % falls, 86 % reach the throw, hands–ball distance 2.1 → 0.7 m, no catches yet |
 | Unified, unchanged config, overhand clip | 2048 / 250 | not affected: episode length 12.8 → 6.3 → 136 steps, mean reward −1.03 → +3.30 (dense tracking rewards); episodes still end by `ee_body_pos` / `anchor_pos` |
+
+**Pilot runs 2026-10-28** (workstation 2, 2048 envs, 250 iterations from scratch, fixes 1–4 of branch `fixes-2026-10-28`, logged outside the repo; values are means over iterations 230–250):
+
+| Run | Episode length (steps) | Falls | Episodes that reach the throw |
+|---|---|---|---|
+| Stand-still terms at full weight from the start | 14.6 | 100 % | 0 % (episode length 49 → 7 steps by iteration 50: the policy learns to fall at once) |
+| Stand-still weights 0 (= the ramped curriculum before step 50k, **adopted**) | 95.6 | 32 % | 69 % |
 
 Timing: 2.85 s per iteration at 4096 envs (≈24 h for 30k iterations on an RTX 3080), ≈6.5 GB GPU memory. Two Isaac
 Sim trainings at once do not fit into 10 GB.
@@ -829,3 +839,9 @@ In case of conflicts: **code > this spec > other context documents.**
 - Watch in the first Phase 2 training: early on `stand_still_root` dominates the rewards (smoke run, iteration 2: −1.24 vs. `alive` +0.06), because flailing and falling robots move fast; check that standing is learned about as fast as in the baseline (episode length, `bad_orientation`).
 - Files: `BC/mdp/commands/{ball_command,motion_command,synced_ball_command}.py`, `BC/mdp/{rewards,terminations}.py`, `BC/motion_data.py`, `BC/robots/g1_29dof/{phase2,unified}/ball_catch_env_cfg.py`, `scripts/rsl_rl/{eval_catch.py,eval_catch_all.sh,eval_catch_report.py}`, `context/planning/2026-10-27-fixes-unified-phase2-plan.md` (implementation status and deviations).
 - Spec sections 2, 7.2, 7.3, 8, 9 (pitfalls 20, 21) and 11 updated.
+
+### 2026-10-28: Stand-still terms ramped in (pilot run)
+- Why: a 250-iteration Phase 2 pilot with fixes 1–4 (2048 envs, workstation 2) learned to fall within 7 steps: an untrained, flailing robot moves fast, so the quadratic `stand_still_root` cost about −17 per episode while flailing for 49 steps and a quick fall only about −6. The same pilot with both stand-still weights at 0 learned to stand like the 2026-10-22 pilot (episode length 95.6 steps, 32 % falls, 69 % of the episodes reach the throw at iterations 230–250), so the clamp, `feet_flat` and the torque penalty do not hinder the start.
+- Change: `stand_still_root` (0 → −10) and `stand_still_feet` (0 → −5) are ramped in over steps 50k → 250k with `modify_reward_weight_linear`, together with the waits of the throw curriculum. In the first full run, watch that the episode length and `bad_orientation` do not collapse while the weights rise (iterations ≈ 2000–10000).
+- Files: `BC/robots/g1_29dof/phase2/ball_catch_env_cfg.py`, `context/planning/2026-10-27-fixes-unified-phase2-plan.md`.
+- Spec sections 7.2, 9 (pitfall 22) and 10 updated.

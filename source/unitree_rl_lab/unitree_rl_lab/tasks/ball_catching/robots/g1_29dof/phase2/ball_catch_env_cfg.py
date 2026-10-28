@@ -375,7 +375,8 @@ class RewardsCfg:
     )
 
     # -- standing still while waiting for the throw and while holding the confirmed catch (the baseline drifted
-    #    0.16 m/s and turned 15°/s while waiting, slid its feet and walked off with the ball)
+    #    0.16 m/s and turned 15°/s while waiting, slid its feet and walked off with the ball). Final weights; the
+    #    curriculum ramps them in from 0 (see CurriculumCfg.stand_still_*_ramp)
     stand_still_root = RewTerm(func=mdp.stand_still_root, weight=-10.0, params={"command_name": "ball_throw"})
     stand_still_feet = RewTerm(
         func=mdp.stand_still_feet,
@@ -546,6 +547,30 @@ class CurriculumCfg:
                 "hide_in_catch_zone_prob": 0.5,
                 "throw_delay_range": (0.5, 8.0),
             },
+        },
+    )
+
+    # Standing still is only asked for once the robot can stand: a flailing robot moves fast, the quadratic penalties
+    # then cost more than a fall, and the policy learned to fall within 7 steps (pilot 2026-10-28, 250 iterations).
+    # Ramped together with the waits of ball_throws.
+    stand_still_root_ramp = CurrTerm(
+        func=mdp.modify_reward_weight_linear,
+        params={
+            "term_name": "stand_still_root",
+            "start_weight": 0.0,
+            "end_weight": -10.0,
+            "start_step": 50_000,
+            "end_step": 250_000,
+        },
+    )
+    stand_still_feet_ramp = CurrTerm(
+        func=mdp.modify_reward_weight_linear,
+        params={
+            "term_name": "stand_still_feet",
+            "start_weight": 0.0,
+            "end_weight": -5.0,
+            "start_step": 50_000,
+            "end_step": 250_000,
         },
     )
 
