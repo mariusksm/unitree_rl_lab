@@ -501,6 +501,8 @@ after the 2026-10-16 changes were logged outside the repo.
 | Stand-still terms at full weight from the start | 14.6 | 100 % | 0 % (episode length 49 → 7 steps by iteration 50: the policy learns to fall at once) |
 | Stand-still weights 0 (= the ramped curriculum before step 50k, **adopted**) | 95.6 | 32 % | 69 % |
 
+Unified with the same setup (fixes 1–4, 2048 envs, 250 iterations) shows no such collapse: episode length 34 → 7 steps (iterations 40–110) → 57 steps at iterations 230–250, episodes end by the tracking terminations (`ee_body_pos`, `anchor_pos`). For comparison, the running Phase 1 run on the same clips (4096 envs, its actor sees the reference) was at 110 steps after 250 iterations.
+
 Timing: 2.85 s per iteration at 4096 envs (≈24 h for 30k iterations on an RTX 3080), ≈6.5 GB GPU memory. Two Isaac
 Sim trainings at once do not fit into 10 GB.
 
@@ -845,3 +847,7 @@ In case of conflicts: **code > this spec > other context documents.**
 - Change: `stand_still_root` (0 → −10) and `stand_still_feet` (0 → −5) are ramped in over steps 50k → 250k with `modify_reward_weight_linear`, together with the waits of the throw curriculum. In the first full run, watch that the episode length and `bad_orientation` do not collapse while the weights rise (iterations ≈ 2000–10000).
 - Files: `BC/robots/g1_29dof/phase2/ball_catch_env_cfg.py`, `context/planning/2026-10-27-fixes-unified-phase2-plan.md`.
 - Spec sections 7.2, 9 (pitfall 22) and 10 updated.
+
+### 2026-10-28: Unified pilot with fixes 1–4
+- 250 iterations, 2048 envs on workstation 2: no collapse as in the Phase 2 pilot with the stand-still terms; the episode length dips to 7 steps around iterations 40–110 and rises to 57 steps by iteration 250, episodes end by tracking terminations, the first balls arrive (0.7 % drops). Phase 1 on the same clips (old code, 4096 envs, actor with the reference) was at 110 steps after 250 iterations.
+- Spec section 10 updated.
