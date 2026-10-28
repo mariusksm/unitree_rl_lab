@@ -24,18 +24,6 @@ _spec = importlib.util.spec_from_file_location("motion_data", _MODULE)
 motion_data = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(motion_data)
 
-# Isaac articulation order of the G1 29-DoF asset (UNITREE_G1_29DOF_MIMIC_CFG)
-G1_JOINT_NAMES = [
-    "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint", "left_hip_roll_joint", "right_hip_roll_joint",
-    "waist_roll_joint", "left_hip_yaw_joint", "right_hip_yaw_joint", "waist_pitch_joint", "left_knee_joint",
-    "right_knee_joint", "left_shoulder_pitch_joint", "right_shoulder_pitch_joint", "left_ankle_pitch_joint",
-    "right_ankle_pitch_joint", "left_shoulder_roll_joint", "right_shoulder_roll_joint", "left_ankle_roll_joint",
-    "right_ankle_roll_joint", "left_shoulder_yaw_joint", "right_shoulder_yaw_joint", "left_elbow_joint",
-    "right_elbow_joint", "left_wrist_roll_joint", "right_wrist_roll_joint", "left_wrist_pitch_joint",
-    "right_wrist_pitch_joint", "left_wrist_yaw_joint", "right_wrist_yaw_joint",
-]
-G1_HAND_BODY_INDEXES = [28, 29]  # left_wrist_yaw_link, right_wrist_yaw_link in the asset's body order
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -46,21 +34,22 @@ def main():
     print(f"clips: {len(files)} from {source}; ball recordings: {ball_dir}")
     fps = {float(np.asarray(np.load(f)["fps"]).reshape(-1)[0]) for f in files}
     print(f"clip frame rates: {sorted(fps)} (the tasks need 50 Hz)")
-    infos = motion_data.catch_infos(files, ball_dir, G1_JOINT_NAMES, G1_HAND_BODY_INDEXES)
+    infos = motion_data.catch_infos(files, ball_dir, motion_data.G1_JOINT_NAMES, motion_data.G1_HAND_BODY_INDEXES)
 
-    print(f"\n{'clip':28s} {'ok':3s} {'catch s':>7s} {'flight s':>8s} {'clip s':>6s} {'hands m':>7s} {'rmse':>5s}  reason")
+    print(f"\n{'clip':28s} {'ok':3s} {'catch s':>7s} {'flight s':>8s} {'clip s':>6s} {'hands m':>7s} {'rmse':>5s} "
+          f"{'arms m':>6s}  reason")
     for f, info in zip(files, infos):
         def fmt(key, spec):
             return format(info[key], spec) if key in info else "-"
         print(
             f"{os.path.basename(f):28s} {'yes' if info['valid'] else 'no':3s} {fmt('catch_time', '7.2f')} "
             f"{fmt('flight_time', '8.2f')} {fmt('clip_duration', '6.2f')} {fmt('ball_hands_distance', '7.2f')} "
-            f"{fmt('joint_rmse', '5.2f')}  {info['reason']}"
+            f"{fmt('joint_rmse', '5.2f')} {fmt('arm_rmse', '6.2f')}  {info['reason']}"
         )
 
     valid = [i for i in infos if i["valid"]]
     print(f"\nvalid catches: {len(valid)} of {len(files)} clips")
-    for key in ("catch_time", "launch_time", "flight_time", "ball_hands_distance", "joint_rmse"):
+    for key in ("catch_time", "launch_time", "flight_time", "ball_hands_distance", "joint_rmse", "arm_rmse"):
         values = [i[key] for i in valid]
         if values:
             print(f"  {key:20s} min {min(values):6.2f}  median {statistics.median(values):6.2f}  max {max(values):6.2f}")

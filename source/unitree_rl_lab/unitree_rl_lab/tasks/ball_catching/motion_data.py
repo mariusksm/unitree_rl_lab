@@ -6,7 +6,8 @@ The group's dataset (GitLab ``pg-681-h-react/data/imitation-data``, folder ``isa
 ``g1/<name>.npz`` with a VICON recording ``ball/<name>.npz`` of the same take. The recording carries its own
 retarget (``dof_pos``, ``root_pos``, ``root_rot_xyzw`` at 120 Hz) in the VICON world frame, the ball trajectory and
 the catch moment (``ball_catch_time_s``), but neither its time window nor its frame matches the clip.
-:func:`compute_catch_info` aligns the two.
+:func:`compute_catch_info` aligns the two and checks the alignment against the human body points of the recording
+(:func:`compare_with_human`).
 
 Clip directory search order (first hit wins):
 
@@ -37,6 +38,28 @@ MAX_YAW_STD = 5.0  # deg
 MAX_BALL_HANDS_DISTANCE = 0.3  # m, ball centre to the wrist midpoint of the clip at the catch moment
 FLIGHT_TIME_RANGE = (0.3, 1.5)  # s
 MIN_CATCH_TIME = 0.3  # s into the clip
+MAX_ARM_RMSE = 0.10  # m, worst clip elbow/hand vs the scaled human point (clean clips <= 0.07 m, rejected 0.11-0.22 m)
+ARM_MIDLINE = 0.05  # m: points closer than this to the body's midline do not count for the side check
+
+# G1 29-DoF asset (UNITREE_G1_29DOF_MIMIC_CFG): joint order and body indices of the clips, confirmed against the asset
+# by scripts/mimic/check_npz_fk.py; here for the numpy-only scripts and the task configs
+G1_JOINT_NAMES = [
+    "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint", "left_hip_roll_joint", "right_hip_roll_joint",
+    "waist_roll_joint", "left_hip_yaw_joint", "right_hip_yaw_joint", "waist_pitch_joint", "left_knee_joint",
+    "right_knee_joint", "left_shoulder_pitch_joint", "right_shoulder_pitch_joint", "left_ankle_pitch_joint",
+    "right_ankle_pitch_joint", "left_shoulder_roll_joint", "right_shoulder_roll_joint", "left_ankle_roll_joint",
+    "right_ankle_roll_joint", "left_shoulder_yaw_joint", "right_shoulder_yaw_joint", "left_elbow_joint",
+    "right_elbow_joint", "left_wrist_roll_joint", "right_wrist_roll_joint", "left_wrist_pitch_joint",
+    "right_wrist_pitch_joint", "left_wrist_yaw_joint", "right_wrist_yaw_joint",
+]
+G1_HAND_BODY_INDEXES = [28, 29]  # left_wrist_yaw_link, right_wrist_yaw_link
+# clip body index and the human body point of the recording it is compared with (compare_with_human)
+G1_ARM_POINTS = {
+    "left elbow": (22, "LeftForeArm"),
+    "right elbow": (23, "RightForeArm"),
+    "left hand": (28, "LeftPalm"),
+    "right hand": (29, "RightPalm"),
+}
 
 
 def is_lfs_pointer(path: str | os.PathLike) -> bool:
@@ -100,6 +123,11 @@ def _yaw_wxyz(q: np.ndarray) -> np.ndarray:
     return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def _rot_z(p: np.ndarray, angle: np.ndarray | float) -> np.ndarray:
+    c, s = np.cos(angle), np.sin(angle)
+    return np.stack([c * p[..., 0] - s * p[..., 1], s * p[..., 0] + c * p[..., 1], p[..., 2]], axis=-1)
+
+
 def align_recording(clip: np.lib.npyio.NpzFile, rec: np.lib.npyio.NpzFile, joint_names: Sequence[str]) -> dict | None:
     """Time alignment of a recording with its clip by the best joint-angle match.
 
@@ -137,6 +165,47 @@ def align_recording(clip: np.lib.npyio.NpzFile, rec: np.lib.npyio.NpzFile, joint
             "window_q": window_q, "j0": j0, "j1": j1, "rmse": best_rmse}
 
 
+def compare_with_human(
+    clip: np.lib.npyio.NpzFile, rec: np.lib.npyio.NpzFile, alignment: dict, points: dict = G1_ARM_POINTS
+) -> dict:
+    """Compare the clip's elbows and hands with the human elbows and palms of its recording over the aligned overlap.
+
+    Robot points relative to the clip's pelvis in its yaw frame, human points relative to the hips in the recording
+    root's yaw frame, scaled to the robot by one least-squares factor per clip. A wrong time alignment (or arm data in
+    the wrong joints) moves the robot points away from the human ones.
+
+    Returns:
+        Dict with ``scale`` and per point (keys of ``points``) the ``rmse`` (m), the share of frames on the same side
+        of the body (``same_side``, frames near the midline excluded) and whether the mirrored human point fits better
+        (``other_side_fits_better``).
+    """
+    idx = np.arange(alignment["shift"] + alignment["j0"], alignment["shift"] + alignment["j1"])
+    t = alignment["window_times"][alignment["j0"] : alignment["j1"]]
+    rec_t = alignment["rec_times"]
+    names = [str(n) for n in rec["human_body_names"]]
+
+    def human(name):
+        return np.stack([np.interp(t, rec_t, rec["human_body_pos"][:, names.index(name), k]) for k in range(3)], -1)
+
+    human_yaw = np.interp(t, rec_t, np.unwrap(_yaw_wxyz(rec["root_rot_xyzw"][:, [3, 0, 1, 2]])))
+    hips = human("Hips")
+    pelvis = clip["body_pos_w"][idx, 0]
+    pelvis_yaw = np.unwrap(_yaw_wxyz(clip["body_quat_w"][idx, 0]))
+    robot = {k: _rot_z(clip["body_pos_w"][idx, i] - pelvis, -pelvis_yaw) for k, (i, _) in points.items()}
+    hum = {k: _rot_z(human(n) - hips, -human_yaw) for k, (_, n) in points.items()}
+    scale = sum((robot[k] * hum[k]).sum() for k in points) / sum((hum[k] * hum[k]).sum() for k in points)
+    out = {"scale": float(scale)}
+    for k in points:
+        other = k.replace("left", "#").replace("right", "left").replace("#", "right")
+        rmse = float(np.sqrt(np.mean(np.sum((robot[k] - scale * hum[k]) ** 2, -1))))
+        rmse_other = float(np.sqrt(np.mean(np.sum((robot[k] - scale * hum[other]) ** 2, -1)))) if other in hum else np.inf
+        # sides only count where the point is clearly off the midline (hands meet in the middle at the catch)
+        off_mid = (np.abs(robot[k][:, 1]) > ARM_MIDLINE) & (np.abs(scale * hum[k][:, 1]) > ARM_MIDLINE)
+        same_side = float(np.mean(np.sign(robot[k][off_mid, 1]) == np.sign(hum[k][off_mid, 1]))) if off_mid.any() else 1.0
+        out[k] = {"rmse": rmse, "same_side": same_side, "other_side_fits_better": rmse_other < rmse}
+    return out
+
+
 def compute_catch_info(
     clip_file: str, ball_file: str, joint_names: Sequence[str], hand_body_indexes: Sequence[int]
 ) -> dict:
@@ -144,7 +213,11 @@ def compute_catch_info(
 
     Time: the recording's window is slid over the clip in clip frames; the offset with the smallest joint-angle
     RMSE wins (both retargets come from the same take). Space: the yaw rotation and translation that map the
-    recording's root onto the clip's pelvis, averaged over the overlap.
+    recording's root onto the clip's pelvis, averaged over the overlap. Check: the clip's elbows and hands must
+    follow the human ones of the recording (:func:`compare_with_human`, worst point within ``MAX_ARM_RMSE``), else
+    the recorded catch point does not belong to the clip's hands. The joint-angle match alone accepted unusual time
+    offsets that put the hands 0.12-0.22 m away from the human's (clips 51, 52), and clip 82's right hand drifts
+    0.11 m away from the human's although its offset is normal.
 
     Args:
         clip_file: clip ``.npz`` (Isaac order).
@@ -155,7 +228,7 @@ def compute_catch_info(
     Returns:
         Dict with ``valid``, ``reason`` and, when the alignment succeeded, ``catch_time`` / ``launch_time`` /
         ``flight_time`` (s into the clip), ``catch_point`` (clip frame, m), ``ball_hands_distance`` (m) and the
-        alignment diagnostics ``joint_rmse``, ``yaw_std_deg``, ``translation_std``, ``offset``.
+        alignment diagnostics ``joint_rmse``, ``arm_rmse``, ``yaw_std_deg``, ``translation_std``, ``offset``.
     """
     clip = np.load(clip_file)
     rec = np.load(ball_file)
@@ -166,6 +239,7 @@ def compute_catch_info(
     best_shift, best_rmse, j0, j1 = alignment["shift"], alignment["rmse"], alignment["j0"], alignment["j1"]
     num_frames = clip["joint_pos"].shape[0]
     offset = best_shift / fps  # clip time of the recording's first frame
+    arms = compare_with_human(clip, rec, alignment)
 
     clip_idx = np.arange(best_shift + j0, best_shift + j1)
     rec_t = alignment["window_times"][j0:j1]
@@ -175,10 +249,9 @@ def compute_catch_info(
     dyaw = np.angle(np.exp(1j * (clip_yaw - rec_yaw)))
     yaw = float(np.angle(np.mean(np.exp(1j * dyaw))))
     yaw_std = float(np.degrees(np.std(np.angle(np.exp(1j * (dyaw - yaw))))))
-    c, s = np.cos(yaw), np.sin(yaw)
 
     def to_clip(p: np.ndarray) -> np.ndarray:
-        return np.stack([c * p[..., 0] - s * p[..., 1], s * p[..., 0] + c * p[..., 1], p[..., 2]], axis=-1)
+        return _rot_z(p, yaw)
 
     offsets = clip["body_pos_w"][clip_idx, 0] - to_clip(rec_root)
     translation = offsets.mean(axis=0)
@@ -198,6 +271,7 @@ def compute_catch_info(
         "flight_time": catch_time - launch_time,
         "catch_point": catch_point.tolist(),
         "joint_rmse": best_rmse,
+        "arm_rmse": max(arms[k]["rmse"] for k in G1_ARM_POINTS),
         "yaw_std_deg": yaw_std,
         "translation_std": translation_std,
         "offset": offset,
@@ -219,6 +293,8 @@ def compute_catch_info(
         reason = f"flight time {info['flight_time']:.2f} s"
     elif info.get("ball_hands_distance", np.inf) > MAX_BALL_HANDS_DISTANCE:
         reason = f"ball {info.get('ball_hands_distance', np.inf):.2f} m from the hands at the catch"
+    elif info["arm_rmse"] > MAX_ARM_RMSE:
+        reason = f"arms {info['arm_rmse']:.2f} m off the human of the recording"
     info["valid"] = not reason
     info["reason"] = reason
     return info

@@ -9,6 +9,8 @@ swapped arms put a hand tens of centimetres off or on the wrong side. Joint angl
 recording's own retarget distributes the arm motion differently over shoulder, elbow and wrist.
 
 Also flags clips with an almost static arm (all clips, with or without recording), as ``check_motion.py`` does.
+The comparison itself (``motion_data.compare_with_human``) is part of the validity check of the Unified task's ball
+recordings.
 
     python scripts/mimic/check_dataset.py               # auto-discovered dataset
     HREACT_MOTION_DIR=/path/to/isaaclab/g1 python scripts/mimic/check_dataset.py
@@ -26,63 +28,14 @@ _spec = importlib.util.spec_from_file_location(
 )
 motion_data = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(motion_data)
-_spec = importlib.util.spec_from_file_location("catch_info", os.path.join(_HERE, "catch_info.py"))
-catch_info = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(catch_info)
-JOINTS = catch_info.G1_JOINT_NAMES
+JOINTS = motion_data.G1_JOINT_NAMES
+POINTS = motion_data.G1_ARM_POINTS  # robot body index (asset order) and the matching human body point
 
-# robot body index (asset order) and the matching human body point of the recording
-POINTS = {
-    "left elbow": (22, "LeftForeArm"),
-    "right elbow": (23, "RightForeArm"),
-    "left hand": (28, "LeftPalm"),
-    "right hand": (29, "RightPalm"),
-}
-MAX_RMSE = 0.12  # m, robot point vs scaled human point over the overlap
+MAX_RMSE = motion_data.MAX_ARM_RMSE  # m, robot point vs scaled human point over the overlap
 MIN_SAME_SIDE = 0.9  # share of the frames in which robot and human point lie on the same side of the body
-MIDLINE = 0.05  # m: frames with a point closer than this to the body's midline do not count for the side check
 STATIC_ARM_RANGE = 0.15  # rad: an arm whose joints all move less than this is flagged
 ARMS = {side: [i for i, n in enumerate(JOINTS) if n.startswith(side) and any(k in n for k in ("shoulder", "elbow", "wrist"))]
         for side in ("left", "right")}
-
-
-def _yaw(q: np.ndarray) -> np.ndarray:
-    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
-    return np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-
-
-def _rot_z(p: np.ndarray, angle: np.ndarray) -> np.ndarray:
-    c, s = np.cos(angle), np.sin(angle)
-    return np.stack([c * p[..., 0] - s * p[..., 1], s * p[..., 0] + c * p[..., 1], p[..., 2]], axis=-1)
-
-
-def compare_with_human(clip, rec, alignment) -> dict:
-    """Per point: RMSE robot vs scaled human, share of frames on the same side, and whether the other side fits better."""
-    idx = np.arange(alignment["shift"] + alignment["j0"], alignment["shift"] + alignment["j1"])
-    t = alignment["window_times"][alignment["j0"] : alignment["j1"]]
-    rec_t = alignment["rec_times"]
-    names = [str(n) for n in rec["human_body_names"]]
-
-    def human(name):
-        return np.stack([np.interp(t, rec_t, rec["human_body_pos"][:, names.index(name), k]) for k in range(3)], -1)
-
-    human_yaw = np.interp(t, rec_t, np.unwrap(_yaw(rec["root_rot_xyzw"][:, [3, 0, 1, 2]])))
-    hips = human("Hips")
-    pelvis = clip["body_pos_w"][idx, 0]
-    pelvis_yaw = np.unwrap(_yaw(clip["body_quat_w"][idx, 0]))
-    robot = {k: _rot_z(clip["body_pos_w"][idx, i] - pelvis, -pelvis_yaw) for k, (i, _) in POINTS.items()}
-    hum = {k: _rot_z(human(n) - hips, -human_yaw) for k, (_, n) in POINTS.items()}
-    scale = sum((robot[k] * hum[k]).sum() for k in POINTS) / sum((hum[k] * hum[k]).sum() for k in POINTS)
-    out = {"scale": float(scale)}
-    for k in POINTS:
-        other = k.replace("left", "#").replace("right", "left").replace("#", "right")
-        rmse = float(np.sqrt(np.mean(np.sum((robot[k] - scale * hum[k]) ** 2, -1))))
-        rmse_other = float(np.sqrt(np.mean(np.sum((robot[k] - scale * hum[other]) ** 2, -1))))
-        # sides only count where the point is clearly off the midline (hands meet in the middle at the catch)
-        off_mid = (np.abs(robot[k][:, 1]) > MIDLINE) & (np.abs(scale * hum[k][:, 1]) > MIDLINE)
-        same_side = float(np.mean(np.sign(robot[k][off_mid, 1]) == np.sign(hum[k][off_mid, 1]))) if off_mid.any() else 1.0
-        out[k] = {"rmse": rmse, "same_side": same_side, "other_side_fits_better": rmse_other < rmse}
-    return out
 
 
 def main():
@@ -101,7 +54,7 @@ def main():
         rec = np.load(rec_file)
         alignment = motion_data.align_recording(clip, rec, JOINTS)
         if alignment is not None:
-            results[os.path.basename(f)] = compare_with_human(clip, rec, alignment)
+            results[os.path.basename(f)] = motion_data.compare_with_human(clip, rec, alignment)
 
     print(f"compared with the human in their recording: {len(results)} clips "
           f"(robot/human scale median {np.median([r['scale'] for r in results.values()]):.2f})\n")

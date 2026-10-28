@@ -100,7 +100,7 @@ class SyncedBallCommand(BallCommand):
                 if not info["valid"]:
                     key = next(
                         (k for k in ("no ball recording", "joint RMSE", "frame offset", "outside the clip",
-                                     "flight time", "from the hands") if k in info["reason"]),
+                                     "flight time", "from the hands", "off the human") if k in info["reason"]),
                         info["reason"],
                     )
                     reasons[key] = reasons.get(key, 0) + 1
