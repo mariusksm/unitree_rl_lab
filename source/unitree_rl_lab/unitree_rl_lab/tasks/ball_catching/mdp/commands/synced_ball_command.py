@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_inv, quat_mul, sample_uniform, yaw_quat
 
-from ...motion_data import catch_infos
+from ...motion_data import G1_HAND_BODY_INDEXES, G1_JOINT_NAMES
 from .ball_command import BallCommand, BallCommandCfg
 from .motion_command import MotionCommand
 
@@ -23,12 +23,13 @@ class SyncedBallCommand(BallCommand):
 
         launch_time = catch_time[clip] + jitter − flight_time
 
-    Recorded mode (``ball_data_dir`` set): every clip with a usable VICON recording of its take
-    (:func:`motion_data.compute_catch_info`) brings its own catch time, flight time and catch point. The release
-    point is sampled as in :class:`BallCommand`, the flight time is the recorded one (the human reacts to the real
-    release), and at the launch the target is the reference catch point re-anchored to the robot exactly like the
-    tracked bodies of the :class:`MotionCommand` (robot anchor xy and yaw, reference anchor height), plus
-    ``catch_point_jitter``. Clips without a usable recording get no throw and train pure tracking.
+    Recorded mode (``catch_data`` set, computed by :func:`motion_data.catch_data` in the env config): every clip with
+    a usable VICON recording of its take brings its own catch time, flight time and catch point. The release point is
+    sampled as in :class:`BallCommand`, the flight time is the recorded one (the human reacts to the real release),
+    and at the launch the target is the reference catch point re-anchored to the robot exactly like the tracked
+    bodies of the :class:`MotionCommand` (robot anchor xy and yaw, reference anchor height), plus
+    ``catch_point_jitter``. Clips without a usable recording get no throw and train pure tracking. Catch times are
+    shifted by the motion command's lead-in (``start_hold_s``), during which the robot waits for the throw.
 
     Fixed mode (``catch_motion_time`` set, no recordings): the catch time is the same for all clips, and target and
     flight time are sampled from the :class:`BallCommandCfg` ranges.
@@ -76,27 +77,40 @@ class SyncedBallCommand(BallCommand):
         motion = self.motion_command
         return motion.time_steps.float() / motion.motion.fps
 
+    def _check_asset_constants(self):
+        """The catch data was computed with the G1 constants of ``motion_data``; they must match the asset."""
+        hand_ids = self.robot.find_bodies(self.cfg.hand_body_names, preserve_order=True)[0]
+        if list(self.robot.joint_names) != G1_JOINT_NAMES or list(hand_ids) != G1_HAND_BODY_INDEXES:
+            raise ValueError(
+                "SyncedBallCommand: the catch data was computed with motion_data.G1_JOINT_NAMES / G1_HAND_BODY_INDEXES, "
+                "which do not match the robot asset; update them (scripts/mimic/check_npz_fk.py)"
+            )
+
     def _build_clip_catch_data(self):
         motion = self.motion_command
         num_clips = motion.motion.num_clips
+        lead_in = motion.motion.start_hold_frames / motion.motion.fps  # the clip starts this late in the cycle
         has_catch = torch.zeros(num_clips, dtype=torch.bool)
         catch_time = torch.zeros(num_clips)
         flight_time = torch.ones(num_clips)
         catch_point = torch.zeros(num_clips, 3)
 
-        if self.cfg.ball_data_dir is not None:
-            hand_ids = self.robot.find_bodies(self.cfg.hand_body_names, preserve_order=True)[0]
-            infos = catch_infos(motion.motion.files, self.cfg.ball_data_dir, self.robot.joint_names, hand_ids)
-            for i, info in enumerate(infos):
-                if info["valid"]:
+        if self.cfg.catch_data is not None:
+            if len(self.cfg.catch_data) != num_clips:
+                raise ValueError(
+                    f"SyncedBallCommand: catch_data has {len(self.cfg.catch_data)} entries for {num_clips} motion clips"
+                )
+            self._check_asset_constants()
+            for i, data in enumerate(self.cfg.catch_data):
+                if data["valid"]:
                     has_catch[i] = True
-                    catch_time[i] = info["catch_time"]
-                    # launch at the clip start at the latest; a few clips start just after the release
-                    flight_time[i] = min(info["flight_time"], info["catch_time"] - self.cfg.arrival_jitter)
-                    catch_point[i] = torch.tensor(info["catch_point"])
+                    catch_time[i] = data["catch_time"] + lead_in
+                    # launch at the cycle start at the latest (without a lead-in, a few clips start after the release)
+                    flight_time[i] = min(data["flight_time"], float(catch_time[i]) - self.cfg.arrival_jitter)
+                    catch_point[i] = torch.tensor(data["catch_point"])
             self._recorded = bool(has_catch.any())
             reasons: dict[str, int] = {}
-            for info in infos:
+            for info in self.cfg.catch_data:
                 if not info["valid"]:
                     key = next(
                         (k for k in ("no ball recording", "joint RMSE", "frame offset", "outside the clip",
@@ -111,12 +125,12 @@ class SyncedBallCommand(BallCommand):
         if not self._recorded:
             if self.cfg.catch_motion_time is None:
                 raise ValueError(
-                    "SyncedBallCommand: no usable ball recordings and no catch_motion_time; set ball_data_dir to the "
-                    "recordings of the clips or a fixed catch_motion_time"
+                    "SyncedBallCommand: no usable ball recordings and no catch_motion_time; set catch_data "
+                    "(motion_data.catch_data of the clips' recordings) or a fixed catch_motion_time"
                 )
             durations = motion.motion.time_step_total.cpu().float() / motion.motion.fps
-            has_catch[:] = durations > self.cfg.catch_motion_time
-            catch_time[:] = self.cfg.catch_motion_time
+            has_catch[:] = durations > self.cfg.catch_motion_time + lead_in
+            catch_time[:] = self.cfg.catch_motion_time + lead_in
             print(
                 f"[SyncedBallCommand] fixed catch time {self.cfg.catch_motion_time:.2f} s for "
                 f"{int(has_catch.sum())} of {num_clips} clips (the others are shorter)"
@@ -211,9 +225,9 @@ class SyncedBallCommandCfg(BallCommandCfg):
     """Name of the MotionCommand term to synchronize with (must be declared before
     this command in the CommandsCfg)."""
 
-    ball_data_dir: str | None = None
-    """Directory with the VICON recordings of the clips' takes (``<clip name>.npz``, see ``motion_data.py``).
-    Recorded mode: catch time, flight time and catch point per clip."""
+    catch_data: list[dict] | None = None
+    """Recorded mode: per motion clip (order of ``motion_files``) the output of :func:`motion_data.catch_data`
+    (``valid``, ``reason``; ``catch_time``, ``flight_time`` in s into the clip and ``catch_point`` in the clip frame)."""
 
     catch_motion_time: float | None = None
     """Fixed mode only (no usable recordings): time (s) into every clip at which the catch happens."""

@@ -153,21 +153,59 @@ def ball_arm_contact(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -
 
 
 def ball_caught_bonus(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
-    """One-time bonus on the step the catch is confirmed.
+    """One-time bonus on the step the catch is confirmed (``secured_steps`` reaches ``secure_steps``).
 
-    Fires exactly once per catch: the secured-steps counter (tracked by the
-    BallCommand term) equals ``secure_steps`` on the same step the ``ball_caught``
-    termination triggers, after which the counter is reset. Note the reward manager
-    multiplies by ``weight * dt`` — size the weight as bonus_value / dt.
+    Fires exactly once per throw (``BallCommand.confirmed_now``), also if the secured streak breaks and restarts
+    during the hold phase. Note the reward manager multiplies by ``weight * dt`` — size the weight as
+    bonus_value / dt.
     """
     command = env.command_manager.get_term(command_name)
-    return (command.secured_steps == command.cfg.secure_steps).float()
+    return command.confirmed_now.float()
 
 
 def ball_secured(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
     """Per-step reward while the ball is held at a hand (bounded by the catch termination)."""
     command = env.command_manager.get_term(command_name)
     return (command.secured_steps > 0).float()
+
+
+def _should_stand_still(command) -> torch.Tensor:
+    """Before the launch (waiting for the throw) and during the hold phase after the confirmed catch."""
+    return ~command.launched | command.confirmed
+
+
+def stand_still_root(
+    env: ManagerBasedRLEnv,
+    command_name: str = "ball_throw",
+    yaw_rate_weight: float = 0.25,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Root motion while the robot should stand still (waiting, holding): |v_xy|² + yaw_rate_weight·ω_z².
+
+    The Phase 2 baseline drifted 0.16 m/s and turned 15°/s while waiting, and walked off with the ball while holding.
+    """
+    command = env.command_manager.get_term(command_name)
+    asset: Articulation = env.scene[asset_cfg.name]
+    motion = torch.sum(torch.square(asset.data.root_lin_vel_w[:, :2]), dim=-1)
+    motion += yaw_rate_weight * torch.square(asset.data.root_ang_vel_w[:, 2])
+    return motion * _should_stand_still(command).float()
+
+
+def stand_still_feet(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    command_name: str = "ball_throw",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    force_threshold: float = 50.0,
+) -> torch.Tensor:
+    """Horizontal speed (m/s) of the feet in firm ground contact (> ``force_threshold`` N), summed, while the robot
+    should stand still (waiting, holding): sliding and pivoting on the foot edges."""
+    command = env.command_manager.get_term(command_name)
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)
+    asset: Articulation = env.scene[asset_cfg.name]
+    speed = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2].norm(dim=-1)
+    return torch.sum(speed * (forces > force_threshold), dim=-1) * _should_stand_still(command).float()
 
 
 def ball_height_penalty(

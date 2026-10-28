@@ -300,6 +300,25 @@ def compute_catch_info(
     return info
 
 
+def catch_data(clip_files: Sequence[str], ball_dir: str | None) -> list[dict]:
+    """What the Unified task needs per clip, from :func:`catch_infos` with the G1 asset constants.
+
+    Returns per clip ``valid``, ``reason`` and, for valid clips, ``catch_time`` and ``flight_time`` (s into the clip)
+    and ``catch_point`` (clip frame, m), as plain Python values for the env config.
+    """
+    data = []
+    for info in catch_infos(clip_files, ball_dir, G1_JOINT_NAMES, G1_HAND_BODY_INDEXES):
+        entry = {"valid": bool(info["valid"]), "reason": str(info["reason"])}
+        if info["valid"]:
+            entry.update(
+                catch_time=float(info["catch_time"]),
+                flight_time=float(info["flight_time"]),
+                catch_point=[float(x) for x in info["catch_point"]],
+            )
+        data.append(entry)
+    return data
+
+
 def catch_infos(
     clip_files: Sequence[str], ball_dir: str | None, joint_names: Sequence[str], hand_body_indexes: Sequence[int]
 ) -> list[dict]:

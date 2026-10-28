@@ -22,6 +22,8 @@ from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as R
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 FEET_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
+# after the confirmed catch the robot keeps the ball this long (s) before the throw counts as completed
+HOLD_AFTER_CATCH_S = 3.0
 # forearm + hand links the ball may rest on in the two-arm underhand catch (left first, then right)
 ARM_CONTACT_BODY_NAMES = [
     f"{side}_{link}"
@@ -225,6 +227,11 @@ class CommandsCfg:
         resampling_time_range=(1.0e9, 1.0e9),  # single throw per episode; new throw only on env reset
         hand_body_names=HAND_BODY_NAMES,
         contact_sensor_name="ball_contact",
+        # wait as in front of a real thrower (final range, the curriculum starts at 0.5-1.5 s; the baseline trained on
+        # 0.5-1.5 s caught 28 % after 6-9 s), then keep the ball (it walked off with it)
+        throw_delay_range=(0.5, 8.0),
+        throw_delay_log_uniform=True,
+        hold_after_catch_s=HOLD_AFTER_CATCH_S,
         debug_vis=False,
     )
 
@@ -342,7 +349,7 @@ class RewardsCfg:
     )
     catch_success = RewTerm(
         func=mdp.ball_caught_bonus,
-        weight=500.0,               # one-time bonus; effective value = weight * dt = 10
+        weight=500.0,               # once per throw at the confirmation; effective value = weight * dt = 10
         params={"command_name": "ball_throw"},
     )
     ball_secured_hold = RewTerm(
@@ -365,6 +372,19 @@ class RewardsCfg:
         func=mdp.is_terminated_term,
         weight=-200.0,              # -4 per fall
         params={"term_keys": ["base_height", "bad_orientation"]},  # falls only: catch and drop are not penalized
+    )
+
+    # -- standing still while waiting for the throw and while holding the confirmed catch (the baseline drifted
+    #    0.16 m/s and turned 15°/s while waiting, slid its feet and walked off with the ball)
+    stand_still_root = RewTerm(func=mdp.stand_still_root, weight=-10.0, params={"command_name": "ball_throw"})
+    stand_still_feet = RewTerm(
+        func=mdp.stand_still_feet,
+        weight=-5.0,
+        params={
+            "command_name": "ball_throw",
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET_BODY_NAMES, preserve_order=True),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET_BODY_NAMES, preserve_order=True),
+        },
     )
 
     # -- regularization
@@ -465,13 +485,14 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_height = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.2})
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 0.8})
-    # A confirmed catch is a truncation (time_out=True): PPO bootstraps the value of the catch state instead of
-    # cutting it to 0. As a plain termination the catch forfeited the hold rewards that follow, so holding the ball
-    # while breaking the secured streak just before secure_steps paid more than the bonus (run 2026-10-22).
+    # The completed catch (confirmed, then held for HOLD_AFTER_CATCH_S) is a truncation (time_out=True): PPO
+    # bootstraps the value of that state instead of cutting it to 0. As a plain termination the catch forfeited the
+    # hold rewards that follow, so holding the ball while breaking the secured streak just before secure_steps paid
+    # more than the bonus (run 2026-10-22). A drop during the hold phase is a failure (ball_dropped).
     ball_caught = DoneTerm(
         func=mdp.ball_caught,
         time_out=True,
-        params={"command_name": "ball_throw"},  # [TERM SUCCESS] secured for secure_steps in a row
+        params={"command_name": "ball_throw"},  # [TERM SUCCESS] confirmed catch, held for the hold phase
     )
     ball_dropped = DoneTerm(
         func=mdp.ball_below_height,
@@ -510,8 +531,9 @@ class CurriculumCfg:
                 "obs_delay_steps_range": (1, 1),
                 "obs_dropout_prob": 0.0,
                 "hide_in_catch_zone_prob": 0.0,
+                "throw_delay_range": (0.5, 1.5),   # short waits first
             },
-            "final": {  # = BallCommandCfg defaults
+            "final": {  # = CommandsCfg.ball_throw (BallCommandCfg defaults, long waits)
                 "throw_distance_range": (2.0, 5.0),
                 "throw_direction_range": (-math.radians(75.0), math.radians(75.0)),
                 "target_lateral_range": (-0.1, 0.1),
@@ -522,6 +544,7 @@ class CurriculumCfg:
                 "obs_delay_steps_range": (1, 5),
                 "obs_dropout_prob": 0.05,
                 "hide_in_catch_zone_prob": 0.5,
+                "throw_delay_range": (0.5, 8.0),
             },
         },
     )

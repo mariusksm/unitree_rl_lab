@@ -5,7 +5,9 @@ the policy tracks a reference catching clip *while* a physics ball is thrown so 
 it arrives where and when the human caught the ball in that take (catch time and
 catch point from the take's VICON recording, :class:`SyncedBallCommand`). The mocap
 supplies the "how" (whole-body catching form), RL learns the "when/where" corrections
-for off-nominal balls.
+for off-nominal balls. Each clip runs as a wait-and-hold cycle: standing in its first
+pose before the throw (lead-in), the catch, then the catch pose held while the robot
+keeps the ball (hold phase).
 
 The actor sees the ball and proprioception only (the reference is critic-only), so it
 must react to the ball as on the real robot. Its observations equal Phase 2's, which
@@ -36,7 +38,7 @@ import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
 
-from unitree_rl_lab.tasks.ball_catching.motion_data import ball_file_for
+from unitree_rl_lab.tasks.ball_catching.motion_data import ball_file_for, catch_data
 
 # single source of truth for the reference clips (auto-discovered, see motion_data.py)
 from ..phase1.ball_catch_env_cfg import BALL_DATA_DIR, MOTION_FILES
@@ -45,9 +47,28 @@ from ..phase1.ball_catch_env_cfg import BALL_DATA_DIR, MOTION_FILES
 # aligned are kept but get no throw (SyncedBallCommand prints how many)
 CATCH_MOTION_FILES = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)] or MOTION_FILES
 
+# Catch time, flight time and catch point per clip from its recording (numpy, a few seconds at import); in the
+# config, so that the motion command can cut the clips after the catch and params/env.yaml records what was used
+CATCH_DATA = catch_data(CATCH_MOTION_FILES, BALL_DATA_DIR)
+
 # Fixed mode only (no usable recordings, e.g. the old single overhand clip in phase1/motions/): catch time (s)
 # into every clip. With recordings, every clip brings its own catch time and catch point.
 FALLBACK_CATCH_MOTION_TIME = 2.0
+
+# ── wait-and-hold cycle ──
+# lead-in: the first frame is held this long before the clip, a share of the cycles starts inside it (waiting for the
+# throw as in front of a real thrower; the 2026-10-27 Phase 2 baseline caught 28 % after 6-9 s of waiting)
+START_HOLD_S = 6.0
+START_HOLD_PROB = 0.35
+# the clip is cut this long after the recorded catch and that pose held: in 33 of 86 clips the person already puts the
+# ball down by the clip end, a reference that lets go of the ball does not go with the hold phase
+CATCH_SETTLE_S = 0.3
+HOLD_FROM_S = [d["catch_time"] + CATCH_SETTLE_S if d["valid"] else None for d in CATCH_DATA]
+# after the confirmed catch the robot keeps the ball this long before the throw counts as completed
+HOLD_AFTER_CATCH_S = 3.0
+# the held pose must outlast the confirmation (secure_steps, up to ~1.5 s after the arrival) plus the hold phase,
+# otherwise the clip ends first: the robot is reset onto the next cycle and the catch never completes
+END_HOLD_S = HOLD_AFTER_CATCH_S + 2.0
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 # forearm + hand links the ball may rest on in the two-arm underhand catch (left first, then right)
@@ -147,6 +168,10 @@ class CommandsCfg:
         },
         velocity_range=VELOCITY_RANGE,
         joint_position_range=(-0.1, 0.1),
+        start_hold_s=START_HOLD_S,
+        start_hold_prob=START_HOLD_PROB,
+        hold_from_s=HOLD_FROM_S,
+        end_hold_s=END_HOLD_S,
         body_names=[
             "pelvis",
             "left_hip_roll_link",
@@ -171,10 +196,11 @@ class CommandsCfg:
         hand_body_names=HAND_BODY_NAMES,
         contact_sensor_name="ball_contact",
         motion_command_name="motion",
-        ball_data_dir=BALL_DATA_DIR,
+        catch_data=CATCH_DATA,
         catch_motion_time=FALLBACK_CATCH_MOTION_TIME,
         arrival_jitter=0.05,
         catch_point_jitter=(0.05, 0.05, 0.05),
+        hold_after_catch_s=HOLD_AFTER_CATCH_S,
         debug_vis=False,
     )
 
@@ -398,7 +424,7 @@ class RewardsCfg:
     )
     catch_success = RewTerm(
         func=mdp.ball_caught_bonus,
-        weight=500.0,               # one-time bonus; effective value = weight * dt = 10
+        weight=500.0,               # once per throw at the confirmation; effective value = weight * dt = 10
         params={"command_name": "ball_throw"},
     )
     ball_secured_hold = RewTerm(
@@ -471,12 +497,13 @@ class TerminationsCfg:
         },
     )
     # -- ball
-    # A confirmed catch is a truncation (time_out=True), as in Phase 2: it must not forfeit the tracking and hold
-    # rewards that follow, and the adaptive sampler counts only real terminations as failures.
+    # The completed catch (confirmed, then held for HOLD_AFTER_CATCH_S) is a truncation (time_out=True), as in
+    # Phase 2: it must not forfeit the tracking and hold rewards that follow, and the adaptive sampler counts only
+    # real terminations as failures.
     ball_caught = DoneTerm(
         func=mdp.ball_caught,
         time_out=True,
-        params={"command_name": "ball_throw"},  # [TERM SUCCESS] confirmed catch
+        params={"command_name": "ball_throw"},  # [TERM SUCCESS] confirmed catch, held for the hold phase
     )
     ball_dropped = DoneTerm(
         func=mdp.ball_below_height,

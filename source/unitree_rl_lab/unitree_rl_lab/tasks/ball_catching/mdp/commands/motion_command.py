@@ -32,9 +32,22 @@ class MotionLoader:
 
     Shorter clips are padded with their last frame; ``time_step_total`` holds each clip's real length, so callers
     never read the padding. All clips must share one frame rate.
+
+    Optionally every clip becomes a wait-and-hold cycle: its first frame held for ``start_hold_s`` in front (standing
+    before the action), the clip up to ``hold_from_s[clip]`` (``None``: to its end) and that frame held for
+    ``end_hold_s`` (keeping the pose). The held frames repeat positions and orientations with zero velocities.
+    ``start_hold_frames`` is the length of the lead-in, the same for all clips.
     """
 
-    def __init__(self, motion_files: Sequence[str], body_indexes: Sequence[int], device: str = "cpu"):
+    def __init__(
+        self,
+        motion_files: Sequence[str],
+        body_indexes: Sequence[int],
+        device: str = "cpu",
+        start_hold_s: float = 0.0,
+        hold_from_s: Sequence[float | None] | None = None,
+        end_hold_s: float = 0.0,
+    ):
         assert len(motion_files) > 0, "no motion files given"
         clips = []
         for motion_file in motion_files:
@@ -45,24 +58,39 @@ class MotionLoader:
         self.fps = rates[0]
         self.files = list(motion_files)
         self.num_clips = len(clips)
-        lengths = [clip["joint_pos"].shape[0] for clip in clips]
+        if hold_from_s is None:
+            hold_from_s = [None] * len(clips)
+        assert len(hold_from_s) == len(clips), f"hold_from_s has {len(hold_from_s)} entries for {len(clips)} clips"
+        self.start_hold_frames = int(round(start_hold_s * self.fps))
+        end_hold_frames = int(round(end_hold_s * self.fps))
+        # last clip frame used (then held), per clip
+        last = [
+            clip["joint_pos"].shape[0] - 1 if t is None else min(int(round(t * self.fps)), clip["joint_pos"].shape[0] - 1)
+            for clip, t in zip(clips, hold_from_s)
+        ]
+        lengths = [self.start_hold_frames + k + 1 + end_hold_frames for k in last]
         self.time_step_total = torch.tensor(lengths, dtype=torch.long, device=device)
 
-        def stacked(key: str, bodies: Sequence[int] | None = None) -> torch.Tensor:
+        def stacked(key: str, bodies: Sequence[int] | None = None, velocity: bool = False) -> torch.Tensor:
             padded = []
-            for clip in clips:
-                data = clip[key] if bodies is None else clip[key][:, bodies]
-                padded.append(np.concatenate([data, np.repeat(data[-1:], max(lengths) - len(data), axis=0)]))
+            for clip, k in zip(clips, last):
+                data = (clip[key] if bodies is None else clip[key][:, bodies])[: k + 1]
+                first, held = (np.zeros_like(data[:1]), np.zeros_like(data[-1:])) if velocity else (data[:1], data[-1:])
+                padded.append(np.concatenate([
+                    np.repeat(first, self.start_hold_frames, axis=0),
+                    data,
+                    np.repeat(held, max(lengths) - self.start_hold_frames - len(data), axis=0),  # end hold + padding
+                ]))
             return torch.tensor(np.stack(padded), dtype=torch.float32, device=device)
 
         # bodies are selected once here (the command only tracks cfg.body_names), not on every access
         body_indexes = [int(i) for i in body_indexes]
         self.joint_pos = stacked("joint_pos")
-        self.joint_vel = stacked("joint_vel")
+        self.joint_vel = stacked("joint_vel", velocity=True)
         self.body_pos_w = stacked("body_pos_w", body_indexes)
         self.body_quat_w = stacked("body_quat_w", body_indexes)
-        self.body_lin_vel_w = stacked("body_lin_vel_w", body_indexes)
-        self.body_ang_vel_w = stacked("body_ang_vel_w", body_indexes)
+        self.body_lin_vel_w = stacked("body_lin_vel_w", body_indexes, velocity=True)
+        self.body_ang_vel_w = stacked("body_ang_vel_w", body_indexes, velocity=True)
 
 
 class MotionCommand(CommandTerm):
@@ -78,7 +106,14 @@ class MotionCommand(CommandTerm):
             self.robot.find_bodies(self.cfg.body_names, preserve_order=True)[0], dtype=torch.long, device=self.device
         )
 
-        self.motion = MotionLoader(self.cfg.motion_files, self.body_indexes, device=self.device)
+        self.motion = MotionLoader(
+            self.cfg.motion_files,
+            self.body_indexes,
+            device=self.device,
+            start_hold_s=self.cfg.start_hold_s,
+            hold_from_s=self.cfg.hold_from_s,
+            end_hold_s=self.cfg.end_hold_s,
+        )
         control_rate = 1.0 / (env.cfg.decimation * env.cfg.sim.dt)
         if abs(self.motion.fps - control_rate) > 1e-3:
             raise ValueError(
@@ -258,6 +293,15 @@ class MotionCommand(CommandTerm):
             / self.bin_count
             * (lengths - 1)
         ).long()
+        # part of the cycles starts inside the static lead-in: nothing fails there, so the adaptive sampling alone
+        # would pick it ever more rarely and long waits would vanish from training
+        lead_in = self.motion.start_hold_frames
+        if lead_in > 0:
+            if self.cfg.start_hold_from_begin:
+                self.time_steps[env_ids] = 0
+            else:
+                waiting = env_ids[torch.rand(len(env_ids), device=self.device) < self.cfg.start_hold_prob]
+                self.time_steps[waiting] = torch.randint(0, lead_in, (len(waiting),), device=self.device)
 
         # Metrics (of the clip each resampled env now tracks)
         H = -(clip_probabilities * (clip_probabilities + 1e-12).log()).sum(dim=1)
@@ -393,6 +437,20 @@ class MotionCommandCfg(CommandTermCfg):
     velocity_range: dict[str, tuple[float, float]] = {}
 
     joint_position_range: tuple[float, float] = (-0.52, 0.52)
+
+    # ── wait-and-hold cycle (Unified; all zero/None: the plain clips, as in Phase 1) ──
+    start_hold_s: float = 0.0
+    """Seconds the first frame of every clip is held in front of it (standing still, zero velocities)."""
+    start_hold_prob: float = 0.0
+    """Share of the cycles that start uniformly inside that lead-in; the others use the adaptive sampling over the
+    whole extended clip."""
+    start_hold_from_begin: bool = False
+    """Start every cycle at the beginning of the lead-in (evaluation: the longest wait)."""
+    hold_from_s: list[float | None] | None = None
+    """Per clip (order of ``motion_files``): time (s) into the clip from which its frame is held and the rest cut
+    off; ``None`` keeps the clip whole."""
+    end_hold_s: float = 0.0
+    """Seconds the last (or cut) frame is held after the clip (keeping the pose, zero velocities)."""
 
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8

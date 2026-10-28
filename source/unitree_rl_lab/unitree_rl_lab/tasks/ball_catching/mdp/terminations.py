@@ -66,9 +66,10 @@ def bad_motion_body_pos_z_only(
 
 
 def ball_caught(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
-    """Terminate (successfully) once the ball has been held at a hand for the configured duration."""
+    """Success: the confirmed catch has lasted the hold phase (``BallCommand.catch_complete``; without a hold phase
+    this is the confirmation itself). Use it as a truncation (``time_out=True``), see the task configs."""
     command = env.command_manager.get_term(command_name)
-    return command.secured_steps >= command.cfg.secure_steps
+    return command.catch_complete
 
 
 def ball_below_height(env: ManagerBasedRLEnv, ball_name: str, min_height: float) -> torch.Tensor:

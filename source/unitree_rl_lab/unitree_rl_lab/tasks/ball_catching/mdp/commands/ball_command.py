@@ -39,8 +39,9 @@ class BallCommand(CommandTerm):
       ``target_height_range`` m above the ground;
     - apex height from ``apex_height_range``, which fixes the flight time.
 
-    The ball is parked at the release point until the launch timer expires, so the policy can settle into
-    a stable stance. Then it is launched with the velocity that reaches the target after the flight time
+    The ball is parked at the release point until the launch timer expires (``throw_delay_range``, optionally
+    log-uniform so that long waits occur without making every episode long), so the policy has to stand and wait as
+    in front of a real thrower. Then it is launched with the velocity that reaches the target after the flight time
     under gravity *and* quadratic air drag; the drag force is applied every control step during the flight.
     PhysX handles everything else (gravity, collisions).
 
@@ -49,7 +50,10 @@ class BallCommand(CommandTerm):
 
     - ``secured_steps``: consecutive control steps for which the launched ball is inside the catch box in
       front of the torso, slow relative to the root, above ``secure_min_height`` and in contact with the
-      arms (both arms if ``require_both_arms``). Reaching ``cfg.secure_steps`` counts as a confirmed catch.
+      arms (both arms if ``require_both_arms``). Reaching ``cfg.secure_steps`` confirms the catch
+      (``confirmed``, ``confirmed_now`` on that one step).
+    - ``catch_complete``: the confirmed catch has lasted ``hold_after_catch_s`` (hold phase: the robot keeps the
+      ball and stands still, as after a real catch). With 0 the confirmation itself completes the catch.
 
     It also models how the robot *perceives* the ball through the VICON pipeline (actor observations only;
     rewards, catch check and critic use the true state). Every control step the tracker produces a
@@ -95,6 +99,12 @@ class BallCommand(CommandTerm):
         self.time_until_throw = torch.zeros(self.num_envs, device=self.device)
         self.time_since_throw = torch.zeros(self.num_envs, device=self.device)
         self.secured_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.confirmed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """The catch of the current throw is confirmed (``secured_steps`` reached ``secure_steps`` once)."""
+        self.confirmed_now = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """The catch was confirmed in the last update (true on exactly one step per throw)."""
+        self.steps_since_confirm = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        """Control steps since the confirmation (0 on the confirming step and before)."""
         self.arm_contact = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
         """Ball touches the [left, right] arm in the current control step."""
         self._steps_since_contact = torch.full(
@@ -145,6 +155,7 @@ class BallCommand(CommandTerm):
 
         self.metrics["ball_height"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_secured_time"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["hold_time_after_confirm"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["hand_ball_distance"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_in_catch_zone"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_arm_contact"] = torch.zeros(self.num_envs, device=self.device)
@@ -163,9 +174,16 @@ class BallCommand(CommandTerm):
         """Whether the ball of the current throw is in the air (or caught/dropped), shape (num_envs,)."""
         return self.time_until_throw <= 0.0
 
+    @property
+    def catch_complete(self) -> torch.Tensor:
+        """The confirmed catch has lasted ``hold_after_catch_s``: the throw succeeded, shape (num_envs,)."""
+        held = self.steps_since_confirm.float() * self._env.step_dt >= self.cfg.hold_after_catch_s - 1e-6
+        return self.confirmed & held
+
     def _update_metrics(self):
         self.metrics["ball_height"] = self.ball.data.root_pos_w[:, 2].clone()
         self.metrics["ball_secured_time"] = self.secured_steps.float() * self._env.step_dt
+        self.metrics["hold_time_after_confirm"] = self.steps_since_confirm.float() * self._env.step_dt
 
     def _sample_throw(self, env_ids: Sequence[int]):
         """Sample release point, target point, flight time and drag of a new throw (heading frame)."""
@@ -205,13 +223,20 @@ class BallCommand(CommandTerm):
         self._sample_throw(env_ids)
         self._write_parked_state(env_ids)
 
-        self.time_until_throw[env_ids] = sample_uniform(*self.cfg.throw_delay_range, (len(env_ids),), self.device)
+        low, high = self.cfg.throw_delay_range
+        if self.cfg.throw_delay_log_uniform:
+            self.time_until_throw[env_ids] = low * (high / low) ** torch.rand(len(env_ids), device=self.device)
+        else:
+            self.time_until_throw[env_ids] = sample_uniform(low, high, (len(env_ids),), self.device)
         self.time_since_throw[env_ids] = 0.0
         self._reset_catch_state(env_ids)
         self._reset_perception(env_ids)
 
     def _reset_catch_state(self, env_ids: Sequence[int]):
         self.secured_steps[env_ids] = 0
+        self.confirmed[env_ids] = False
+        self.confirmed_now[env_ids] = False
+        self.steps_since_confirm[env_ids] = 0
         self.arm_contact[env_ids] = False
         self._steps_since_contact[env_ids] = self._NO_CONTACT
 
@@ -384,6 +409,10 @@ class BallCommand(CommandTerm):
             & touching
         )
         self.secured_steps = torch.where(secured, self.secured_steps + 1, torch.zeros_like(self.secured_steps))
+        # confirmation once per throw; the hold phase runs on even if the secured streak breaks (a drop ends it)
+        self.confirmed_now = ~self.confirmed & (self.secured_steps >= self.cfg.secure_steps)
+        self.steps_since_confirm += self.confirmed.long()
+        self.confirmed |= self.confirmed_now
 
         hands_mid = self.robot.data.body_pos_w[:, self.hand_body_ids].mean(dim=1)
         self.metrics["hand_ball_distance"] = torch.norm(ball_pos - hands_mid, dim=-1)
@@ -459,7 +488,12 @@ class BallCommandCfg(CommandTermCfg):
     #    0.69–0.86 s); distance and direction ranges from mjlab (interim report ch. 9.4) ──
     throw_delay_range: tuple[float, float] = (0.5, 1.5)
     """Time (s) after reset before the ball is launched. The ball is parked at the release point in the
-    meantime (invisible to the actor, see the perception model) so the robot can settle."""
+    meantime (invisible to the actor, see the perception model): the robot has to stand and wait."""
+
+    throw_delay_log_uniform: bool = False
+    """Sample the throw delay log-uniformly instead of uniformly (lower bound > 0). For (0.5, 8) s the median is 2 s
+    and a quarter of the throws come after more than 4 s: long waits are trained without halving the throws per
+    training step."""
 
     throw_distance_range: tuple[float, float] = (2.0, 5.0)
     """Horizontal distance (m) of the release point from the robot root (mjlab: 2 m -> 5 m; VICON throws ≈3.1 m)."""
@@ -526,6 +560,10 @@ class BallCommandCfg(CommandTermCfg):
     secure_steps: int = 50
     """Consecutive held steps for a confirmed catch (50 steps = 1.0 s at 50 Hz; 0.5 s counted balls
     that rolled off afterwards). Curriculum variable."""
+
+    hold_after_catch_s: float = 0.0
+    """Hold phase (s) after the confirmed catch before the throw counts as completed (``catch_complete``, the
+    ``ball_caught`` termination). A drop during it ends the episode as a failure. 0 = completed at the confirmation."""
 
     # ── perception: how the robot gets the ball from the VICON pipeline (actor observations only).
     #    Dropout and noise values are calibrated on the same 12 VICON throws ──

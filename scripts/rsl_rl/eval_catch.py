@@ -3,14 +3,16 @@
 Runs the task's play config (final throw distribution) with the deterministic policy and measures what the
 training statistics do not show: outcomes per episode, foot behavior (gliding vs. pivoting, drift of each stance,
 lift-offs, tilt of the feet in contact), posture while waiting and while holding, where the ball sits while held
-(incl. contact with the torso), joints at their limits and torque saturation. Scenarios change the env config before
-the env is built:
+(incl. contact with the torso), joints at their limits and torque saturation, and whether confirmed catches last
+through the hold phase. Scenarios change the env config before the env is built:
 
   base       play config as is
   fric_high  robot friction fixed to static 1.0 / dynamic 0.8 (rubber on a lab floor)
   fric_low   robot friction fixed to static 0.4 / dynamic 0.3
-  hold       no ball_caught termination, 12 s episodes: does the robot keep holding after the 1 s confirmation?
-  wait       throw after 6-9 s instead of 0.5-1.5 s, as on the real robot      (Phase 2 only: Unified throws with the clip)
+  hold       no ball_caught termination, 12 s episodes: does the robot keep holding after the confirmation?
+             (Phase 2: throws after 0.5-1.5 s as until 2026-10-27, so ~9 s of holding; Unified: until its clip ends)
+  wait       throw after 6-9 s, as on the real robot (Phase 2 trains 0.5-8 s since 2026-10-28, 0.5-1.5 s before);
+             Unified: every cycle starts at the beginning of its 6 s lead-in (throw after ~6.9 s)
   push       velocity pushes of ±0.5 m/s every 1-2 s
   lateral    throws aimed ±0.3 m sideways instead of ±0.1 m                    (Phase 2 only: Unified aims at the clip)
   delay      perception latency 4-6 control steps (training until 2026-10-27: 1-3, since then 1-5; kept for comparison)
@@ -58,7 +60,7 @@ args_cli = parser.parse_args()
 if args_cli.video:
     args_cli.enable_cameras = True
 # checked before Isaac Sim starts: once it runs, closing it ends the process without printing an error
-if "Unified" in args_cli.task and args_cli.scenario in ("wait", "lateral"):
+if "Unified" in args_cli.task and args_cli.scenario == "lateral":
     print(f"[eval] scenario '{args_cli.scenario}' does not apply to {args_cli.task}: its throws follow the reference "
           "clip (launch time and aim from the recording)", flush=True)
     sys.exit(2)
@@ -85,7 +87,7 @@ SECURE_STEPS_FINAL = 50  # 1 s at 50 Hz: a hold this long counts as a confirmed 
 
 def apply_scenario(env_cfg, name: str):
     synced = type(env_cfg.commands.ball_throw).__name__ == "SyncedBallCommandCfg"
-    if synced and name in ("wait", "lateral"):
+    if synced and name == "lateral":
         raise ValueError(f"scenario '{name}' does not apply to a task whose throws follow the reference clip")
     if name == "base":
         return
@@ -96,8 +98,13 @@ def apply_scenario(env_cfg, name: str):
     elif name == "hold":
         env_cfg.terminations.ball_caught = None
         env_cfg.episode_length_s = 12.0
+        if not synced:
+            env_cfg.commands.ball_throw.throw_delay_range = (0.5, 1.5)
     elif name == "wait":
-        env_cfg.commands.ball_throw.throw_delay_range = (6.0, 9.0)
+        if synced:
+            env_cfg.commands.motion.start_hold_from_begin = True
+        else:
+            env_cfg.commands.ball_throw.throw_delay_range = (6.0, 9.0)
     elif name == "push":
         env_cfg.events.push_robot.interval_range_s = (1.0, 2.0)
     elif name == "lateral":
@@ -163,6 +170,8 @@ class Stats:
         self.launch_xy = self.ep_xy.clone()
         self.prev_root_xy = self.ep_xy.clone()
         self.max_sec = torch.zeros(N, dtype=torch.long, device=dev)
+        self.ep_confirmed = torch.zeros(N, dtype=torch.bool, device=dev)
+        self.ep_hold_steps = torch.zeros(N, dtype=torch.long, device=dev)
         J = len(self.joint_names)
         self.tau_max = torch.zeros(J, device=dev)
         self.tau_hi = torch.zeros(J, device=dev)
@@ -170,6 +179,7 @@ class Stats:
         self.near_lim = torch.zeros(J, device=dev)
         self.trk_err = torch.zeros(J, device=dev)
         self.tgt_out = torch.zeros(J, device=dev)
+        self.tgt_beyond = torch.zeros(J, device=dev)
         self.tau_lim = r.data.joint_effort_limits[0].clone()
         self.valid_steps = 0
 
@@ -190,6 +200,9 @@ class Stats:
                 self.terms[why] += 1
                 L["ep_max_sec"].append(int(self.max_sec[i]))
                 L["ep_reason"].append(why)
+                if bool(self.ep_confirmed[i]):
+                    L["confirmed_reason"].append(why)
+                    L["hold_after_confirm"].append(int(self.ep_hold_steps[i]) * self.dt)
                 if bool(self.was_launched[i]):
                     L["drift_after_launch"].append(float((self.prev_root_xy[i] - self.launch_xy[i]).norm()))
             cut = self.in_stance & reset[:, None]
@@ -198,10 +211,14 @@ class Stats:
                 L["stance_dyaw"] += wrap(self.prev_foot_yaw - self.st_yaw)[cut].abs().tolist()
                 L["stance_launched"] += self.st_launched[cut].tolist()
             self.max_sec[ids] = 0
+            self.ep_confirmed[ids] = False
+            self.ep_hold_steps[ids] = 0
             self.ep_xy[ids] = r.data.root_pos_w[ids, :2]
             self.ep_yaw[ids] = yaw_of(r.data.root_quat_w[ids])
             self.in_stance[ids] = False
         self.max_sec = torch.maximum(self.max_sec, cmd.secured_steps)
+        self.ep_confirmed |= cmd.confirmed
+        self.ep_hold_steps = torch.maximum(self.ep_hold_steps, cmd.steps_since_confirm)
 
         # ---- launch: drift and turning while waiting
         new = launched & ~self.was_launched & valid
@@ -307,6 +324,8 @@ class Stats:
             target = self.action_term.processed_actions[valid]
             self.trk_err += (target - q).abs().sum(dim=0)
             self.tgt_out += ((target < lim[..., 0]) | (target > lim[..., 1])).float().sum(dim=0)
+            hard = r.data.joint_pos_limits[valid]  # the clamp of fix 2 keeps targets within these
+            self.tgt_beyond += ((target < hard[..., 0] - 1e-4) | (target > hard[..., 1] + 1e-4)).float().sum(dim=0)
             tau = r.data.applied_torque.abs()
             self.tau_max = torch.maximum(self.tau_max, tau[valid].amax(dim=0))
             self.tau_hi += (tau[valid] > 0.8 * self.tau_lim).float().sum(dim=0)
@@ -325,6 +344,11 @@ class Stats:
         mx = torch.tensor(L["ep_max_sec"], dtype=torch.float) if L["ep_max_sec"] else torch.zeros(1)
         reached = mx >= SECURE_STEPS_FINAL
         R["held_1s_pct"] = round(100 * float(reached.float().mean()), 2)
+        if L["confirmed_reason"]:
+            reasons = L["confirmed_reason"]
+            R["confirmed_pct"] = round(100 * len(reasons) / max(1, ends), 2)
+            R["after_confirmation_pct"] = {k: round(100 * reasons.count(k) / len(reasons), 2) for k in set(reasons)}
+            R["hold_after_confirm_s_median"] = round(float(torch.tensor(L["hold_after_confirm"]).median()), 2)
         if scenario == "hold" and reached.any():
             reasons = [L["ep_reason"][i] for i in range(len(L["ep_reason"])) if bool(reached[i])]
             R["after_confirmed_catch_pct"] = {k: round(100 * reasons.count(k) / len(reasons), 2) for k in set(reasons)}
@@ -382,13 +406,17 @@ class Stats:
             "arm_link_contact_pct": {k[2:]: round(100 * v / s, 1) for k, v in cnt.items() if k.startswith("c_")},
         }
         vs = max(1, self.valid_steps)
-        near, err, out = (x.cpu() / vs for x in (self.near_lim, self.trk_err, self.tgt_out))
+        near, err, out, beyond = (x.cpu() / vs for x in (self.near_lim, self.trk_err, self.tgt_out, self.tgt_beyond))
+        # limits and "outside the range": soft limits (90 % of the range); "beyond the hard limit": the joint stops
         R["joints_at_limit"] = [
             {"joint": self.joint_names[i], "pct_time_within_5pct_of_limit": round(100 * float(near[i]), 1),
              "pct_time_target_outside_range": round(100 * float(out[i]), 1),
+             "pct_time_target_beyond_hard_limit": round(100 * float(beyond[i]), 1),
              "mean_abs_target_error_rad": round(float(err[i]), 3)}
             for i in torch.argsort(near, descending=True)[:6].tolist()
         ]
+        worst = int(torch.argmax(beyond))
+        R["target_beyond_hard_limit_max"] = {"joint": self.joint_names[worst], "pct_time": round(100 * float(beyond[worst]), 1)}
         lim, tmax, hi = self.tau_lim.cpu(), self.tau_max.cpu(), self.tau_hi.cpu() / vs
         hw = self.tau_hi_phase["wait"].cpu() / max(1, cnt["tau_n_wait"])
         hh = self.tau_hi_phase["held"].cpu() / max(1, cnt["tau_n_held"])
@@ -414,8 +442,13 @@ def summary(R: dict) -> str:
         f"[eval] held: ball {R['held']['ball_from_pelvis_xyz_m']} m from the pelvis, torso contact "
         f"{R['held']['pct_torso_contact']} %, mean torso force {R['held']['torso_force_N_mean']} N",
         f"[eval] most saturated joint: {top['joint']} above 80 % of its torque limit in {top['pct_steps_over_80pct']} % "
-        f"of the steps",
+        f"of the steps; joint targets beyond the hard limit: at most {R['target_beyond_hard_limit_max']['pct_time']} % "
+        f"of the steps ({R['target_beyond_hard_limit_max']['joint']})",
     ]
+    if "after_confirmation_pct" in R:
+        lines.append(f"[eval] confirmed catches: {R['confirmed_pct']} % of the episodes; how they ended: "
+                     f"{R['after_confirmation_pct']} (ball_caught = hold phase completed), held "
+                     f"{R['hold_after_confirm_s_median']} s after the confirmation (median)")
     if "after_confirmed_catch_pct" in R:
         lines.append(f"[eval] after a confirmed catch: {R['after_confirmed_catch_pct']}")
     return "\n".join(lines)
