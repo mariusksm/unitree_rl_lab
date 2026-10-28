@@ -56,6 +56,8 @@ def main():
     if valid:
         heights = [i["catch_point"][2] for i in valid]
         print(f"  {'catch height m':20s} min {min(heights):6.2f}  median {statistics.median(heights):6.2f}  max {max(heights):6.2f}")
+        print(f"  (clip frame; Phase 1 and Unified lift clips and catch points by {motion_data.TEMP_CLIP_LIFT} m, see "
+              "motion_data.TEMP_CLIP_LIFT)")
     if args.json:
         with open(args.json, "w") as f:
             json.dump({os.path.basename(p): i for p, i in zip(files, infos)}, f, indent=1)

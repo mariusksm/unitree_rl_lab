@@ -38,7 +38,7 @@ import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
 
-from unitree_rl_lab.tasks.ball_catching.motion_data import ball_file_for, catch_data
+from unitree_rl_lab.tasks.ball_catching.motion_data import TEMP_CLIP_LIFT, ball_file_for, catch_data
 
 # single source of truth for the reference clips (auto-discovered, see motion_data.py)
 from ..phase1.ball_catch_env_cfg import BALL_DATA_DIR, MOTION_FILES
@@ -49,7 +49,7 @@ CATCH_MOTION_FILES = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)
 
 # Catch time, flight time and catch point per clip from its recording (numpy, a few seconds at import); in the
 # config, so that the motion command can cut the clips after the catch and params/env.yaml records what was used
-CATCH_DATA = catch_data(CATCH_MOTION_FILES, BALL_DATA_DIR)
+CATCH_DATA = catch_data(CATCH_MOTION_FILES, BALL_DATA_DIR, lift=TEMP_CLIP_LIFT)  # temporary height fix, as the clips
 
 # Fixed mode only (no usable recordings, e.g. the old single overhand clip in phase1/motions/): catch time (s)
 # into every clip. With recordings, every clip brings its own catch time and catch point.
@@ -155,6 +155,7 @@ class CommandsCfg:
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
         motion_files=CATCH_MOTION_FILES,
+        clip_lift=TEMP_CLIP_LIFT,  # temporary height fix of the current dataset (motion_data.py)
         anchor_body_name="torso_link",
         resampling_time_range=(1.0e9, 1.0e9),
         debug_vis=True,

@@ -36,7 +36,8 @@ class MotionLoader:
     Optionally every clip becomes a wait-and-hold cycle: its first frame held for ``start_hold_s`` in front (standing
     before the action), the clip up to ``hold_from_s[clip]`` (``None``: to its end) and that frame held for
     ``end_hold_s`` (keeping the pose). The held frames repeat positions and orientations with zero velocities.
-    ``start_hold_frames`` is the length of the lead-in, the same for all clips.
+    ``start_hold_frames`` is the length of the lead-in, the same for all clips. ``lift`` (m) is added to all body heights
+    (data that sits too low).
     """
 
     def __init__(
@@ -47,6 +48,7 @@ class MotionLoader:
         start_hold_s: float = 0.0,
         hold_from_s: Sequence[float | None] | None = None,
         end_hold_s: float = 0.0,
+        lift: float = 0.0,
     ):
         assert len(motion_files) > 0, "no motion files given"
         clips = []
@@ -88,6 +90,7 @@ class MotionLoader:
         self.joint_pos = stacked("joint_pos")
         self.joint_vel = stacked("joint_vel", velocity=True)
         self.body_pos_w = stacked("body_pos_w", body_indexes)
+        self.body_pos_w[..., 2] += lift
         self.body_quat_w = stacked("body_quat_w", body_indexes)
         self.body_lin_vel_w = stacked("body_lin_vel_w", body_indexes, velocity=True)
         self.body_ang_vel_w = stacked("body_ang_vel_w", body_indexes, velocity=True)
@@ -113,6 +116,7 @@ class MotionCommand(CommandTerm):
             start_hold_s=self.cfg.start_hold_s,
             hold_from_s=self.cfg.hold_from_s,
             end_hold_s=self.cfg.end_hold_s,
+            lift=self.cfg.clip_lift,
         )
         control_rate = 1.0 / (env.cfg.decimation * env.cfg.sim.dt)
         if abs(self.motion.fps - control_rate) > 1e-3:
@@ -450,6 +454,10 @@ class MotionCommandCfg(CommandTermCfg):
     motion_files: list[str] = MISSING
     """Reference clips (``.npz``, all at the control rate). Each env tracks one, drawn uniformly at every
     resample."""
+    clip_lift: float = 0.0
+    """Height (m) added to the clips' body positions when they are loaded, for data that sits too low (currently
+    ``motion_data.TEMP_CLIP_LIFT``). Data that needs a lift also needs it for anything placed in its frame, e.g. the
+    recorded catch points (``motion_data.catch_data(lift=...)``)."""
     anchor_body_name: str = MISSING
     body_names: list[str] = MISSING
 

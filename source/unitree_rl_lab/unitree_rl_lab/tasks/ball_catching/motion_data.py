@@ -41,6 +41,15 @@ MIN_CATCH_TIME = 0.3  # s into the clip
 MAX_ARM_RMSE = 0.10  # m, worst clip elbow/hand vs the scaled human point (clean clips <= 0.07 m, rejected 0.11-0.22 m)
 ARM_MIDLINE = 0.05  # m: points closer than this to the body's midline do not count for the side check
 
+# ── TEMPORARY, for the current dataset only (imitation-data e1704e4, isaaclab/g1) ────────────────────────────────────
+# Its clips sit about 4.5 cm too low: the lowest link origin (ankle roll) is at -1.2 cm in every clip, where the standing
+# robot has it at about +3.3 cm, so its soles are in the ground and a robot standing on the ground is 4.5 cm higher
+# than its reference (Phase 1 run of 2026-10-28; cause presumably the export of the clips, see the spec, Section 5.2).
+# Phase 1 and Unified lift the clips (MotionCommandCfg.clip_lift) and the recorded catch points (catch_data(lift=...))
+# by this much when they load them. Remove with a re-exported dataset: delete this constant and every use of it
+# (grep TEMP_CLIP_LIFT); clip_lift and lift then stay at their default 0.
+TEMP_CLIP_LIFT = 0.045  # m
+
 # G1 29-DoF asset (UNITREE_G1_29DOF_MIMIC_CFG): joint order and body indices of the clips, confirmed against the asset
 # by scripts/mimic/check_npz_fk.py; here for the numpy-only scripts and the task configs
 G1_JOINT_NAMES = [
@@ -300,11 +309,13 @@ def compute_catch_info(
     return info
 
 
-def catch_data(clip_files: Sequence[str], ball_dir: str | None) -> list[dict]:
+def catch_data(clip_files: Sequence[str], ball_dir: str | None, lift: float = 0.0) -> list[dict]:
     """What the Unified task needs per clip, from :func:`catch_infos` with the G1 asset constants.
 
     Returns per clip ``valid``, ``reason`` and, for valid clips, ``catch_time`` and ``flight_time`` (s into the clip)
-    and ``catch_point`` (clip frame, m), as plain Python values for the env config.
+    and ``catch_point`` (clip frame, m), as plain Python values for the env config. ``lift`` (m) is added to the catch
+    point height; it must equal the lift of the clips (``MotionCommandCfg.clip_lift``), the catch point lives in their
+    frame.
     """
     data = []
     for info in catch_infos(clip_files, ball_dir, G1_JOINT_NAMES, G1_HAND_BODY_INDEXES):
@@ -313,7 +324,7 @@ def catch_data(clip_files: Sequence[str], ball_dir: str | None) -> list[dict]:
             entry.update(
                 catch_time=float(info["catch_time"]),
                 flight_time=float(info["flight_time"]),
-                catch_point=[float(x) for x in info["catch_point"]],
+                catch_point=[float(x) for x in info["catch_point"][:2]] + [float(info["catch_point"][2]) + lift],
             )
         data.append(entry)
     return data

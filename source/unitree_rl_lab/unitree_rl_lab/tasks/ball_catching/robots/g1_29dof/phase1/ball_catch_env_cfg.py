@@ -23,7 +23,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
-from unitree_rl_lab.tasks.ball_catching.motion_data import find_motion_data
+from unitree_rl_lab.tasks.ball_catching.motion_data import TEMP_CLIP_LIFT, find_motion_data
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
 
 ##
@@ -106,6 +106,7 @@ class CommandsCfg:
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
         motion_files=MOTION_FILES,
+        clip_lift=TEMP_CLIP_LIFT,  # temporary height fix of the current dataset (motion_data.py)
         anchor_body_name="torso_link",
         resampling_time_range=(1.0e9, 1.0e9),
         debug_vis=True,
