@@ -14,6 +14,18 @@ bash sim2sim/setup.sh
 
 Change a package: edit `requirements.in`, lock again with the command at its top, run `setup.sh` on both workstations.
 
+## Running a policy
+
+```bash
+# Isaac Lab environment (torch + onnx only): actor of a checkpoint -> policy.onnx (+ policy_check.npz)
+python sim2sim/tools/export_onnx.py /abs/path/model_3000.pt --out policy
+# sim2sim environment: stand 30 s from the default pose (or --start_clip <clip.npz>), with video
+~/envs/sim2sim/bin/python sim2sim/run.py --onnx policy.onnx --deploy <run>/params/deploy.yaml --isaac isaac_g1.json \
+    --seconds 30 --video stand.mp4
+```
+
+`run.py` builds the G1 with the Isaac collision shapes (`model.py`), the armature, drive gains and effort limits of the Isaac asset (position actuators, implicitfast integrator, 5 ms step) and runs the policy every 20 ms on the actor observation of the run's `deploy.yaml` (term order, scales, 5-frame history). So far there is no ball: the ball terms say "not visible". Default pose, gains, limits and action scale are taken exactly from the dump; `deploy.yaml` rounds them to three digits.
+
 ## Model comparison
 
 `tools/dump_isaac_model.py` (Isaac Lab environment) writes the G1 as PhysX simulates it to JSON, `tools/compare_models.py` (sim2sim environment) compares it with MJCF files: masses, centres of mass, inertia, forward kinematics, collision shapes, joint ranges, armature and effort limits.

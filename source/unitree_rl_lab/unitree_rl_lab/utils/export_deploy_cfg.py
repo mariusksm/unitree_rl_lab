@@ -33,7 +33,10 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
     damping = np.zeros(len(joint_sdk_names))
     damping[joint_ids_map] = asset.data.default_joint_damping[0].detach().cpu().numpy().tolist()
     cfg["damping"] = damping.tolist()
-    cfg["default_joint_pos"] = asset.data.default_joint_pos[0].detach().cpu().numpy().tolist()
+    # nominal default pose: the startup event randomize_joint_default_pos shifts every env's default (calibration DR)
+    # and keeps the nominal one; env 0's shifted pose must not end up on the robot
+    default_pos = getattr(asset.data, "default_joint_pos_nominal", asset.data.default_joint_pos[0])
+    cfg["default_joint_pos"] = default_pos.detach().cpu().numpy().tolist()
 
     # --- commands ---
     cfg["commands"] = {}
@@ -63,7 +66,8 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
 
         if action_name in ["JointPositionAction", "JointVelocityAction"]:
             if term_cfg.use_default_offset:
-                term_cfg.offset = action_term._offset[0].detach().cpu().numpy().tolist()
+                offset = default_pos if action_term._joint_ids == slice(None) else default_pos[action_term._joint_ids]
+                term_cfg.offset = offset.detach().cpu().numpy().tolist()
             else:
                 term_cfg.offset = [0.0 for _ in range(action_term.action_dim)]
 
