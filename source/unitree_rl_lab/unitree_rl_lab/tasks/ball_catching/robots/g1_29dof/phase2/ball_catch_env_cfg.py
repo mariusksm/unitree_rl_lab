@@ -18,7 +18,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
-from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
+from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # forearm colliders: FOREARM_COLLIDERS
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 FEET_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]

@@ -24,7 +24,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
 from unitree_rl_lab.tasks.ball_catching.motion_data import TEMP_CLIP_LIFT, find_motion_data
-from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG as ROBOT_CFG
+from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # forearm colliders: FOREARM_COLLIDERS
 
 ##
 # Scene definition

@@ -1,7 +1,7 @@
 """Dump the G1 as Isaac Lab simulates it to JSON, for the comparison with the MuJoCo models (compare_models.py).
 
-Spawns ``UNITREE_G1_29DOF_MIMIC_CFG`` (the robot of Phase 1, Phase 2 and Unified) alone on a ground plane and records
-what PhysX uses:
+Spawns ``UNITREE_G1_29DOF_MIMIC_CFG`` (the robot of Phase 1, Phase 2 and Unified; with ``--forearm_colliders`` the
+variant of ``tasks/ball_catching/robot_assets.py``) alone on a ground plane and records what PhysX uses:
 
 - per body: mass, centre of mass, principal moments of inertia, the collision shapes of the USD (type, size, mesh
   approximation, pose and bounding box in the body frame) and the body position after forward kinematics at the zero
@@ -22,6 +22,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--out", type=str, required=True, help="Output JSON file.")
+parser.add_argument("--forearm_colliders", action="store_true", help="Dump the asset with the added forearm colliders.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 simulation_app = AppLauncher(args_cli).app
@@ -37,6 +38,9 @@ from isaaclab.scene import InteractiveScene, InteractiveSceneCfg  # noqa: E402
 from isaaclab.utils import configclass  # noqa: E402
 
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG  # noqa: E402
+from unitree_rl_lab.tasks.ball_catching.robot_assets import G1_FOREARM_CFG  # noqa: E402
+
+ROBOT = G1_FOREARM_CFG if args_cli.forearm_colliders else UNITREE_G1_29DOF_MIMIC_CFG
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shapes  # noqa: E402  # isort: skip
@@ -45,7 +49,7 @@ import shapes  # noqa: E402  # isort: skip
 @configclass
 class SceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
-    robot = UNITREE_G1_29DOF_MIMIC_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    robot = ROBOT.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
 
 def collision_shapes(stage, link_path: str) -> list[dict]:
@@ -151,9 +155,10 @@ def main():
         joints[name] = {"range": limits[j].tolist(), "default": float(default[j])}
         joints[name].update({k: (v[j] if v is not None else None) for k, v in columns.items()})
 
-    cfg = UNITREE_G1_29DOF_MIMIC_CFG
+    cfg = ROBOT
     out = {
         "usd_path": cfg.spawn.usd_path,
+        "forearm_colliders": args_cli.forearm_colliders,
         "init_pos": list(cfg.init_state.pos),
         "self_collisions": cfg.spawn.articulation_props.enabled_self_collisions,
         "bodies": bodies,
