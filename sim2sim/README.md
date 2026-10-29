@@ -26,6 +26,15 @@ python sim2sim/tools/export_onnx.py /abs/path/model_3000.pt --out policy
 
 `run.py` builds the G1 with the Isaac collision shapes (`model.py`), the armature, drive gains and effort limits of the Isaac asset (position actuators, implicitfast integrator, 5 ms step) and runs the policy every 20 ms on the actor observation of the run's `deploy.yaml` (term order, scales, 5-frame history). So far there is no ball: the ball terms say "not visible". Default pose, gains, limits and action scale are taken exactly from the dump; `deploy.yaml` rounds them to three digits.
 
+## Throws
+
+```bash
+~/envs/sim2sim/bin/python sim2sim/run.py --onnx policy.onnx --run <run dir> --isaac isaac_g1.json --throws 200 \
+    [--easy] [--ball_dampratio 0.7] [--video throws.mp4 --video_throws 6]
+```
+
+Episodes as in Phase 2: throw sampled from `commands.ball_throw` of the run's `env.yaml` (`ball.Throw`), parked until the wait (`--wait`, log-uniform 0.5–8 s) is over, launched with the drag-compensated velocity, air drag every control step, VICON model, catch check (`ball.CatchState`) and the Phase 2 terminations. MuJoCo's contacts spring at every speed while PhysX's restitution only acts above its bounce threshold; with a damping ratio that matches Isaac's free bounce (0.4) a ball wedged between forearms and belly is shot out, so the default is 0.7 (drop bounce e = 0.14, `--drop_test`). 2026-10-29 with `model_4500.pt` of the third Unified run: 23 % caught (Isaac 44 %).
+
 ## Ball observations
 
 `ball.py` is the numpy port of the VICON model of `BallCommand` (detection delay, latency, per-throw bias, noise, dropout bursts, occlusion in the catch box, ballistic coasting) and of the actor terms `ball_state`, `ball_visible` and `ball_intercept`; its parameters are those of `commands.ball_throw` in the run's `params/env.yaml`. `tools/record_ball_obs.py` (Isaac) records the true states and the actor's ball terms with a deterministic VICON model, `tools/check_ball_obs.py` replays the states through the port and compares:
