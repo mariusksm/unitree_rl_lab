@@ -30,6 +30,9 @@ ARM_CONTACT_BODY_NAMES = [
     for side in ("left", "right")
     for link in ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
 ]
+# a ball squeezed against the torso harder than this (N) does not count as held (catch with the arms, not a chest clamp)
+TORSO_BODY_NAME = "torso_link"
+MAX_TORSO_FORCE = 50.0
 
 
 @configclass
@@ -71,7 +74,9 @@ class RobotSceneCfg(InteractiveSceneCfg):
     # links (Isaac Lab reports filtered contacts only one-to-many); history = physics steps per control step
     ball_contact = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
-        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES],
+        filter_prim_paths_expr=[
+            f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES + [TORSO_BODY_NAME]
+        ],
         history_length=4,
     )
     # ball — physics-simulated rigid object thrown toward the robot (same ball as the mjlab task,
@@ -227,6 +232,8 @@ class CommandsCfg:
         resampling_time_range=(1.0e9, 1.0e9),  # single throw per episode; new throw only on env reset
         hand_body_names=HAND_BODY_NAMES,
         contact_sensor_name="ball_contact",
+        torso_body_name=TORSO_BODY_NAME,
+        max_torso_force=MAX_TORSO_FORCE,
         # wait as in front of a real thrower (final range, the curriculum starts at 0.5-1.5 s; the baseline trained on
         # 0.5-1.5 s caught 28 % after 6-9 s), then keep the ball (it walked off with it)
         throw_delay_range=(0.5, 8.0),

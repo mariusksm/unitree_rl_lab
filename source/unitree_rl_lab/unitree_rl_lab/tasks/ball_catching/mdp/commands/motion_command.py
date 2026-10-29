@@ -118,6 +118,14 @@ class MotionCommand(CommandTerm):
             end_hold_s=self.cfg.end_hold_s,
             lift=self.cfg.clip_lift,
         )
+        # latest start frame of a cycle per clip (frames of the extended cycle); later starts are drawn again
+        latest = self.motion.time_step_total - 1
+        if self.cfg.latest_start_s is not None:
+            assert len(self.cfg.latest_start_s) == self.motion.num_clips, "latest_start_s needs one entry per clip"
+            frames = [self.motion.start_hold_frames + int(round(t * self.motion.fps)) if t is not None else 1 << 30
+                      for t in self.cfg.latest_start_s]
+            latest = torch.minimum(latest, torch.tensor(frames, dtype=torch.long, device=self.device))
+        self._latest_start = latest
         control_rate = 1.0 / (env.cfg.decimation * env.cfg.sim.dt)
         if abs(self.motion.fps - control_rate) > 1e-3:
             raise ValueError(
@@ -315,6 +323,12 @@ class MotionCommand(CommandTerm):
             else:
                 waiting = env_ids[torch.rand(len(env_ids), device=self.device) < self.cfg.start_hold_prob]
                 self.time_steps[waiting] = torch.randint(0, lead_in, (len(waiting),), device=self.device)
+        # no start after the clip's latest start (Unified: the launch, a later cycle would get no ball): draw again
+        limit = self._latest_start[self.clip_ids[env_ids]]
+        late = self.time_steps[env_ids] > limit
+        if late.any():
+            redraw = env_ids[late]
+            self.time_steps[redraw] = (torch.rand(len(redraw), device=self.device) * (limit[late] + 1)).long()
         self.cycle_start_steps[env_ids] = self.time_steps[env_ids]
 
         # Metrics (of the clip each resampled env now tracks)
@@ -479,6 +493,10 @@ class MotionCommandCfg(CommandTermCfg):
     off; ``None`` keeps the clip whole."""
     end_hold_s: float = 0.0
     """Seconds the last (or cut) frame is held after the clip (keeping the pose, zero velocities)."""
+    latest_start_s: list[float | None] | None = None
+    """Per clip (order of ``motion_files``): latest time (s) into the clip at which a cycle may start; later starts are
+    drawn again, uniformly before it. ``None`` (or a ``None`` entry): anywhere. Unified: shortly before the launch, so
+    that every cycle gets its ball."""
 
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8

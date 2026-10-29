@@ -49,8 +49,9 @@ class BallCommand(CommandTerm):
     (ball dropped / missed / caught / time out), which read the catch state tracked here:
 
     - ``secured_steps``: consecutive control steps for which the launched ball is inside the catch box in
-      front of the torso, slow relative to the root, above ``secure_min_height`` and in contact with the
-      arms (both arms if ``require_both_arms``). Reaching ``cfg.secure_steps`` confirms the catch
+      front of the torso, slow relative to the root, above ``secure_min_height``, in contact with the
+      arms (both arms if ``require_both_arms``) and, with ``max_torso_force``, not squeezed against the torso.
+      Reaching ``cfg.secure_steps`` confirms the catch
       (``confirmed``, ``confirmed_now`` on that one step).
     - ``catch_complete``: the confirmed catch has lasted ``hold_after_catch_s`` (hold phase: the robot keeps the
       ball and stands still, as after a real catch). With 0 the confirmation itself completes the catch.
@@ -83,6 +84,7 @@ class BallCommand(CommandTerm):
         # ball contact sensor: the ball is the single sensor body, filtered against the arm links
         # (Isaac Lab only reports filtered contacts one-to-many). Columns are split into left/right arm.
         self.contact_sensor: ContactSensor | None = None
+        self._torso_column: int | None = None
         if cfg.contact_sensor_name is not None:
             self.contact_sensor = env.scene.sensors[cfg.contact_sensor_name]
             filter_names = [path.rsplit("/", 1)[-1] for path in self.contact_sensor.cfg.filter_prim_paths_expr]
@@ -94,6 +96,13 @@ class BallCommand(CommandTerm):
                         f"Contact sensor '{cfg.contact_sensor_name}' has no '{side}*' filter body: {filter_names}"
                     )
                 self._contact_columns.append(torch.tensor(columns, dtype=torch.long, device=self.device))
+            if cfg.torso_body_name is not None:
+                if cfg.torso_body_name not in filter_names:
+                    raise ValueError(
+                        f"Contact sensor '{cfg.contact_sensor_name}' has no '{cfg.torso_body_name}' filter body: "
+                        f"{filter_names}"
+                    )
+                self._torso_column = filter_names.index(cfg.torso_body_name)
 
         # per-environment state
         self.time_until_throw = torch.zeros(self.num_envs, device=self.device)
@@ -107,6 +116,8 @@ class BallCommand(CommandTerm):
         """Control steps since the confirmation (0 on the confirming step and before)."""
         self.arm_contact = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
         """Ball touches the [left, right] arm in the current control step."""
+        self.torso_force = torch.zeros(self.num_envs, device=self.device)
+        """Force (N) between the ball and ``cfg.torso_body_name`` in the current control step (0 without it)."""
         self._steps_since_contact = torch.full(
             (self.num_envs, 2), self._NO_CONTACT, dtype=torch.long, device=self.device
         )
@@ -159,6 +170,7 @@ class BallCommand(CommandTerm):
         self.metrics["hand_ball_distance"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_in_catch_zone"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_arm_contact"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["ball_torso_force"] = torch.zeros(self.num_envs, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
@@ -382,6 +394,8 @@ class BallCommand(CommandTerm):
         self._steps_since_contact = torch.where(
             self.arm_contact, torch.zeros_like(self._steps_since_contact), self._steps_since_contact + 1
         )
+        if self._torso_column is not None:
+            self.torso_force = magnitude[:, self._torso_column]
         return self._steps_since_contact <= self.cfg.contact_grace_steps
 
     def _update_catch_state(self, in_flight: torch.Tensor):
@@ -408,6 +422,8 @@ class BallCommand(CommandTerm):
             & (ball_pos[:, 2] > self.cfg.secure_min_height)
             & touching
         )
+        if self.cfg.max_torso_force is not None:
+            secured &= self.torso_force <= self.cfg.max_torso_force  # held, not squeezed against the body
         self.secured_steps = torch.where(secured, self.secured_steps + 1, torch.zeros_like(self.secured_steps))
         # confirmation once per throw; the hold phase runs on even if the secured streak breaks (a drop ends it)
         self.confirmed_now = ~self.confirmed & (self.secured_steps >= self.cfg.secure_steps)
@@ -418,6 +434,7 @@ class BallCommand(CommandTerm):
         self.metrics["hand_ball_distance"] = torch.norm(ball_pos - hands_mid, dim=-1)
         self.metrics["ball_in_catch_zone"] = in_zone.float()
         self.metrics["ball_arm_contact"] = self.arm_contact.float().mean(dim=-1)
+        self.metrics["ball_torso_force"] = self.torso_force
 
     def _update_perception(self):
         """Update the ball estimate the robot gets from the VICON pipeline (see the class docstring)."""
@@ -553,6 +570,14 @@ class BallCommandCfg(CommandTermCfg):
 
     contact_force_threshold: float = 0.1
     """Min normal force (N) between ball and an arm link that counts as contact (ball weight ≈ 1.1 N)."""
+
+    torso_body_name: str | None = None
+    """Filter body of the contact sensor that is the torso; needed for ``max_torso_force``."""
+
+    max_torso_force: float | None = None
+    """A ball pressed against the torso harder than this (N) does not count as held. Resting against the belly is
+    allowed; clamping the ball to the chest (Phase 2 baseline 236 N, Unified runs 196-233 N) is not a catch with the
+    arms. ``None``: no limit."""
 
     contact_grace_steps: int = 5
     """A contact within the last N control steps still counts (rolling or bouncing ball)."""

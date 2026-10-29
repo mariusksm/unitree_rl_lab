@@ -54,6 +54,8 @@ parser.add_argument("--video", action="store_true", default=False, help="Record 
 parser.add_argument("--video_length", type=int, default=1000)
 parser.add_argument("--eye", type=str, default="2.6,-2.6,1.3", help="Camera position relative to the robot root.")
 parser.add_argument("--lookat", type=str, default="0.0,0.0,0.55", help="Camera target relative to the robot root.")
+parser.add_argument("--no_push", action="store_true", default=False,
+                    help="Switch off the training pushes (to tell the policy's own unsteadiness from the recovery).")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -460,7 +462,13 @@ def main():
         entry_point_key="play_env_cfg_entry_point",
     )
     apply_scenario(env_cfg, args_cli.scenario)
+    if args_cli.no_push:
+        env_cfg.events.push_robot = None
     if args_cli.video:
+        # the reference markers of the motion command would hide the robot
+        for term in vars(env_cfg.commands).values():
+            if hasattr(term, "debug_vis"):
+                term.debug_vis = False
         env_cfg.viewer.origin_type = "asset_root"
         env_cfg.viewer.asset_name = "robot"
         env_cfg.viewer.env_index = 0

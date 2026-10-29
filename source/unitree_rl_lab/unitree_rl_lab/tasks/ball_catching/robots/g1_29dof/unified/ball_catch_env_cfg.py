@@ -43,10 +43,6 @@ from unitree_rl_lab.tasks.ball_catching.motion_data import TEMP_CLIP_LIFT, ball_
 # single source of truth for the reference clips (auto-discovered, see motion_data.py)
 from ..phase1.ball_catch_env_cfg import BALL_DATA_DIR, MOTION_FILES
 
-# Unified trains on the clips that come with a VICON recording of their take; clips whose recording cannot be
-# aligned are kept but get no throw (SyncedBallCommand prints how many)
-CATCH_MOTION_FILES = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)] or MOTION_FILES
-
 # Catch time, flight time and catch point per clip from its recording (numpy, a few seconds at import); in the
 # config, so that the motion command can cut the clips after the catch and params/env.yaml records what was used
 # The ball is aimed at the reference hands at the catch moment (wrist midpoint, raised so that the ball lands on the
@@ -54,9 +50,23 @@ CATCH_MOTION_FILES = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)
 # catch the clip's wrists are 0.21 m from the recorded ball (0.13 m below it). Aimed at the recorded point, the robot had
 # to leave the reference to catch and learned to clamp the ball against its upper chest and head (run of 2026-10-28).
 CATCH_ABOVE_HANDS = 0.08
-CATCH_DATA = catch_data(  # TEMP_CLIP_LIFT: temporary height fix, as for the clips
-    CATCH_MOTION_FILES, BALL_DATA_DIR, lift=TEMP_CLIP_LIFT, aim_above_hands=CATCH_ABOVE_HANDS
+_RECORDED = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)]
+_DATA = catch_data(  # TEMP_CLIP_LIFT: temporary height fix, as for the clips
+    _RECORDED, BALL_DATA_DIR, lift=TEMP_CLIP_LIFT, aim_above_hands=CATCH_ABOVE_HANDS
 )
+# Unified trains only on clips with a usable catch: without a ball the reference performs its catching motion into the
+# void, which an actor that sees only the ball cannot follow (58 % of the tracking terminations of the second run).
+# Without any usable recording (fixed mode, e.g. the old overhand clip in phase1/motions/) all clips are used.
+if any(d["valid"] for d in _DATA):
+    CATCH_MOTION_FILES = [f for f, d in zip(_RECORDED, _DATA) if d["valid"]]
+    CATCH_DATA = [d for d in _DATA if d["valid"]]
+else:
+    CATCH_MOTION_FILES = MOTION_FILES
+    CATCH_DATA = catch_data(MOTION_FILES, None)
+# For the same reason no cycle starts after its launch: latest start shortly before it (margin > arrival jitter 0.05 s)
+LAUNCH_MARGIN_S = 0.1
+LATEST_START_S = [max(0.0, d["catch_time"] - d["flight_time"] - LAUNCH_MARGIN_S) if d["valid"] else None
+                  for d in CATCH_DATA]
 
 # Fixed mode only (no usable recordings, e.g. the old single overhand clip in phase1/motions/): catch time (s)
 # into every clip. With recordings, every clip brings its own catch time and catch point.
@@ -85,6 +95,9 @@ ARM_CONTACT_BODY_NAMES = [
     for side in ("left", "right")
     for link in ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
 ]
+# a ball squeezed against the torso harder than this (N) does not count as held (catch with the arms, not a chest clamp)
+TORSO_BODY_NAME = "torso_link"
+MAX_TORSO_FORCE = 50.0
 
 VELOCITY_RANGE = {
     "x": (-0.5, 0.5),
@@ -130,7 +143,9 @@ class RobotSceneCfg(InteractiveSceneCfg):
     # ball-arm contact for catch detection (ball = single sensor body, filtered against the arm links)
     ball_contact = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
-        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES],
+        filter_prim_paths_expr=[
+            f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES + [TORSO_BODY_NAME]
+        ],
         history_length=4,
     )
     # same ball as Phase 2 / the mjlab task (interim report ch. 9.2: ∅15 cm, 112 g)
@@ -181,8 +196,9 @@ class CommandsCfg:
         start_hold_prob=START_HOLD_PROB,
         hold_from_s=HOLD_FROM_S,
         end_hold_s=END_HOLD_S,
-        # a dropped or missed ball counts where its cycle started (before the throw), not after the throw, where
-        # restarted cycles would get no ball: clips where the ball falls get more throws instead of fewer
+        latest_start_s=LATEST_START_S,
+        # a dropped or missed ball counts where its cycle started (before the throw), not where the ball falls (after
+        # the launch, where no cycle may start): clips where the ball falls get more cycles from that start point
         start_bin_failure_terms=["ball_dropped", "ball_missed"],
         body_names=[
             "pelvis",
@@ -207,6 +223,8 @@ class CommandsCfg:
         resampling_time_range=(1.0e9, 1.0e9),  # lifecycle driven by the motion phase
         hand_body_names=HAND_BODY_NAMES,
         contact_sensor_name="ball_contact",
+        torso_body_name=TORSO_BODY_NAME,
+        max_torso_force=MAX_TORSO_FORCE,
         motion_command_name="motion",
         catch_data=CATCH_DATA,
         catch_motion_time=FALLBACK_CATCH_MOTION_TIME,
