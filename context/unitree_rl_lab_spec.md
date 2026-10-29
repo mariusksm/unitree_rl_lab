@@ -50,7 +50,7 @@
 | Unified task (mimic + catching simultaneously, stage A) | ⚠️ Two runs stopped (2026-10-28 at iteration 8000, 2026-10-29 at ≈ 6000 by a crash of workstation 2), catches up to ≈ 30 % of the episodes in training. Fixed since: throws aimed at the reference hands, `feet_flat` (feet now flat), every cycle starts before its throw and only the 84 clips with a usable catch are used (cycles without a ball caused most tracking terminations), a ball squeezed against the torso (> 50 N) does not count as held (both runs clamped it to the chest). Every clip runs as a wait-and-hold cycle (6 s lead-in, catch pose held 5 s), confirmed catches are held for 3 s. |
 | Catch success in simulation | ⚠️ 99.6 % (Phase 2, deterministic policy, final throw distribution), but only within the trained episode structure (short wait, 1 s hold); see Section 10. Since 2026-10-28 Phase 2 and Unified train long waits and a 3 s hold phase (fix 1), no checkpoint yet. |
 | Hands (Dex3 / mount) in the model | ❌ not present (intentional, see proposal) |
-| Sim2Sim (MuJoCo), deployment, live VICON pipeline | ❌ not started for the ball task (`deploy/` is unmodified Unitree upstream; the C++ side has none of the ball observation terms yet) |
+| Sim2Sim (MuJoCo), deployment, live VICON pipeline | ⚠️ Sim2Sim started 2026-10-29 (`sim2sim/`): locked Python environment and the G1 MJCF of `unitree_rl_mjlab` on both workstations, model comparison done (masses, inertia, kinematics, joint limits identical to Isaac; collision shapes differ, and the Isaac model has no collider on the forearms, Section 6). MuJoCo control loop, observations and throws are next. Deployment and live VICON pipeline not started (`deploy/` is unmodified Unitree upstream; the C++ side has none of the ball observation terms yet) |
 
 ## 3. Repository Layout (relevant parts)
 
@@ -95,6 +95,9 @@ pkl_isaac_lab_17_08_26/                7 newer .pkl (as of 17 Aug), gitignored
 data/imitation/{g1,ball}/              Local copy of the group's clips and ball recordings (gitignored, README)
 logs/rsl_rl/<experiment>/<timestamp>/  Checkpoints model_*.pt, params/, tfevents
 deploy/                                C++ deployment (ONNX, unitree_sdk2), upstream, untouched for the ball task
+sim2sim/                               MuJoCo sim2sim (README): setup.sh (locked venv ~/envs/sim2sim, G1 MJCF of
+                                       unitree_rl_mjlab in ~/unitree_mjcf), tools/ (environment check, Isaac model
+                                       dump, model comparison)
 context/                               Project background + this spec (see Section 12)
 ```
 
@@ -236,13 +239,13 @@ data/imitation/g1/*.npz   (all clips are used; search order and the group datase
 
 | Parameter | Value |
 |---|---|
-| Robot | `UNITREE_G1_29DOF_MIMIC_CFG` (29 DoF, no hands) |
+| Robot | `UNITREE_G1_29DOF_MIMIC_CFG` (29 DoF, no hands). Collision shapes of its USD (`unitree_model`, checked 2026-10-29 with `sim2sim/tools/dump_isaac_model.py`): convex hulls for pelvis, hip pitch and yaw, torso, head, upper arm (shoulder yaw), wrist roll piece and wrist yaw with the rubber hand; cylinders on knees and shoulder pitch; each foot 4 corner spheres (r 5 mm) plus a toe sphere and a box 1 cm higher. **No collider** on `elbow_link` and `wrist_pitch_link` (the forearm), hip roll, shoulder roll, ankle pitch and the waist links (pitfall 26) |
 | Physics / control | `sim.dt = 0.005`, `decimation = 4`, i.e. **50 Hz policy** |
 | Envs | 4096, spacing 2.5 m, flat plane |
 | Actions | Term `JointPositionAction` = `ClampedJointPositionActionCfg` (since 2026-10-28), all joints, `scale = UNITREE_G1_29DOF_MIMIC_ACTION_SCALE` (per joint 0.25·effort/stiffness), `use_default_offset=True`. The joint targets are clamped to the asset's **hard** joint limits (not the soft ones, which would forbid straight knees) through the `clip` of Isaac Lab's `JointAction`; `export_deploy_cfg` writes the limits into `deploy.yaml` (`actions.JointPositionAction.clip`) and the C++ `JointAction` clamps the same way. Penalty `joint_target_excess` −1 in all tasks (sum over the joints of how far the unclamped target lies beyond the limit, rad). |
 | Ball | `RigidObject` sphere **r = 0.075 m (∅15 cm), 0.112 kg** (= mjlab ball, interim report ch. 9.2), friction 0.5, restitution 0.4 (placeholder, real ball not measured). Startup DR: friction 0.3–0.8, restitution 0.2–0.6, mass ±0.015 kg. Quadratic air drag F = −½ρ c_d A \|v\| v as external force during the flight, c_d 0.3–0.45 per throw (k/m 0.028–0.043 1/m, fitted on the VICON throws: 0.030–0.040) (Phase 2 and Unified only) |
 | "Hands" | `HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]` (the rubber hand collider is merged into these bodies). Midpoint = reach target of the ball rewards |
-| Contact sensors | `contact_forces`: `Robot/.*` (whole body, required by `undesired_contacts`). `ball_contact` (Phase 2, Unified): sensor body = ball, filtered against the 8 arm links `{left,right}_{elbow,wrist_roll,wrist_pitch,wrist_yaw}_link`, history 4 |
+| Contact sensors | `contact_forces`: `Robot/.*` (whole body, required by `undesired_contacts`). `ball_contact` (Phase 2, Unified): sensor body = ball, filtered against the 8 arm links `{left,right}_{elbow,wrist_roll,wrist_pitch,wrist_yaw}_link`, history 4. Elbow and wrist pitch link have no collider and never report contact: the ball touches an arm only at the wrist roll piece or the hand |
 | Observation history | 5 frames (policy and critic) |
 | PPO | Actor/critic `[512,256,128]` ELU, lr 1e-3 adaptive, γ 0.99, λ 0.95, 24 steps/env/iteration, max 30k iterations, save every 500, `empirical_normalization=False` |
 
@@ -475,6 +478,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 23. In Unified a failure must be counted where a restarted cycle can practise it again. The adaptive sampler restarts cycles in the bin of a failure, but cycles start only before the launch (pitfall 25): dropped and missed balls therefore belong to the bin where their cycle started (`MotionCommandCfg.start_bin_failure_terms`). New ball terminations must be added to that list.
 24. The clips of the current dataset sit 4.5 cm too low and are lifted when loaded (`motion_data.TEMP_CLIP_LIFT`, Section 5.2). The lift belongs to this dataset only: remove it together with a re-exported dataset (grep `TEMP_CLIP_LIFT`), and lift anything else that lives in the clip frame (like the recorded catch points) by the same amount as long as it exists.
 25. The Unified actor sees no reference, only the ball. Every reference motion it has to track must therefore be predictable from the ball: a cycle in which the reference catches without a ball (a start after the launch, a clip without a usable catch) cannot be tracked, ends by tracking terminations and, through the adaptive sampling, gets started more often.
+26. The G1 USD of `unitree_model` has no collision shapes on `elbow_link` and `wrist_pitch_link`, so in Isaac the ball passes through the forearms (the static probe of 2026-10-16, in which a ∅10 cm ball fell through the forearm cradle, and 0 % elbow and wrist pitch contacts in every evaluation are this). The real robot and both MJCFs of `unitree_rl_mjlab` have solid forearms. Policies trained on this model have never felt a ball on the forearm; keep it in mind for Sim2Sim and the real robot, and re-check with `sim2sim/tools/dump_isaac_model.py` when the asset changes.
 
 ## 10. Training History & Artifacts
 
@@ -568,11 +572,15 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
 7. End effector: the rubber hands (collider merged into `*_wrist_yaw_link`, 0.17 kg) stay for now. Decide what is
    mounted on the real robot (Inspire FTP hand ≈ 0.88 kg per hand per the `unitree_ros` URDF, or the 3D-printed
    mount from the proposal) and model its mass and collision geometry.
+   - Forearm colliders: the USD has none on `elbow_link` and `wrist_pitch_link` (pitfall 26), the real forearms are solid. Decide whether to add capsules in Isaac (as in the mjlab model: r 3.5 cm), which changes what the policies can learn about holding the ball.
 8. Sim2real hardening:
    - actuator delay as DR
    - states the real robot sees: standing after a miss (long waits and holding after the catch are trained since 2026-10-28)
    - no-walking constraint (foot displacement) and a fall penalty
-9. Sim2Sim in MuJoCo (scene with a ball and a fake VICON publisher), ONNX export, deploy config and C++ ball
+9. Sim2Sim in MuJoCo (`sim2sim/`, since 2026-10-29):
+   - Done: environment on both workstations (identical simulation results), G1 MJCF, comparison with the Isaac model.
+   - Next: MuJoCo model with exactly the Isaac collision shapes (from the dump: MJCF meshes match the USD meshes in the body frame; primitives and their poses from the dump) plus a variant with solid forearms as on the real robot; PD loop at 200 Hz with the policy at 50 Hz (gains from `deploy.yaml`, armature and effort limits from the dump); actor observations ported to numpy with a consistency test against Isaac (same states, same observations); throws recorded in Isaac and replayed in MuJoCo; metrics and video.
+   - Then: ONNX export, deploy config and C++ ball
    observation terms (`ball_state`, `ball_visible`, `ball_intercept`). The joint-target clamp is already covered: `deploy.yaml` carries the joint limits as `clip`, which the C++ `JointAction` applies (check it on the real robot). Build the live VICON pipeline so that it
    produces what the perception model assumes:
    - robot base tracking; ball relative to the root in the yaw frame (**identical** math to `observations.py`)
@@ -905,3 +913,10 @@ In case of conflicts: **code > this spec > other context documents.**
 - Second run documented in Section 10 (results and videos outside the repo in `analysis/2026-10-29_unified2_6000/`); third run from scratch.
 - Files: `BC/mdp/commands/{motion_command,ball_command}.py`, `BC/robots/g1_29dof/{phase2,unified}/ball_catch_env_cfg.py`, `scripts/rsl_rl/eval_catch.py`.
 - Spec sections 2, 7.2, 7.3, 8, 9 (pitfalls 23 and 25), 10 and 11 updated.
+
+### 2026-10-29: Sim2Sim environment and model comparison
+- Why: prepare Sim2Sim in MuJoCo while the third Unified run trains. The workstations already have MuJoCo (shared conda env `gmr`, the mjlab group's packages in the shared uv cache), so nothing large is installed again, and both workstations have to give the same results.
+- `sim2sim/`: `requirements.in` and the locked `requirements.txt` (Python 3.10 = system Python; MuJoCo 3.10.0 as in `gmr`, onnxruntime 1.22.0 as in the C++ deploy, numpy, PyYAML, imageio-ffmpeg), `setup.sh` (venv `~/envs/sim2sim` from the shared uv cache, G1 MJCF and meshes of `unitree_rl_mjlab` at commit `1425b15` in `~/unitree_mjcf/g1`, environment check), `tools/check_env.py`, `tools/dump_isaac_model.py`, `tools/compare_models.py`, `tools/shapes.py`, README. `gmr` itself is not used: it differs between the workstations already and belongs to the retargeting work. `unitree_rl_mjlab` as a whole is not used either: it pins mjlab 1.2.0 (the cache has 1.3–1.6), would be a second training stack, and has nothing of the ball task.
+- Set up on both workstations: the 1-s passive simulation gives the same state hash on W1 (Intel) and W2 (AMD); headless rendering (EGL) works on W2 (not tried on W1, whose GPU was in use by another user). On W2 uv copies the packages that other users put into the shared cache instead of hardlinking them (Linux forbids hardlinks to other users' files), ≈ 240 MB.
+- Model comparison (Isaac `UNITREE_G1_29DOF_MIMIC_CFG` vs `g1.xml` and `scene_g1.xml` of `unitree_rl_mjlab`): masses (33.341 kg in total), centres of mass, inertia, forward kinematics at the zero and the default pose, joint ranges and effort limits identical. Armature only in Isaac (MJCFs: none or 0.01), passive damping 0.05 and friction loss 0.2 Nm only in `scene_g1.xml`. Collision shapes: `scene_g1.xml` uses the same meshes as the USD (identical bounding boxes, also the rubber hand mesh) but adds colliders where the USD has none and keeps the rubber hand visual only; `g1.xml` replaces everything with capsules. The USD has no collider on the forearm (`elbow_link`, `wrist_pitch_link`), hip roll, shoulder roll and ankle pitch (pitfall 26).
+- Spec sections 2, 3, 6, 9 (pitfall 26) and 11 (items 7 and 9) updated.
