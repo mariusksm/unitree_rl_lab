@@ -18,7 +18,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
-from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # forearm colliders: FOREARM_COLLIDERS
+from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # FOREARM_COLLIDERS, CONCAVE_PALMS
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 FEET_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
@@ -33,6 +33,9 @@ ARM_CONTACT_BODY_NAMES = [
 # a ball squeezed against the torso harder than this (N) does not count as held (catch with the arms, not a chest clamp)
 TORSO_BODY_NAME = "torso_link"
 MAX_TORSO_FORCE = 50.0
+# held only in both palms from below (BallCommandCfg.palm_hold, since 2026-10-29): forearm, wrist or a squeeze between
+# them do not count (the third Unified run wedged the ball low between forearms, hands and belly)
+PALM_HOLD = True
 # aim point of the final throw distribution (root heading frame; height above the ground). A real thrower misses, so
 # since 2026-10-29 throws are aimed up to 0.3 m to the side (was 0.1 m; with the launch velocity noise 12 % then
 # arrive more than 0.3 m off the centre), a bit shorter or longer and up to chest height: what the arms can reach
@@ -241,6 +244,7 @@ class CommandsCfg:
         contact_sensor_name="ball_contact",
         torso_body_name=TORSO_BODY_NAME,
         max_torso_force=MAX_TORSO_FORCE,
+        palm_hold=PALM_HOLD,
         # wait as in front of a real thrower (final range, the curriculum starts at 0.5-1.5 s; the baseline trained on
         # 0.5-1.5 s caught 28 % after 6-9 s), then keep the ball (it walked off with it)
         throw_delay_range=(0.5, 8.0),

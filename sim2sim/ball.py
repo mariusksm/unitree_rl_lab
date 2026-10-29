@@ -177,6 +177,19 @@ class Throw:
 # ── catch check (port of BallCommand._update_catch_state and the ball terminations) ────────────────────────────────
 
 
+def palm_geometry(ball_pos, hand_pos, hand_rot, cfg: dict) -> tuple[np.ndarray, float]:
+    """Per hand whether the ball centre lies on its palm side, and its height above the mean palm height
+    (``BallCommand._palm_geometry``; palm points and normals of ``cfg`` in the hand body frames)."""
+    points, normals = np.asarray(cfg["palm_points"], dtype=float), np.asarray(cfg["palm_normals"], dtype=float)
+    palm = np.asarray(hand_pos) + np.einsum("hij,hj->hi", hand_rot, points)
+    normal = np.einsum("hij,hj->hi", hand_rot, normals)
+    to_ball = np.asarray(ball_pos) - palm
+    distance = np.linalg.norm(to_ball, axis=1)
+    alignment = np.sum(normal * to_ball, axis=1) / np.maximum(distance, 1e-6)
+    on_palm = (alignment >= cfg["min_palm_alignment"]) & (distance <= cfg["max_palm_distance"])
+    return on_palm, float(ball_pos[2] - palm[:, 2].mean())
+
+
 class CatchState:
     """Secured steps, confirmation and hold phase of one throw, as ``BallCommand`` tracks them."""
 
@@ -196,14 +209,27 @@ class CatchState:
         held = self.steps_since_confirm * self.step_dt >= self.cfg["hold_after_catch_s"] - 1e-6
         return self.confirmed and held
 
-    def update(self, in_flight: bool, ball_pos, ball_vel, root_pos, root_quat, root_lin_vel, arm_force, torso_force):
+    def update(
+        self, in_flight: bool, ball_pos, ball_vel, root_pos, root_quat, root_lin_vel, arm_force, torso_force,
+        hand_force=None, hand_pos=None, hand_rot=None,
+    ):
+        """``arm_force``: strongest ball force per arm (any arm link); ``hand_force``, ``hand_pos``, ``hand_rot``:
+        ball force, position and rotation matrix of the [left, right] hand body, needed with ``palm_hold``."""
         cfg = self.cfg
         ball_b = to_yaw_frame(np.asarray(ball_pos) - root_pos, yaw_of(root_quat))
         self.in_zone = bool(np.all((ball_b >= self.zone_lo) & (ball_b <= self.zone_hi)))
-        contact = np.asarray(arm_force) > cfg["contact_force_threshold"]
+        palm_hold = bool(cfg.get("palm_hold", False))  # runs before 2026-10-29 have no such key
+        if palm_hold:
+            on_palm, above_palms = palm_geometry(ball_pos, hand_pos, hand_rot, cfg)
+            contact = (np.asarray(hand_force) > cfg["contact_force_threshold"]) & on_palm
+        else:
+            contact = np.asarray(arm_force) > cfg["contact_force_threshold"]
         self.steps_since_contact = np.where(contact, 0, self.steps_since_contact + 1)
         recent = self.steps_since_contact <= cfg["contact_grace_steps"]
-        touching = recent.all() if cfg["require_both_arms"] else recent.any()
+        if palm_hold:
+            touching = bool(recent.all()) and above_palms >= cfg["min_ball_above_palms"]
+        else:
+            touching = recent.all() if cfg["require_both_arms"] else recent.any()
         secured = (
             in_flight
             and self.in_zone

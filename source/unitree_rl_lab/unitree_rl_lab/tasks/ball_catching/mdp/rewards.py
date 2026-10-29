@@ -147,7 +147,8 @@ def ball_interception_exp(
 
 
 def ball_arm_contact(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
-    """Fraction of arms (left, right) the launched ball touches in this step (interim report, eq. 9.2)."""
+    """Fraction of arms (left, right) the launched ball touches in this step (interim report, eq. 9.2); with the
+    command's ``palm_hold`` only palm contacts count."""
     command = env.command_manager.get_term(command_name)
     return command.arm_contact.float().mean(dim=-1) * command.launched.float()
 

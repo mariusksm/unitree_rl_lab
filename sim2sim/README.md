@@ -57,14 +57,14 @@ python sim2sim/tools/dump_isaac_model.py --headless --device cpu --out isaac_g1.
 
 ## MuJoCo model with the Isaac collision shapes
 
-`model.py` builds the G1 from `g1.xml` and replaces its collision capsules with the shapes of the Isaac asset, read from the dump: the same meshes (they match the USD meshes in the body frame) as convex hulls of at most 64 vertices like PhysX, and the same primitives at the same poses. A dump made with `--forearm_colliders` gives the variant with solid forearms (`tasks/ball_catching/robot_assets.py`, spec pitfall 26).
+`model.py` builds the G1 from `g1.xml` and replaces its collision capsules with the shapes of the Isaac asset, read from the dump: the same meshes (they match the USD meshes in the body frame) as convex hulls of at most 64 vertices like PhysX, and the same primitives at the same poses. A dump made with `--ball_asset` gives the robot of the ball tasks (`tasks/ball_catching/robot_assets.py`): solid forearms (spec pitfall 26) and the rubber hands split into convex parts, which `model.py` cuts from the MJCF's rubber hand mesh with the same rule (`rubber_hand.part_masks`).
 
 - `tools/check_self_collision.py`: overlaps between the robot's own collision shapes over all frames of the reference clips (kinematic, no simulation), e.g. `--focus elbow,wrist_pitch` for the forearm colliders.
 - `tools/probe_arm_contacts.py` (Isaac) and `tools/analyze_arm_contacts.py` (sim2sim environment): the ball of the tasks dropped onto forearm, wrist and hand at 0.6–6.5 m/s, and how deep it gets into the real arm surface (the visual meshes).
 
 ```bash
-python sim2sim/tools/dump_isaac_model.py --headless --device cpu --forearm_colliders --out isaac_g1_forearm.json
+python sim2sim/tools/dump_isaac_model.py --headless --device cpu --ball_asset --out isaac_g1_ball.json
 ~/envs/sim2sim/bin/python sim2sim/tools/check_self_collision.py isaac_g1_forearm.json ~/unitree_mjcf/g1 ~/imitation-data/isaaclab/g1 --stride 2
-python sim2sim/tools/probe_arm_contacts.py --headless --forearm_colliders --out probe.npz
+python sim2sim/tools/probe_arm_contacts.py --headless --ball_asset --out probe.npz
 ~/envs/sim2sim/bin/python sim2sim/tools/analyze_arm_contacts.py probe.npz ~/unitree_mjcf/g1
 ```

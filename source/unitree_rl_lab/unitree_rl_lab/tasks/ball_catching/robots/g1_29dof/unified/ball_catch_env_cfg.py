@@ -36,7 +36,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
-from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # forearm colliders: FOREARM_COLLIDERS
+from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # FOREARM_COLLIDERS, CONCAVE_PALMS
 
 from unitree_rl_lab.tasks.ball_catching.motion_data import TEMP_CLIP_LIFT, ball_file_for, catch_data
 
@@ -98,6 +98,9 @@ ARM_CONTACT_BODY_NAMES = [
 # a ball squeezed against the torso harder than this (N) does not count as held (catch with the arms, not a chest clamp)
 TORSO_BODY_NAME = "torso_link"
 MAX_TORSO_FORCE = 50.0
+# held only in both palms from below (BallCommandCfg.palm_hold, since 2026-10-29): forearm, wrist or a squeeze between
+# them do not count (the third Unified run wedged the ball low between forearms, hands and belly)
+PALM_HOLD = True
 
 VELOCITY_RANGE = {
     "x": (-0.5, 0.5),
@@ -225,6 +228,7 @@ class CommandsCfg:
         contact_sensor_name="ball_contact",
         torso_body_name=TORSO_BODY_NAME,
         max_torso_force=MAX_TORSO_FORCE,
+        palm_hold=PALM_HOLD,
         motion_command_name="motion",
         catch_data=CATCH_DATA,
         catch_motion_time=FALLBACK_CATCH_MOTION_TIME,

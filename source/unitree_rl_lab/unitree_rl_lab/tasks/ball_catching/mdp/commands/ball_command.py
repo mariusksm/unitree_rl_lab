@@ -12,6 +12,8 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, sample_uniform, yaw_quat
 
+from unitree_rl_lab.tasks.ball_catching import rubber_hand
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -50,8 +52,8 @@ class BallCommand(CommandTerm):
 
     - ``secured_steps``: consecutive control steps for which the launched ball is inside the catch box in
       front of the torso, slow relative to the root, above ``secure_min_height``, in contact with the
-      arms (both arms if ``require_both_arms``) and, with ``max_torso_force``, not squeezed against the torso.
-      Reaching ``cfg.secure_steps`` confirms the catch
+      arms (both arms if ``require_both_arms``; with ``palm_hold`` both palms, holding it from below) and, with
+      ``max_torso_force``, not squeezed against the torso. Reaching ``cfg.secure_steps`` confirms the catch
       (``confirmed``, ``confirmed_now`` on that one step).
     - ``catch_complete``: the confirmed catch has lasted ``hold_after_catch_s`` (hold phase: the robot keeps the
       ball and stands still, as after a real catch). With 0 the confirmation itself completes the catch.
@@ -85,6 +87,7 @@ class BallCommand(CommandTerm):
         # (Isaac Lab only reports filtered contacts one-to-many). Columns are split into left/right arm.
         self.contact_sensor: ContactSensor | None = None
         self._torso_column: int | None = None
+        self._hand_columns: torch.Tensor | None = None
         if cfg.contact_sensor_name is not None:
             self.contact_sensor = env.scene.sensors[cfg.contact_sensor_name]
             filter_names = [path.rsplit("/", 1)[-1] for path in self.contact_sensor.cfg.filter_prim_paths_expr]
@@ -103,6 +106,16 @@ class BallCommand(CommandTerm):
                         f"{filter_names}"
                     )
                 self._torso_column = filter_names.index(cfg.torso_body_name)
+            if cfg.palm_hold:
+                missing = [name for name in cfg.hand_body_names if name not in filter_names]
+                if missing:
+                    raise ValueError(f"Contact sensor '{cfg.contact_sensor_name}' has no hand filter body {missing}")
+                self._hand_columns = torch.tensor(
+                    [filter_names.index(name) for name in cfg.hand_body_names], dtype=torch.long, device=self.device
+                )
+        # palm centre and normal of the [left, right] hand in its body frame (palm hold)
+        self._palm_points = torch.tensor(cfg.palm_points, dtype=torch.float, device=self.device)
+        self._palm_normals = torch.tensor(cfg.palm_normals, dtype=torch.float, device=self.device)
 
         # per-environment state
         self.time_until_throw = torch.zeros(self.num_envs, device=self.device)
@@ -115,7 +128,7 @@ class BallCommand(CommandTerm):
         self.steps_since_confirm = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         """Control steps since the confirmation (0 on the confirming step and before)."""
         self.arm_contact = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
-        """Ball touches the [left, right] arm in the current control step."""
+        """Ball touches the [left, right] arm in the current control step (with ``palm_hold``: that hand's palm)."""
         self.torso_force = torch.zeros(self.num_envs, device=self.device)
         """Force (N) between the ball and ``cfg.torso_body_name`` in the current control step (0 without it)."""
         self._steps_since_contact = torch.full(
@@ -379,18 +392,43 @@ class BallCommand(CommandTerm):
         self._update_catch_state(in_flight)
         self._update_perception()
 
-    def _update_arm_contact(self) -> torch.Tensor:
-        """Update ``arm_contact`` and return per arm whether the ball touched it within the grace window."""
+    def _palm_geometry(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per hand whether the ball centre lies on its palm side (``min_palm_alignment``, ``max_palm_distance``),
+        shape (N, 2), and the height (m) of the ball centre above the mean height of the two palm points, shape (N,)."""
+        num = self.num_envs
+        hand_quat = self.robot.data.body_quat_w[:, self.hand_body_ids].reshape(-1, 4)
+        palm_pos = self.robot.data.body_pos_w[:, self.hand_body_ids] + quat_apply(
+            hand_quat, self._palm_points.expand(num, 2, 3).reshape(-1, 3)
+        ).view(num, 2, 3)
+        normal = quat_apply(hand_quat, self._palm_normals.expand(num, 2, 3).reshape(-1, 3)).view(num, 2, 3)
+        ball_pos = self.ball.data.root_pos_w
+        to_ball = ball_pos[:, None, :] - palm_pos
+        distance = torch.norm(to_ball, dim=-1)
+        alignment = torch.sum(normal * to_ball, dim=-1) / distance.clamp(min=1e-6)
+        on_palm = (alignment >= self.cfg.min_palm_alignment) & (distance <= self.cfg.max_palm_distance)
+        return on_palm, ball_pos[:, 2] - palm_pos[..., 2].mean(dim=-1)
+
+    def _update_arm_contact(self, on_palm: torch.Tensor | None = None) -> torch.Tensor:
+        """Update ``arm_contact`` and return per arm whether the ball touched it within the grace window.
+
+        With ``on_palm`` (palm hold, per hand) only the hand bodies count, and only with the ball on their palm side.
+        """
         if self.contact_sensor is None:
             return torch.ones(self.num_envs, 2, dtype=torch.bool, device=self.device)
         data = self.contact_sensor.data
         # (N, T, 1, M, 3) -> strongest contact per filter body over the physics steps of this control step
         forces = data.force_matrix_w_history if data.force_matrix_w_history is not None else data.force_matrix_w.unsqueeze(1)
         magnitude = torch.norm(forces, dim=-1).amax(dim=1)[:, 0]
-        self.arm_contact = torch.stack(
-            [magnitude[:, columns].amax(dim=-1) > self.cfg.contact_force_threshold for columns in self._contact_columns],
-            dim=-1,
-        )
+        if on_palm is not None:
+            self.arm_contact = (magnitude[:, self._hand_columns] > self.cfg.contact_force_threshold) & on_palm
+        else:
+            self.arm_contact = torch.stack(
+                [
+                    magnitude[:, columns].amax(dim=-1) > self.cfg.contact_force_threshold
+                    for columns in self._contact_columns
+                ],
+                dim=-1,
+            )
         self._steps_since_contact = torch.where(
             self.arm_contact, torch.zeros_like(self._steps_since_contact), self._steps_since_contact + 1
         )
@@ -402,7 +440,8 @@ class BallCommand(CommandTerm):
         """Track consecutive steps where the ball counts as held in the arms.
 
         Held := ball in the catch box (root yaw frame), slow relative to the root, above ground and touching
-        the arms — gated by ``in_flight`` so a parked (pre-throw) ball never counts.
+        the arms (with ``palm_hold``: both palms, ball above them) — gated by ``in_flight`` so a parked (pre-throw)
+        ball never counts.
         """
         ball_pos = self.ball.data.root_pos_w
         ball_vel = self.ball.data.root_lin_vel_w
@@ -412,8 +451,13 @@ class BallCommand(CommandTerm):
         in_zone = torch.all((ball_b >= self._catch_zone_lo) & (ball_b <= self._catch_zone_hi), dim=-1)
         self._in_zone = in_zone
         rel_speed = torch.norm(ball_vel - self.robot.data.root_lin_vel_w, dim=-1)
-        recent_contact = self._update_arm_contact()
-        touching = recent_contact.all(dim=-1) if self.cfg.require_both_arms else recent_contact.any(dim=-1)
+        if self.cfg.palm_hold:
+            on_palm, above_palms = self._palm_geometry()
+            recent_contact = self._update_arm_contact(on_palm)
+            touching = recent_contact.all(dim=-1) & (above_palms >= self.cfg.min_ball_above_palms)
+        else:
+            recent_contact = self._update_arm_contact()
+            touching = recent_contact.all(dim=-1) if self.cfg.require_both_arms else recent_contact.any(dim=-1)
 
         secured = (
             in_flight
@@ -567,6 +611,31 @@ class BallCommandCfg(CommandTermCfg):
 
     require_both_arms: bool = True
     """Two-arm catch: the ball must touch the left AND the right arm."""
+
+    palm_hold: bool = False
+    """The ball counts as held only in both palms, from below (as in Phillip's g1-catch): each hand of
+    ``hand_body_names`` ([left, right], bodies of the contact sensor) touches it with the ball centre on its palm side
+    (``min_palm_alignment``) within ``max_palm_distance`` of its palm point, and the ball centre is at least
+    ``min_ball_above_palms`` above the mean height of the palm points. Contacts of the other arm links (forearm, wrist)
+    count for nothing, also in ``arm_contact`` (reward ``ball_arm_contact``); ``require_both_arms`` is implied.
+    False: any contact of the sensor's arm links counts."""
+
+    palm_points: tuple = rubber_hand.PALM_POINTS
+    """Palm centre (m) of the [left, right] hand in its body frame (rubber hand of the G1)."""
+
+    palm_normals: tuple = rubber_hand.PALM_NORMALS
+    """Normal out of the [left, right] palm in its body frame."""
+
+    min_palm_alignment: float = 0.5
+    """Min cosine between the palm normal and the direction from the palm point to the ball centre (0.5: 60°). At the
+    recorded catches of the clips the worse hand reaches 0.78 (median)."""
+
+    max_palm_distance: float = 0.18
+    """Max distance (m) from each palm point to the ball centre (ball radius 0.075)."""
+
+    min_ball_above_palms: float = 0.02
+    """Min height (m) of the ball centre above the mean height of the two palm points. At the recorded catches of the
+    clips the catch point is 0.049 m above them (median); 79 % of the clips meet this and ``min_palm_alignment``."""
 
     contact_force_threshold: float = 0.1
     """Min normal force (N) between ball and an arm link that counts as contact (ball weight ≈ 1.1 N)."""

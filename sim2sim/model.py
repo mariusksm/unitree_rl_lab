@@ -3,7 +3,9 @@
 Bodies, joints and inertia come from ``g1.xml`` of unitree_rl_mjlab (identical to the Isaac asset, see
 ``tools/compare_models.py``). Its collision capsules are replaced by the shapes of the Isaac asset, read from the JSON
 of ``tools/dump_isaac_model.py``: the same meshes (the MJCF meshes match the USD meshes in the body frame) and the
-same primitives at the same poses. A dump with ``--forearm_colliders`` gives the model with solid forearms.
+same primitives at the same poses. A dump with ``--ball_asset`` gives the asset of the ball tasks (solid forearms,
+rubber hands split into convex parts; ``tasks/ball_catching/robot_assets.py``): the parts are cut from the MJCF's
+rubber hand mesh with the same rule (``rubber_hand.part_masks``).
 
 PhysX cooks every mesh collider into a convex hull of at most 64 vertices (default of ``PhysxConvexHullCollisionAPI``,
 which the USD does not set); ``hull_vertex_limit`` does the same in MuJoCo.
@@ -13,9 +15,20 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import mujoco
 import numpy as np
+
+# numpy-only module of the task package, shared with the Isaac asset
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "source/unitree_rl_lab/unitree_rl_lab/tasks/ball_catching",
+    ),
+)
+import rubber_hand  # noqa: E402  # isort: skip
 
 G = mujoco.mjtGeom
 # rotation that turns MuJoCo's cylinder axis (local z) onto the USD axis token
@@ -68,6 +81,8 @@ def isaac_collision_spec(
             geom = body.add_geom(name=f"{body_name}_col{i}", pos=pos, quat=quat, contype=1, conaffinity=1, group=3)
             if kind == "Mesh":
                 stem = shape["path"].rsplit("/", 2)[-2]  # .../<mesh stem>/mesh
+                if stem not in mesh_by_stem:  # a convex part of a split rubber hand
+                    mesh_by_stem[stem] = _add_hand_part(spec, mjcf_dir, stem, shape["to_body"], hull_vertex_limit)
                 geom.type, geom.meshname = G.mjGEOM_MESH, mesh_by_stem[stem]
             elif kind == "Sphere":
                 geom.type, geom.size = G.mjGEOM_SPHERE, [shape["radius"] * scale.max(), 0, 0]
@@ -83,6 +98,35 @@ def isaac_collision_spec(
     if floor:
         spec.worldbody.add_geom(name="floor", type=G.mjGEOM_PLANE, size=[0, 0, 0.05])
     return spec
+
+
+def rubber_hand_vertices(mjcf_dir: str, side: str) -> np.ndarray:
+    """Vertices of the ``<side>_rubber_hand`` mesh in the ``<side>_wrist_yaw_link`` frame (compiled ``g1.xml``)."""
+    m = mujoco.MjModel.from_xml_path(os.path.join(mjcf_dir, "g1.xml"))
+    body = m.body(f"{side}_wrist_yaw_link").id
+    for g in range(m.ngeom):
+        if m.geom_bodyid[g] == body and m.geom_type[g] == G.mjGEOM_MESH:
+            mesh = m.geom_dataid[g]
+            if m.mesh(mesh).name != f"{side}_rubber_hand":
+                continue
+            start = m.mesh_vertadr[mesh]
+            rot = np.zeros(9)
+            mujoco.mju_quat2Mat(rot, m.geom_quat[g])
+            return m.mesh_vert[start : start + m.mesh_vertnum[mesh]] @ rot.reshape(3, 3).T + m.geom_pos[g]
+    raise ValueError(f"No {side}_rubber_hand mesh on {side}_wrist_yaw_link in g1.xml")
+
+
+def _add_hand_part(spec: mujoco.MjSpec, mjcf_dir: str, stem: str, to_body, hull_vertex_limit: int | None) -> str:
+    """Mesh of one convex part ``<side>_rubber_hand_<part>``, in the frame of its Isaac prim (``to_body``)."""
+    side, part = stem.split("_rubber_hand_")
+    in_body = rubber_hand_vertices(mjcf_dir, side)
+    selected = in_body[rubber_hand.part_masks(in_body)[part]]
+    m = np.asarray(to_body, dtype=float)  # p_body = p_local @ M[:3, :3] + M[3, :3]
+    local = (selected - m[3, :3]) @ np.linalg.inv(m[:3, :3])
+    mesh = spec.add_mesh(name=stem, uservert=local.flatten())
+    if hull_vertex_limit is not None:
+        mesh.maxhullvert = hull_vertex_limit
+    return stem
 
 
 def collision_geoms(m: mujoco.MjModel) -> list[int]:

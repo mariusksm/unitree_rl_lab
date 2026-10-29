@@ -24,7 +24,9 @@ class BasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        # 0.005 until 2026-10-29: it drove the action std to 0.8, where the third Unified run collapsed twice
+        # (catches 56 % -> 0 % around iterations 8000 and 9000) and recovered at std 0.64 after each collapse
+        entropy_coef=0.002,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,

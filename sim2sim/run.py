@@ -5,9 +5,10 @@ plays N episodes the way Phase 2 does in Isaac (step 4): reset to the start pose
 heading frame (``ball.Throw``: release point, aim point, apex, drag; parameters of ``commands.ball_throw`` in the run's
 ``params/env.yaml``); the ball parked at the release point until the wait is over, then launched with the
 drag-compensated velocity, air drag as an external force every control step; the actor sees the ball through the
-VICON model (``ball.Perception``); the catch is checked as in Isaac (``ball.CatchState``: both arms, catch box, slow,
-torso force at most 50 N, 1 s secured, then the hold phase); an episode ends as with the Phase 2 terminations (catch
-completed, ball below 10 cm, ball 6 m away, pelvis below 0.2 m or tilted more than 0.8 rad, 20 s).
+VICON model (``ball.Perception``); the catch is checked as in Isaac (``ball.CatchState``: both arms or, with
+``palm_hold``, both palms from below, catch box, slow, torso force at most 50 N, 1 s secured, then the hold phase); an
+episode ends as with the Phase 2 terminations (catch completed, ball below 10 cm, ball 6 m away, pelvis below 0.2 m or
+tilted more than 0.8 rad, 20 s).
 
 - Robot: ``model.py`` (``g1.xml`` with the collision shapes of the Isaac asset from the dump), the armature of the
   Isaac asset per joint, no passive damping or friction, position actuators with the Isaac drive gains and effort
@@ -188,6 +189,7 @@ class Sim:
         self.feet = [bid(f"{s}_ankle_roll_link") for s in ("left", "right")]
         self.torso = bid("torso_link")
         self.arm_side = {bid(f"{s}_{link}"): i for i, s in enumerate(("left", "right")) for link in ARM_LINKS}
+        self.hands = [bid(f"{s}_wrist_yaw_link") for s in ("left", "right")]  # rubber hands (palm hold)
         part_of = lambda names: np.array([i for i, j in enumerate(joints) if any(k in j for k in names)])  # noqa: E731
         self.arm_joints, self.leg_joints = part_of(("shoulder", "elbow", "wrist")), part_of(("hip", "knee", "ankle"))
         self.robot_geoms = [g for g in range(m.ngeom) if 0 < m.geom_bodyid[g] != self.ball_body and m.geom_contype[g]]
@@ -256,8 +258,9 @@ class Sim:
             parts.append(np.concatenate(buf))  # oldest first, per term
         return np.concatenate(parts)
 
-    def ball_contacts(self) -> tuple[np.ndarray, float]:
-        """Force (N) between the ball and each arm (strongest link) and the torso, as the ball_contact sensor."""
+    def ball_contacts(self) -> tuple[np.ndarray, np.ndarray, float]:
+        """Force (N) between the ball and each arm (strongest link), each hand and the torso, as the ball_contact
+        sensor."""
         m, d = self.m, self.d
         per_body: dict[int, np.ndarray] = {}
         pairs = np.stack([d.contact.geom1, d.contact.geom2], axis=1)[: d.ncon]
@@ -267,14 +270,20 @@ class Sim:
                 f = np.zeros(6)
                 mujoco.mj_contactForce(m, d, i, f)
                 per_body[body] = per_body.get(body, 0.0) + d.contact.frame[i].reshape(3, 3).T @ f[:3]
-        arm, torso_force = np.zeros(2), 0.0
+        arm, hand, torso_force = np.zeros(2), np.zeros(2), 0.0
         for body, force in per_body.items():
             if body == self.torso:
                 torso_force = float(np.linalg.norm(force))
             else:
                 side = self.arm_side[body]
                 arm[side] = max(arm[side], float(np.linalg.norm(force)))
-        return arm, torso_force
+                if body == self.hands[side]:
+                    hand[side] = float(np.linalg.norm(force))
+        return arm, hand, torso_force
+
+    def hand_poses(self) -> tuple[np.ndarray, np.ndarray]:
+        """Position (2, 3) and rotation matrix (2, 3, 3) of the [left, right] hand body."""
+        return self.d.xpos[self.hands].copy(), self.d.xmat[self.hands].reshape(2, 3, 3).copy()
 
     def feet_on_floor(self) -> np.ndarray:
         pairs = np.stack([self.d.contact.geom1, self.d.contact.geom2], axis=1)[: self.d.ncon]
@@ -287,15 +296,16 @@ class Sim:
         target = self.default + self.scale * action
         clamped = int(np.sum((target < self.lower) | (target > self.upper)))
         self.d.ctrl[self.acts] = np.clip(target, self.lower, self.upper)
-        arm_force, torso_force = np.zeros(2), 0.0
+        arm_force, hand_force, torso_force = np.zeros(2), np.zeros(2), 0.0
         for _ in range(DECIMATION):
             mujoco.mj_step(self.m, self.d)
-            arm, tf = self.ball_contacts()
-            arm_force, torso_force = np.maximum(arm_force, arm), max(torso_force, tf)
+            arm, hand, tf = self.ball_contacts()
+            arm_force, hand_force = np.maximum(arm_force, arm), np.maximum(hand_force, hand)
+            torso_force = max(torso_force, tf)
         saturated = int(np.sum(np.abs(self.d.actuator_force[self.acts]) >= 0.99 * self.effort))
         change = float(np.abs(action - self.last_action).mean())
         self.last_action = action
-        return arm_force, torso_force, clamped, saturated, change
+        return arm_force, hand_force, torso_force, clamped, saturated, change
 
     # ── video ──
     def open_video(self, path: str):
@@ -353,7 +363,7 @@ def stand(sim: Sim):
     motion, fallen_at, clamped, saturated = [], None, 0, 0
     obs = sim.observation(NO_BALL)
     for k in range(steps):
-        _, _, c, s, change = sim.control_step(obs)
+        _, _, _, c, s, change = sim.control_step(obs)
         qd = d.qvel[sim.dofadr]
         motion.append((np.sqrt(np.mean(qd[sim.arm_joints] ** 2)), np.sqrt(np.mean(qd[sim.leg_joints] ** 2)), change,
                        np.linalg.norm(d.qvel[:2])))
@@ -392,7 +402,7 @@ def throws(sim: Sim):
         arrival_miss = None
         recording = sim.writer if episode < args.video_throws else None
         for k in range(int(EPISODE_S / STEP_DT)):
-            arm_force, torso_force, _, _, _ = sim.control_step(obs)
+            arm_force, hand_force, torso_force, _, _, _ = sim.control_step(obs)
             if recording is not None:
                 sim.frame(k)
             # terminations: state after the physics steps, catch state of the previous update
@@ -422,7 +432,11 @@ def throws(sim: Sim):
             drag = -throw.drag_coeff * np.linalg.norm(ball_vel) * ball_vel if in_flight else np.zeros(3)
             d.xfrc_applied[sim.ball_body, :3] = drag
             was_confirmed = catch.confirmed
-            catch.update(in_flight, ball_pos, ball_vel, d.qpos[:3], d.qpos[3:7], d.qvel[:3], arm_force, torso_force)
+            hand_pos, hand_rot = sim.hand_poses()
+            catch.update(
+                in_flight, ball_pos, ball_vel, d.qpos[:3], d.qpos[3:7], d.qvel[:3], arm_force, torso_force,
+                hand_force, hand_pos, hand_rot,
+            )
             if catch.confirmed and not was_confirmed:
                 confirm_t = time_since_throw
             if catch.secured_steps > 0:

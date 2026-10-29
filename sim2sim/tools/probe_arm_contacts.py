@@ -7,7 +7,7 @@ dropped onto the forearm (elbow link), the wrist (wrist pitch link) and the hand
 centre and the poses of the arm links are recorded; ``analyze_arm_contacts.py`` measures the distance to the visual
 meshes, i.e. the real surface. Run in the Isaac Lab environment:
 
-    python sim2sim/tools/probe_arm_contacts.py --headless [--forearm_colliders] --out probe.npz
+    python sim2sim/tools/probe_arm_contacts.py --headless [--ball_asset] --out probe.npz
 """
 
 import argparse
@@ -16,7 +16,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--out", type=str, required=True, help="Output .npz file.")
-parser.add_argument("--forearm_colliders", action="store_true", help="Probe the asset with forearm colliders.")
+parser.add_argument("--ball_asset", action="store_true", help="Probe robot_assets.ROBOT_CFG of the ball tasks.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 simulation_app = AppLauncher(args_cli).app
@@ -33,13 +33,13 @@ from isaaclab.utils import configclass  # noqa: E402
 from isaaclab.utils.math import quat_apply  # noqa: E402
 
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG  # noqa: E402
-from unitree_rl_lab.tasks.ball_catching.robot_assets import G1_FOREARM_CFG  # noqa: E402
+from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # noqa: E402
 from unitree_rl_lab.tasks.ball_catching.robots.g1_29dof.phase2.ball_catch_env_cfg import (  # noqa: E402
     RobotSceneCfg as Phase2SceneCfg,
 )
 
 PHASE2 = Phase2SceneCfg(num_envs=1, env_spacing=2.5)
-ROBOT = G1_FOREARM_CFG if args_cli.forearm_colliders else UNITREE_G1_29DOF_MIMIC_CFG
+ROBOT = ROBOT_CFG if args_cli.ball_asset else UNITREE_G1_29DOF_MIMIC_CFG
 ARM_POSE = {  # every joint matched once: upper arms down, forearms forward, slightly apart
     ".*_hip_.*": 0.0,
     ".*_knee_joint": 0.0,
@@ -134,7 +134,7 @@ def main():
         **{k: np.array(v) for k, v in records.items()},
         links=np.array(LINKS),
         radius=PHASE2.ball.spawn.radius,
-        forearm_colliders=args_cli.forearm_colliders,
+        forearm_colliders=bool(getattr(ROBOT.spawn, "forearm_colliders", False)),
     )
     print(f"[probe] {len(records['side'])} drops -> {args_cli.out}", flush=True)
 
