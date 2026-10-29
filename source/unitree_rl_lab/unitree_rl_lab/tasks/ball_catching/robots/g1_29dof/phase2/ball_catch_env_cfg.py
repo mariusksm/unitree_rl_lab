@@ -33,6 +33,13 @@ ARM_CONTACT_BODY_NAMES = [
 # a ball squeezed against the torso harder than this (N) does not count as held (catch with the arms, not a chest clamp)
 TORSO_BODY_NAME = "torso_link"
 MAX_TORSO_FORCE = 50.0
+# aim point of the final throw distribution (root heading frame; height above the ground). A real thrower misses, so
+# since 2026-10-29 throws are aimed up to 0.3 m to the side (was 0.1 m; with the launch velocity noise 12 % then
+# arrive more than 0.3 m off the centre), a bit shorter or longer and up to chest height: what the arms can reach
+# without a step (the baseline caught 99.5 % of throws aimed 0.3 m to the side). Unified aims at the clip instead.
+TARGET_FORWARD_RANGE = (0.25, 0.45)
+TARGET_LATERAL_RANGE = (-0.3, 0.3)
+TARGET_HEIGHT_RANGE = (0.8, 1.15)
 
 
 @configclass
@@ -238,6 +245,9 @@ class CommandsCfg:
         # 0.5-1.5 s caught 28 % after 6-9 s), then keep the ball (it walked off with it)
         throw_delay_range=(0.5, 8.0),
         throw_delay_log_uniform=True,
+        target_forward_range=TARGET_FORWARD_RANGE,
+        target_lateral_range=TARGET_LATERAL_RANGE,
+        target_height_range=TARGET_HEIGHT_RANGE,
         hold_after_catch_s=HOLD_AFTER_CATCH_S,
         debug_vis=False,
     )
@@ -531,6 +541,7 @@ class CurriculumCfg:
             "easy": {  # short lobs from the front straight into the arms, clean perception; mjlab: 2 m / ±15° first
                 "throw_distance_range": (2.0, 2.5),
                 "throw_direction_range": (-math.radians(15.0), math.radians(15.0)),
+                "target_forward_range": (0.3, 0.4),
                 "target_lateral_range": (-0.03, 0.03),
                 "target_height_range": (0.85, 0.95),
                 "apex_height_range": (1.85, 1.95),
@@ -541,11 +552,12 @@ class CurriculumCfg:
                 "hide_in_catch_zone_prob": 0.0,
                 "throw_delay_range": (0.5, 1.5),   # short waits first
             },
-            "final": {  # = CommandsCfg.ball_throw (BallCommandCfg defaults, long waits)
+            "final": {  # = CommandsCfg.ball_throw (BallCommandCfg defaults, wider aim, long waits)
                 "throw_distance_range": (2.0, 5.0),
                 "throw_direction_range": (-math.radians(75.0), math.radians(75.0)),
-                "target_lateral_range": (-0.1, 0.1),
-                "target_height_range": (0.8, 1.05),
+                "target_forward_range": TARGET_FORWARD_RANGE,
+                "target_lateral_range": TARGET_LATERAL_RANGE,
+                "target_height_range": TARGET_HEIGHT_RANGE,
                 "apex_height_range": (1.75, 2.1),
                 "velocity_noise": 0.1,
                 "secure_steps": 50,

@@ -323,7 +323,7 @@ the five proprioception terms above.
      heading, **0.85–1.2 m above the ground**.
   2. After a wait of **0.5–8 s** (`throw_delay_range`, log-uniform: median 2 s, a quarter of the throws after more than
      4 s; the curriculum widens it from 0.5–1.5 s; until 2026-10-27 always 0.5–1.5 s), launch it toward the aim point:
-     - **0.3–0.4 m in front of the root, lateral ±0.1 m, 0.8–1.05 m above the ground** (belly height)
+     - **0.25–0.45 m in front of the root, lateral ±0.3 m, 0.8–1.15 m above the ground** (belly to chest height; since 2026-10-29, before 0.3–0.4 m, ±0.1 m, 0.8–1.05 m). A real thrower misses: with the velocity noise 35 % of the throws now arrive more than 0.2 m and 12 % more than 0.3 m to the side (before 5 % and 0.4 %); 5 % land beyond the catch box's ±0.35 m and need a lean or a step. The dataset's human catches lie within 0.25 m of the body's centre line (90 % within −0.07…+0.12 m) and the catcher's pelvis moved at most 0.10 m before the catch, so the mocap throwers were accurate and never made the catcher step. Unified keeps aiming at the clip (Section 7.3): aimed elsewhere, the robot would have to leave the reference.
      - apex **1.75–2.1 m above the ground**; it fixes the flight time (0.71–1.02 s; recordings 0.69–0.86 s), so farther
        throws are faster. Velocity noise σ 0.1 m/s.
      - the launch velocity compensates the air drag (fixed-point iteration over the drag displacement, 16 trapezoid
@@ -379,10 +379,10 @@ the five proprioception terms above.
 - Terminations: timeout 20 s (longest regular episode ≈ 8 s wait + 1 s flight + 1.5 s to the confirmation + 3 s hold), `base_height` < 0.2, `bad_orientation` 0.8, **`ball_caught` (success = confirmed catch held through the hold phase, a truncation with `time_out=True`)**, `ball_dropped` (z < 0.1), `ball_missed` (horizontal > 6 m, beyond the 5 m release distance). The longer episodes let `push_robot` (every 4–8 s) fire, which it practically never did with ≈ 4 s episodes.
   - `ball_caught` must stay a truncation: PPO then bootstraps the value of the catch state instead of 0. As a plain termination the catch ended the hold rewards (hold, contact, proximity and `alive`, ≈ 0.2 per step, ≈ 20 discounted at γ 0.99) for a bonus of 10 (≈ 14 in total), so the policy learned to hold the ball and break the secured streak just before `secure_steps` (run 2026-10-22, Section 10). The hold phase adds no new incentive to postpone: completion and timeout both bootstrap, and the bonus comes at the confirmation.
 - Curriculum:
-  - Throw distribution from easy to final over steps 50k → 250k. Easy: 2.0–2.5 m, ±15°, lateral ±0.03 m, aim height
+  - Throw distribution from easy to final over steps 50k → 250k. Easy: 2.0–2.5 m, ±15°, aim 0.3–0.4 m in front, lateral ±0.03 m, aim height
     0.85–0.95 m, apex 1.85–1.95 m, no velocity noise, `secure_steps` 25, and clean perception (delay 1 step, no
     dropouts, no occlusion), wait 0.5–1.5 s. Final = the values of `CommandsCfg.ball_throw` (`BallCommandCfg` defaults
-    plus the 0.5–8 s wait), `secure_steps` 50.
+    with the wider aim of 2026-10-29 and the 0.5–8 s wait), `secure_steps` 50.
   - Stand-still terms ramped in over steps 50k → 250k (with the waits): `stand_still_root` 0 → −10, `stand_still_feet`
     0 → −5. Active from the start, they made a 250-iteration pilot (2026-10-28) learn to fall within 7 steps (Section 10).
   - Posture tapers over steps 100k → 400k: `base_height` −10 → −2.5, `flat_orientation` −5 → −1,
@@ -559,6 +559,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
 1. **Fix the Phase 2 baseline, then retrain** (ranking and reasons in `context/analysis/2026-10-27-phase2-final.md`, implementation plan for fixes 1–4 in `context/planning/2026-10-27-fixes-unified-phase2-plan.md`; in `main` since 2026-10-28).
    - Implemented on 2026-10-28, tests pending: perception latency 1–5 steps (fix 3); recordings whose clip arms deviate from the human are no longer used (fix 4, verified: 84 of 108); joint targets clamped to the hard joint limits in all tasks with an excess penalty, Phase 2 additionally with torque and flat-feet terms (fix 2, smoke runs only); long waits and a 3 s hold phase after the confirmed catch in Phase 2 (log-uniform 0.5–8 s wait, stand-still terms, bonus once per throw) and Unified (wait-and-hold cycle), which also lets the pushes fire within episodes (fix 1).
    - Implemented on 2026-10-29 (Phase 2 and Unified): a ball pressed against the torso with more than 50 N is not held (Section 7.2), against the chest clamp of the baseline.
+   - Implemented on 2026-10-29 (Phase 2): throws aimed up to ±0.3 m to the side, 0.25–0.45 m in front and up to 1.15 m high (Section 7.2), against throws that only arrive where the robot stands; the `lateral` scenario of the evaluation now aims ±0.45 m.
    - Still open: lower `entropy_coef`; a ready pose before the throw.
    - 15–20k iterations suffice. Evaluate with the stress-test scenarios, not the training catch rate.
 2. **Measure the real ball:** diameter, mass, restitution (drop test, e = √(h_bounce / h_drop)) and friction. Replace
@@ -947,3 +948,10 @@ In case of conflicts: **code > this spec > other context documents.**
 - `sim2sim/ball.py`: port of the VICON model of `BallCommand._update_perception` (measurement in the root yaw frame with the world velocity rotated, detection delay, ring buffer with per-throw latency, per-throw bias, noise, dropout bursts, occlusion in the catch box, ballistic coasting for `max_coast_steps`) and of the actor terms `ball_state`, `ball_visible` and `ball_intercept`, for one robot; parameters from `commands.ball_throw` of the run's `params/env.yaml`.
 - Check: `tools/record_ball_obs.py` records in Isaac (Phase 2 env, zero actions, final throw distribution without curriculum) the true states and the actor's ball terms with a deterministic VICON model (latency 3 steps, detection delay 70 ms, no noise, bias or dropouts, ball hidden in the catch box on every throw); `tools/check_ball_obs.py` replays the states through the port. 16 robots × 1000 steps: identical in every step (largest difference 3e-6 m, visibility and catch-box test exact); with a wide catch box (`--wide_zone`) also 172 coasted and 353 lost steps, likewise identical. A detection delay that is a multiple of the 20 ms step (60 ms) differed by one step: float32 in Isaac against float64 in numpy; irrelevant with the random delays of the real model.
 - Spec sections 2 and 11 (item 9) updated.
+
+### 2026-10-29: Phase 2 throws aimed wider
+- Why: the final throw distribution aimed ±0.1 m to the side, 0.3–0.4 m in front and 0.8–1.05 m high; with the velocity noise only 0.4 % of the throws arrived more than 0.3 m off the centre, so the robot practically always caught where it stood. A real thrower misses; the robot should catch whatever its arms can reach. The dataset gives no wider spread: its human catches lie within 0.25 m of the centre line and the catcher never stepped.
+- Change (Phase 2 only): `TARGET_FORWARD_RANGE` (0.25, 0.45), `TARGET_LATERAL_RANGE` (−0.3, 0.3), `TARGET_HEIGHT_RANGE` (0.8, 1.15) m in the command config and as the curriculum's final values (easy keeps 0.3–0.4 m, ±0.03 m, 0.85–0.95 m). With the velocity noise 35 % of the throws arrive more than 0.2 m and 12 % more than 0.3 m to the side, 5 % beyond the catch box (±0.35 m). The old baseline caught 99.5 % of throws aimed ±0.3 m without stepping. Unified unchanged: its throws follow the clip.
+- `eval_catch.py`: the `lateral` scenario aims ±0.45 m (beyond the trained range; until now ±0.3 m against a trained ±0.1 m).
+- Verified: Phase 2 smoke run (3 iterations).
+- Files: `BC/robots/g1_29dof/phase2/ball_catch_env_cfg.py`, `scripts/rsl_rl/eval_catch.py`. Spec sections 7.2 and 11 (item 1) updated.

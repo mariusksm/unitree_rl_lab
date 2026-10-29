@@ -14,7 +14,8 @@ through the hold phase. Scenarios change the env config before the env is built:
   wait       throw after 6-9 s, as on the real robot (Phase 2 trains 0.5-8 s since 2026-10-28, 0.5-1.5 s before);
              Unified: every cycle starts at the beginning of its 6 s lead-in (throw after ~6.9 s)
   push       velocity pushes of ±0.5 m/s every 1-2 s
-  lateral    throws aimed ±0.3 m sideways instead of ±0.1 m                    (Phase 2 only: Unified aims at the clip)
+  lateral    throws aimed ±0.45 m sideways, beyond the trained ±0.3 m           (Phase 2 only: Unified aims at the clip;
+             until 2026-10-29 ±0.3 m against a trained ±0.1 m)
   delay      perception latency 4-6 control steps (training until 2026-10-27: 1-3, since then 1-5; kept for comparison)
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
@@ -110,7 +111,7 @@ def apply_scenario(env_cfg, name: str):
     elif name == "push":
         env_cfg.events.push_robot.interval_range_s = (1.0, 2.0)
     elif name == "lateral":
-        env_cfg.commands.ball_throw.target_lateral_range = (-0.3, 0.3)
+        env_cfg.commands.ball_throw.target_lateral_range = (-0.45, 0.45)
     elif name == "delay":
         # the perception ring buffer is sized from this range, so it must be set before the env is built
         env_cfg.commands.ball_throw.obs_delay_steps_range = (4, 6)
