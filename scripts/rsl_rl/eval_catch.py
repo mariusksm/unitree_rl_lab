@@ -315,6 +315,9 @@ class Stats:
             cnt["pelvis_contact"] += int((self.cf.data.net_forces_w[sec][:, self.pelvis_c[0]].norm(dim=-1) > 1.0).sum())
             acc["torso_force"] += float(torso_f.sum())
             fm = self.bc.data.force_matrix_w[sec].norm(dim=-1).amax(dim=1)
+            if fm.shape[1] > 8:  # torso column of ball_contact (since 2026-10-29): force between ball and torso only
+                acc["ball_torso_force"] += float(fm[:, 8].sum())
+                cnt["ball_torso_over_50"] += int((fm[:, 8] > 50.0).sum())
             for j, nm in enumerate(["L_elbow", "L_wroll", "L_wpitch", "L_wyaw", "R_elbow", "R_wroll", "R_wpitch", "R_wyaw"]):
                 cnt[f"c_{nm}"] += int((fm[:, j] > 0.1).sum())
 
@@ -405,7 +408,9 @@ class Stats:
             "position_along_forearm": round(acc["t_forearm"] / s, 2),
             "pct_torso_contact": round(100 * cnt["torso_contact"] / s, 1),
             "pct_pelvis_contact": round(100 * cnt["pelvis_contact"] / s, 1),
-            "torso_force_N_mean": round(acc["torso_force"] / s, 1),
+            "torso_force_N_mean": round(acc["torso_force"] / s, 1),  # all contacts on the torso, own hands included
+            "ball_torso_force_N_mean": round(acc["ball_torso_force"] / s, 1),
+            "pct_ball_torso_over_50N": round(100 * cnt["ball_torso_over_50"] / s, 1),
             "arm_link_contact_pct": {k[2:]: round(100 * v / s, 1) for k, v in cnt.items() if k.startswith("c_")},
         }
         vs = max(1, self.valid_steps)
@@ -443,7 +448,9 @@ def summary(R: dict) -> str:
         f"gliding {R['feet_wait']['pct_contact_steps_gliding']} % (wait) / {R['feet_ball']['pct_contact_steps_gliding']} % "
         f"(ball), lift-offs {R['feet_wait']['liftoffs_per_s']}/s (wait) / {R['feet_ball']['liftoffs_per_s']}/s (ball)",
         f"[eval] held: ball {R['held']['ball_from_pelvis_xyz_m']} m from the pelvis, torso contact "
-        f"{R['held']['pct_torso_contact']} %, mean torso force {R['held']['torso_force_N_mean']} N",
+        f"{R['held']['pct_torso_contact']} %, mean torso force {R['held']['torso_force_N_mean']} N (all contacts), "
+        f"ball against the torso {R['held']['ball_torso_force_N_mean']} N, over 50 N in "
+        f"{R['held']['pct_ball_torso_over_50N']} % of the held steps",
         f"[eval] most saturated joint: {top['joint']} above 80 % of its torque limit in {top['pct_steps_over_80pct']} % "
         f"of the steps; joint targets beyond the hard limit: at most {R['target_beyond_hard_limit_max']['pct_time']} % "
         f"of the steps ({R['target_beyond_hard_limit_max']['joint']})",
