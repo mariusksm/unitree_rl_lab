@@ -595,6 +595,9 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    - ballistic filter with air drag, bridging gaps of up to 3 control steps, then "not visible"
    - latency forward prediction (then shrink `obs_delay_steps_range` to the residual latency)
 10. Curate the clips: `MotionCommand` loads all of them with equal weight. Phase 1 tracks all 108 (2026-10-28), so none has to go for trackability; weighting stays an option.
+11. Later, a Phase 3 (stage C) for throws beyond the arms' reach (decided 2026-10-29, not started): fine-tuning on top of the Phase 2 policy with throws 0.4–0.8 m off the centre, foot motion allowed during the flight and a stable stance required again for the hold phase, so that Phase 2 stays the safe policy for the real robot. Not part of Phase 2: lunges bring a fall risk and different rewards. First clarify:
+   - whether real throws need it (test throws with VICON, meeting topics)
+   - where the motion comes from: no take of the dataset contains a step; RL alone tends to find ugly steps, a few recorded catches with a lunge would give a reference
 
 ## 12. Context Documents
 
@@ -955,3 +958,6 @@ In case of conflicts: **code > this spec > other context documents.**
 - `eval_catch.py`: the `lateral` scenario aims ±0.45 m (beyond the trained range; until now ±0.3 m against a trained ±0.1 m).
 - Verified: Phase 2 smoke run (3 iterations).
 - Files: `BC/robots/g1_29dof/phase2/ball_catch_env_cfg.py`, `scripts/rsl_rl/eval_catch.py`. Spec sections 7.2 and 11 (item 1) updated.
+
+### 2026-10-29: Phase 3 for lunges planned
+- Decided with Marius: catches that need a step (throws beyond the arms' reach) come later as a separate Phase 3 on top of Phase 2, not inside Phase 2, which stays the safe standing catcher for the real robot. Prerequisites: real throw accuracy and recorded catches with a lunge. Section 11, item 11.
