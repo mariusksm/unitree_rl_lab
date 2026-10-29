@@ -128,6 +128,8 @@ def main():
     floor = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "floor")
     feet = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"{s}_ankle_roll_link") for s in ("left", "right")]
     torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+    arms = np.array([i for i, j in enumerate(joints) if any(k in j for k in ("shoulder", "elbow", "wrist"))])
+    legs = np.array([i for i, j in enumerate(joints) if any(k in j for k in ("hip", "knee", "ankle"))])
     policy = Policy(args.onnx)
 
     # start pose: default pose or frame 0 of a clip (root roll and pitch kept, yaw removed), feet on the floor
@@ -189,16 +191,21 @@ def main():
     steps = int(args.seconds / (PHYSICS_DT * DECIMATION))
     in_contact, liftoffs = np.ones(2, dtype=bool), np.zeros(2, dtype=int)
     clamped, saturated, fallen_at = 0, 0, None
+    motion = []  # as eval_catch.py measures the waiting phase in Isaac
     window = []
     for k in range(steps):
         action = policy(observation())
         target = default + scale * action
         clamped += int(np.sum((target < lower) | (target > upper)))
         d.ctrl[acts] = np.clip(target, lower, upper)
+        action_change = float(np.abs(action - last_action).mean())
         last_action = action
         for _ in range(DECIMATION):
             mujoco.mj_step(m, d)
         saturated += int(np.sum(np.abs(d.actuator_force[acts]) >= 0.99 * effort))
+        qd = d.qvel[dofadr]
+        motion.append((np.sqrt(np.mean(qd[arms] ** 2)), np.sqrt(np.mean(qd[legs] ** 2)), action_change,
+                       np.linalg.norm(d.qvel[:2])))
 
         pairs = np.stack([d.contact.geom1, d.contact.geom2], axis=1)[: d.ncon]
         on_floor = (pairs == floor).any(axis=1)
@@ -232,6 +239,9 @@ def main():
         writer.close()
     status = f"FELL at {fallen_at:.1f} s" if fallen_at is not None else "stood"
     rate = liftoffs / args.seconds
+    arm_v, leg_v, da, speed = np.mean(motion[25:], axis=0)  # without the first 0.5 s
+    print(f"[sim2sim] motion: arm joint vel RMS {arm_v:.3f} rad/s, leg {leg_v:.3f} rad/s, action change {da:.3f}, "
+          f"root speed {speed:.3f} m/s")
     print(
         f"[sim2sim] {status}; lift-offs per s L/R {rate[0]:.2f}/{rate[1]:.2f}; clamped targets {clamped / steps:.2f} "
         f"per step; saturated torques {saturated / steps:.2f} joints per step"

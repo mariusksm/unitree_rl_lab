@@ -26,6 +26,15 @@ python sim2sim/tools/export_onnx.py /abs/path/model_3000.pt --out policy
 
 `run.py` builds the G1 with the Isaac collision shapes (`model.py`), the armature, drive gains and effort limits of the Isaac asset (position actuators, implicitfast integrator, 5 ms step) and runs the policy every 20 ms on the actor observation of the run's `deploy.yaml` (term order, scales, 5-frame history). So far there is no ball: the ball terms say "not visible". Default pose, gains, limits and action scale are taken exactly from the dump; `deploy.yaml` rounds them to three digits.
 
+## Ball observations
+
+`ball.py` is the numpy port of the VICON model of `BallCommand` (detection delay, latency, per-throw bias, noise, dropout bursts, occlusion in the catch box, ballistic coasting) and of the actor terms `ball_state`, `ball_visible` and `ball_intercept`; its parameters are those of `commands.ball_throw` in the run's `params/env.yaml`. `tools/record_ball_obs.py` (Isaac) records the true states and the actor's ball terms with a deterministic VICON model, `tools/check_ball_obs.py` replays the states through the port and compares:
+
+```bash
+python sim2sim/tools/record_ball_obs.py --headless --num_envs 16 --steps 1000 --out ball_obs.npz   # also --wide_zone
+~/envs/sim2sim/bin/python sim2sim/tools/check_ball_obs.py ball_obs.npz
+```
+
 ## Model comparison
 
 `tools/dump_isaac_model.py` (Isaac Lab environment) writes the G1 as PhysX simulates it to JSON, `tools/compare_models.py` (sim2sim environment) compares it with MJCF files: masses, centres of mass, inertia, forward kinematics, collision shapes, joint ranges, armature and effort limits.
