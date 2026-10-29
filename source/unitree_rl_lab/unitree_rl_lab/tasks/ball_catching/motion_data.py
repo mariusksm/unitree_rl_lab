@@ -290,6 +290,7 @@ def compute_catch_info(
     if 0 <= clip_catch_frame < num_frames:
         hands = clip["body_pos_w"][clip_catch_frame, list(hand_body_indexes)].mean(axis=0)
         info["ball_hands_distance"] = float(np.linalg.norm(catch_point - hands))
+        info["hands_point"] = hands.tolist()
 
     reason = ""
     if best_rmse > MAX_JOINT_RMSE:
@@ -309,13 +310,19 @@ def compute_catch_info(
     return info
 
 
-def catch_data(clip_files: Sequence[str], ball_dir: str | None, lift: float = 0.0) -> list[dict]:
+def catch_data(
+    clip_files: Sequence[str], ball_dir: str | None, lift: float = 0.0, aim_above_hands: float | None = None
+) -> list[dict]:
     """What the Unified task needs per clip, from :func:`catch_infos` with the G1 asset constants.
 
     Returns per clip ``valid``, ``reason`` and, for valid clips, ``catch_time`` and ``flight_time`` (s into the clip)
     and ``catch_point`` (clip frame, m), as plain Python values for the env config. ``lift`` (m) is added to the catch
     point height; it must equal the lift of the clips (``MotionCommandCfg.clip_lift``), the catch point lives in their
     frame.
+
+    By default the catch point is the recorded ball position at the catch. With ``aim_above_hands`` (m) it is instead
+    the clip's wrist midpoint at the catch moment, raised by that much: the recording is in the human's scale, the clip
+    in the robot's, and at the catch the clip's wrists are about 0.21 m from the recorded ball (0.13 m below it).
     """
     data = []
     for info in catch_infos(clip_files, ball_dir, G1_JOINT_NAMES, G1_HAND_BODY_INDEXES):
@@ -324,10 +331,16 @@ def catch_data(clip_files: Sequence[str], ball_dir: str | None, lift: float = 0.
             entry.update(
                 catch_time=float(info["catch_time"]),
                 flight_time=float(info["flight_time"]),
-                catch_point=[float(x) for x in info["catch_point"][:2]] + [float(info["catch_point"][2]) + lift],
+                catch_point=_catch_target(info, lift, aim_above_hands),
             )
         data.append(entry)
     return data
+
+
+def _catch_target(info: dict, lift: float, aim_above_hands: float | None) -> list[float]:
+    point = list(info["catch_point"]) if aim_above_hands is None else list(info["hands_point"])
+    point[2] += lift + (aim_above_hands or 0.0)
+    return [float(x) for x in point]
 
 
 def catch_infos(

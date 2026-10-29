@@ -49,7 +49,14 @@ CATCH_MOTION_FILES = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)
 
 # Catch time, flight time and catch point per clip from its recording (numpy, a few seconds at import); in the
 # config, so that the motion command can cut the clips after the catch and params/env.yaml records what was used
-CATCH_DATA = catch_data(CATCH_MOTION_FILES, BALL_DATA_DIR, lift=TEMP_CLIP_LIFT)  # temporary height fix, as the clips
+# The ball is aimed at the reference hands at the catch moment (wrist midpoint, raised so that the ball lands on the
+# hands), not at the recorded ball position: the recording is in the human's scale, the clip in the robot's, and at the
+# catch the clip's wrists are 0.21 m from the recorded ball (0.13 m below it). Aimed at the recorded point, the robot had
+# to leave the reference to catch and learned to clamp the ball against its upper chest and head (run of 2026-10-28).
+CATCH_ABOVE_HANDS = 0.08
+CATCH_DATA = catch_data(  # TEMP_CLIP_LIFT: temporary height fix, as for the clips
+    CATCH_MOTION_FILES, BALL_DATA_DIR, lift=TEMP_CLIP_LIFT, aim_above_hands=CATCH_ABOVE_HANDS
+)
 
 # Fixed mode only (no usable recordings, e.g. the old single overhand clip in phase1/motions/): catch time (s)
 # into every clip. With recordings, every clip brings its own catch time and catch point.
@@ -71,6 +78,7 @@ HOLD_AFTER_CATCH_S = 3.0
 END_HOLD_S = HOLD_AFTER_CATCH_S + 2.0
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+FEET_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
 # forearm + hand links the ball may rest on in the two-arm underhand catch (left first, then right)
 ARM_CONTACT_BODY_NAMES = [
     f"{side}_{link}"
@@ -453,6 +461,16 @@ class RewardsCfg:
     )
     # targets beyond the joint limits change nothing since the clamp (ClampedJointPositionAction): keep them inside
     joint_target_excess = RewTerm(func=mdp.joint_target_excess, weight=-1.0)
+    # tracking the feet's orientation alone let the left foot stand on its edge (17° in 84 % of the contact steps at
+    # iteration 7000 of the run of 2026-10-28); same term and weight as Phase 2
+    feet_flat = RewTerm(
+        func=mdp.feet_flat,
+        weight=-2.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET_BODY_NAMES, preserve_order=True),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET_BODY_NAMES, preserve_order=True),
+        },
+    )
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-0.1,
