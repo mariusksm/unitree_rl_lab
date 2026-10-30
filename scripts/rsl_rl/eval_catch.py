@@ -133,6 +133,15 @@ def tilt_deg(q):
     return torch.rad2deg(torch.acos(up[:, 2].clamp(-1, 1))).reshape(q.shape[:-1])
 
 
+def lean_fwd_deg(q):
+    """Signed lean of the body's z axis in its own heading frame: + forward, - backward (tilt_deg has no sign)."""
+    q = q.reshape(-1, 4)
+    z = torch.zeros(q.shape[0], 3, device=q.device)
+    z[:, 2] = 1.0
+    up = quat_apply_inverse(yaw_quat(q), quat_apply(q, z))
+    return torch.rad2deg(torch.atan2(up[:, 0], up[:, 2]))
+
+
 class Stats:
     """Accumulates the metrics over all envs and steps; ``report`` turns them into a dict."""
 
@@ -282,6 +291,8 @@ class Stats:
             acc[f"pelvis_z_{tag}"] += float(r.data.root_pos_w[m, 2].sum())
             acc[f"pelvis_tilt_{tag}"] += float(tilt_deg(r.data.root_quat_w[m]).sum())
             acc[f"torso_tilt_{tag}"] += float(tilt_deg(r.data.body_quat_w[m][:, self.torso_b[0]]).sum())
+            acc[f"pelvis_lean_fwd_{tag}"] += float(lean_fwd_deg(r.data.root_quat_w[m]).sum())
+            acc[f"torso_lean_fwd_{tag}"] += float(lean_fwd_deg(r.data.body_quat_w[m][:, self.torso_b[0]]).sum())
             acc[f"knee_deg_{tag}"] += float(torch.rad2deg(jp[m][:, self.knee_j]).mean(dim=-1).sum())
             acc[f"shoulder_roll_abs_deg_{tag}"] += float(torch.rad2deg(jp[m][:, self.shroll_j].abs()).mean(dim=-1).sum())
             acc[f"arm_joint_vel_rms_{tag}"] += float(jv[m][:, self.arm_j].pow(2).mean(dim=-1).sqrt().sum())
@@ -394,7 +405,8 @@ class Stats:
         for tag in ("wait", "held"):
             n = max(1, cnt[f"n_{tag}"])
             R[f"posture_{tag}"] = {k: round(acc[f"{k}_{tag}"] / n, 3) for k in (
-                "pelvis_z", "pelvis_tilt", "torso_tilt", "knee_deg", "shoulder_roll_abs_deg", "arm_joint_vel_rms",
+                "pelvis_z", "pelvis_tilt", "torso_tilt", "pelvis_lean_fwd", "torso_lean_fwd", "knee_deg",
+                "shoulder_roll_abs_deg", "arm_joint_vel_rms",
                 "leg_joint_vel_rms", "action_change", "root_speed")}
         s = max(1, cnt["sec"])
         R["held"] = {
