@@ -472,6 +472,16 @@ class RewardsCfg:
         params={"ball_name": "ball", "min_height": 0.5},
     )
 
+    # -- posture: upright torso (since 2026-10-30). With the palm hold the fourth run bent over the ball (torso 36°
+    # while holding, pelvis 22° while waiting; reference ≈ 9°): tracking the anchor orientation (0.5) is too weak
+    # against the ball terms. std 0.35 lets the reference's own lean pass (10° -> 0.78, 15° -> 0.58, 36° -> 0.06);
+    # weight as Phillip's `standing` (5, his hold reward is 5 as well)
+    torso_upright = RewTerm(
+        func=mdp.torso_upright_exp,
+        weight=5.0,
+        params={"std": 0.35, "asset_cfg": SceneEntityCfg("robot", body_names="torso_link")},
+    )
+
     # -- regularization (mimic-task set)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
     joint_torque = RewTerm(func=mdp.joint_torques_l2, weight=-1e-5)

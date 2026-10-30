@@ -110,6 +110,18 @@ def feet_flat(
     return torch.sum(torch.sum(torch.square(gravity_feet[..., :2]), dim=-1) * (forces > force_threshold), dim=-1)
 
 
+def torso_upright_exp(
+    env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="torso_link")
+) -> torch.Tensor:
+    """exp(-|gravity_xy|² / std²) in the frame of the body of ``asset_cfg``: 1 upright, falling with the tilt in any
+    direction (|gravity_xy| = sin of the tilt); the heading does not count. As Phillip's g1-catch (``standing``): the
+    waist lets the torso lean although the pelvis is level, so the torso is measured, not the root."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    torso_quat = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
+    gravity_torso = quat_apply_inverse(torso_quat, asset.data.GRAVITY_VEC_W)
+    return torch.exp(-torch.sum(torch.square(gravity_torso[:, :2]), dim=-1) / std**2)
+
+
 def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     first_air = contact_sensor.compute_first_air(env.step_dt, env.physics_dt)[:, sensor_cfg.body_ids]
