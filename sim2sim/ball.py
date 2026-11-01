@@ -203,6 +203,7 @@ class CatchState:
         self.secured_steps, self.steps_since_confirm, self.confirmed = 0, 0, False
         self.steps_since_contact = np.full(2, NOT_SEEN)
         self.in_zone = False
+        self.hold_distance, self.forbidden = 0.0, False
 
     @property
     def catch_complete(self) -> bool:
@@ -211,13 +212,20 @@ class CatchState:
 
     def update(
         self, in_flight: bool, ball_pos, ball_vel, root_pos, root_quat, root_lin_vel, arm_force, torso_force,
-        hand_force=None, hand_pos=None, hand_rot=None,
+        hand_force=None, hand_pos=None, hand_rot=None, support_force: float = 0.0, forbidden_force: float = 0.0,
     ):
         """``arm_force``: strongest ball force per arm (any arm link); ``hand_force``, ``hand_pos``, ``hand_rot``:
-        ball force, position and rotation matrix of the [left, right] hand body, needed with ``palm_hold``."""
+        ball force, position and rotation matrix of the [left, right] hand body, needed with ``palm_hold``;
+        ``support_force`` / ``forbidden_force``: strongest ball force on an arm link other than the hands / on a
+        forbidden body (``forbidden_body_names``), needed with ``contact_map`` (since 2026-11-01)."""
         cfg = self.cfg
         ball_b = to_yaw_frame(np.asarray(ball_pos) - root_pos, yaw_of(root_quat))
-        self.in_zone = bool(np.all((ball_b >= self.zone_lo) & (ball_b <= self.zone_hi)))
+        self.in_zone = bool(np.all((ball_b >= self.zone_lo) & (ball_b <= self.zone_hi)))  # also the occlusion zone
+        # hold definition of 2026-11-01: within hold_radius of the (fixed) hold point instead of the catch box
+        hold_zone = self.in_zone
+        if cfg.get("hold_radius") is not None:
+            self.hold_distance = float(np.linalg.norm(ball_b - np.asarray(cfg["hold_point"], dtype=float)))
+            hold_zone = self.hold_distance <= cfg["hold_radius"]
         palm_hold = bool(cfg.get("palm_hold", False))  # runs before 2026-10-29 have no such key
         if palm_hold:
             on_palm, above_palms = palm_geometry(ball_pos, hand_pos, hand_rot, cfg)
@@ -232,12 +240,20 @@ class CatchState:
             touching = recent.all() if cfg["require_both_arms"] else recent.any()
         secured = (
             in_flight
-            and self.in_zone
+            and hold_zone
             and np.linalg.norm(np.asarray(ball_vel) - root_lin_vel) < cfg["secure_rel_vel"]
             and ball_pos[2] > cfg["secure_min_height"]
             and touching
         )
-        if cfg.get("max_torso_force") is not None:
+        if cfg.get("contact_map"):
+            # catching (until the confirmation): only the palms, the torso up to max_torso_force_catching; holding:
+            # forearm, wrist, back of a hand and belly may support; upper arms and a torso above the limit never
+            threshold = cfg["contact_force_threshold"]
+            arm_support = bool(np.any((np.asarray(hand_force) > threshold) & ~on_palm)) or support_force > threshold
+            self.forbidden = torso_force > cfg["max_torso_force_holding"] or forbidden_force > threshold
+            catching_ok = not arm_support and torso_force <= cfg["max_torso_force_catching"]
+            secured = secured and not self.forbidden and (self.confirmed or catching_ok)
+        elif cfg.get("max_torso_force") is not None:
             secured = secured and torso_force <= cfg["max_torso_force"]
         self.secured_steps = self.secured_steps + 1 if secured else 0
         confirmed_now = not self.confirmed and self.secured_steps >= cfg["secure_steps"]

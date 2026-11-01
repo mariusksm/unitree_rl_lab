@@ -213,6 +213,16 @@ def hand_pos_b(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     return quat_apply_inverse(heading, rel).reshape(env.num_envs, -1)
 
 
+def catch_phase(env: ManagerBasedEnv, command_name: str = "ball_throw") -> torch.Tensor:
+    """Phase of the throw for the critic (since 2026-11-01): [launched, confirmed, time since the confirmation as a
+    share of the hold phase]. The reward depends on it (contact rules, approach terms only until the confirmation),
+    and a critic with 5 frames of history cannot tell how long the ball has been held. Returns (num_envs, 3)."""
+    command = env.command_manager.get_term(command_name)
+    hold_s = max(float(command.cfg.hold_after_catch_s), 1e-6)
+    held = (command.steps_since_confirm.float() * env.step_dt / hold_s).clamp(0.0, 1.0)
+    return torch.stack([command.launched.float(), command.confirmed.float(), held], dim=-1)
+
+
 def dummy_zeros(env: ManagerBasedEnv, dim: int) -> torch.Tensor:
     """Returns a zero tensor. Used to pad observation space for transfer learning."""
     return torch.zeros(env.num_envs, dim, device=env.device)

@@ -62,6 +62,8 @@ class SyncedBallCommand(BallCommand):
         self._clip_catch_time: torch.Tensor | None = None
         self._clip_flight_time: torch.Tensor | None = None
         self._clip_catch_point: torch.Tensor | None = None
+        self._clip_hold_point: torch.Tensor | None = None
+        """Hold point per clip (relative to the reference pelvis in its yaw frame), if the catch data carries it."""
         self._recorded = False
 
     @property
@@ -94,6 +96,9 @@ class SyncedBallCommand(BallCommand):
         catch_time = torch.zeros(num_clips)
         flight_time = torch.ones(num_clips)
         catch_point = torch.zeros(num_clips, 3)
+        # clips without a hold point of their own (no recording, fixed mode) keep the fixed one of the cfg, if any
+        fixed = self.cfg.hold_point if self.cfg.hold_point is not None else (float("nan"),) * 3
+        hold_point = torch.tensor(fixed, dtype=torch.float).repeat(num_clips, 1)
 
         if self.cfg.catch_data is not None:
             if len(self.cfg.catch_data) != num_clips:
@@ -108,6 +113,8 @@ class SyncedBallCommand(BallCommand):
                     # launch at the cycle start at the latest (without a lead-in, a few clips start after the release)
                     flight_time[i] = min(data["flight_time"], float(catch_time[i]) - self.cfg.arrival_jitter)
                     catch_point[i] = torch.tensor(data["catch_point"])
+                    if "hold_point" in data:
+                        hold_point[i] = torch.tensor(data["hold_point"])
             self._recorded = bool(has_catch.any())
             reasons: dict[str, int] = {}
             for info in self.cfg.catch_data:
@@ -140,6 +147,23 @@ class SyncedBallCommand(BallCommand):
         self._clip_catch_time = catch_time.to(self.device)
         self._clip_flight_time = flight_time.to(self.device)
         self._clip_catch_point = catch_point.to(self.device)
+        missing = torch.isnan(hold_point).any(dim=-1) & has_catch
+        if bool(missing.any()):
+            if self.cfg.hold_radius is not None or self.cfg.contact_map:
+                raise ValueError(
+                    f"SyncedBallCommand: {int(missing.sum())} clips with a catch have no hold point; pass catch_data "
+                    "from motion_data.catch_data (with hold_point) or a fixed BallCommandCfg.hold_point"
+                )
+            self._clip_hold_point = None
+        else:
+            self._clip_hold_point = torch.nan_to_num(hold_point).to(self.device)
+
+    def _hold_point_b(self) -> torch.Tensor | None:
+        """Hold point of each env's clip (relative to the root in its yaw frame, as the reference holds the ball
+        relative to its pelvis); the fixed cfg point before the catch data is built."""
+        if self._clip_hold_point is None:
+            return super()._hold_point_b()
+        return self._clip_hold_point[self.motion_command.clip_ids]
 
     def _reference_catch_point_w(self, env_ids: torch.Tensor) -> torch.Tensor:
         """The env's reference catch point, re-anchored to the robot like MotionCommand.body_pos_relative_w."""
@@ -227,7 +251,8 @@ class SyncedBallCommandCfg(BallCommandCfg):
 
     catch_data: list[dict] | None = None
     """Recorded mode: per motion clip (order of ``motion_files``) the output of :func:`motion_data.catch_data`
-    (``valid``, ``reason``; ``catch_time``, ``flight_time`` in s into the clip and ``catch_point`` in the clip frame)."""
+    (``valid``, ``reason``; ``catch_time``, ``flight_time`` in s into the clip, ``catch_point`` in the clip frame and
+    ``hold_point`` relative to the reference pelvis in its yaw frame, used as the clip's hold point)."""
 
     catch_motion_time: float | None = None
     """Fixed mode only (no usable recordings): time (s) into every clip at which the catch happens."""

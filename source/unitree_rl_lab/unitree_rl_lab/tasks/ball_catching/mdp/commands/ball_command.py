@@ -51,10 +51,12 @@ class BallCommand(CommandTerm):
     (ball dropped / missed / caught / time out), which read the catch state tracked here:
 
     - ``secured_steps``: consecutive control steps for which the launched ball is inside the catch box in
-      front of the torso, slow relative to the root, above ``secure_min_height``, in contact with the
-      arms (both arms if ``require_both_arms``; with ``palm_hold`` both palms, holding it from below) and, with
-      ``max_torso_force``, not squeezed against the torso. Reaching ``cfg.secure_steps`` confirms the catch
-      (``confirmed``, ``confirmed_now`` on that one step).
+      front of the torso (with ``hold_radius``: within that distance of the hold point), slow relative to the root,
+      above ``secure_min_height``, in contact with the arms (both arms if ``require_both_arms``; with ``palm_hold``
+      both palms, holding it from below) and, with ``max_torso_force``, not squeezed against the torso; with
+      ``contact_map`` the contact rules of the phase replace the torso limit (see the cfg). Reaching
+      ``cfg.secure_steps`` confirms the catch (``confirmed``, ``confirmed_now`` on that one step).
+    - ``hold_quality`` (``contact_map``): a graded version of the same for the reward, see the attribute.
     - ``catch_complete``: the confirmed catch has lasted ``hold_after_catch_s`` (hold phase: the robot keeps the
       ball and stands still, as after a real catch). With 0 the confirmation itself completes the catch.
 
@@ -88,12 +90,19 @@ class BallCommand(CommandTerm):
         self.contact_sensor: ContactSensor | None = None
         self._torso_column: int | None = None
         self._hand_columns: torch.Tensor | None = None
+        self._support_columns: torch.Tensor | None = None
+        self._forbidden_columns: torch.Tensor | None = None
         if cfg.contact_sensor_name is not None:
             self.contact_sensor = env.scene.sensors[cfg.contact_sensor_name]
             filter_names = [path.rsplit("/", 1)[-1] for path in self.contact_sensor.cfg.filter_prim_paths_expr]
+            forbidden = list(cfg.forbidden_body_names)
+            missing = [name for name in forbidden if name not in filter_names]
+            if missing:
+                raise ValueError(f"Contact sensor '{cfg.contact_sensor_name}' has no forbidden filter body {missing}")
             self._contact_columns = []
             for side in ("left_", "right_"):
-                columns = [i for i, name in enumerate(filter_names) if name.startswith(side)]
+                # arm links of this side; forbidden bodies (upper arms) never count as an arm contact
+                columns = [i for i, name in enumerate(filter_names) if name.startswith(side) and name not in forbidden]
                 if not columns:
                     raise ValueError(
                         f"Contact sensor '{cfg.contact_sensor_name}' has no '{side}*' filter body: {filter_names}"
@@ -113,6 +122,22 @@ class BallCommand(CommandTerm):
                 self._hand_columns = torch.tensor(
                     [filter_names.index(name) for name in cfg.hand_body_names], dtype=torch.long, device=self.device
                 )
+            if cfg.contact_map:
+                if not cfg.palm_hold or self._torso_column is None:
+                    raise ValueError("BallCommandCfg.contact_map needs palm_hold and torso_body_name")
+                others = set(cfg.hand_body_names) | set(forbidden)
+                support = [
+                    i for i, name in enumerate(filter_names) if name.startswith(("left_", "right_")) and name not in others
+                ]
+                self._support_columns = torch.tensor(support, dtype=torch.long, device=self.device)
+                self._forbidden_columns = torch.tensor(
+                    [filter_names.index(name) for name in forbidden], dtype=torch.long, device=self.device
+                )
+        elif cfg.contact_map:
+            raise ValueError("BallCommandCfg.contact_map needs a contact sensor")
+        self._fixed_hold_point = (
+            torch.tensor(cfg.hold_point, dtype=torch.float, device=self.device) if cfg.hold_point is not None else None
+        )
         # palm centre and normal of the [left, right] hand in its body frame (palm hold)
         self._palm_points = torch.tensor(cfg.palm_points, dtype=torch.float, device=self.device)
         self._palm_normals = torch.tensor(cfg.palm_normals, dtype=torch.float, device=self.device)
@@ -131,6 +156,17 @@ class BallCommand(CommandTerm):
         """Ball touches the [left, right] arm in the current control step (with ``palm_hold``: that hand's palm)."""
         self.torso_force = torch.zeros(self.num_envs, device=self.device)
         """Force (N) between the ball and ``cfg.torso_body_name`` in the current control step (0 without it)."""
+        self.hold_distance = torch.zeros(self.num_envs, device=self.device)
+        """Distance (m) of the ball from the hold point (0 without a hold point)."""
+        self.hold_quality = torch.zeros(self.num_envs, device=self.device)
+        """``contact_map``: how well the launched ball is held in [0, 1], q_palm · q_zone · q_contact: the share of
+        palms carrying it times its height above them (``palm_support_height``), the kernel of ``hold_distance``
+        (``hold_sigma``; without a hold radius 1 inside the catch box) and 1 if the contact rules of the phase hold."""
+        self.support_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """``contact_map``: the ball touches a support part (forearm, wrist, back of a hand, torso up to the limit)."""
+        self.forbidden_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """``contact_map``: the launched ball touches a forbidden body part or presses on the torso above the limit."""
+        self._contact_magnitude: torch.Tensor | None = None
         self._steps_since_contact = torch.full(
             (self.num_envs, 2), self._NO_CONTACT, dtype=torch.long, device=self.device
         )
@@ -184,6 +220,9 @@ class BallCommand(CommandTerm):
         self.metrics["ball_in_catch_zone"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_arm_contact"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_torso_force"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["hold_distance"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["hold_quality"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["ball_forbidden_contact"] = torch.zeros(self.num_envs, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
@@ -264,6 +303,9 @@ class BallCommand(CommandTerm):
         self.steps_since_confirm[env_ids] = 0
         self.arm_contact[env_ids] = False
         self._steps_since_contact[env_ids] = self._NO_CONTACT
+        self.hold_quality[env_ids] = 0.0
+        self.support_contact[env_ids] = False
+        self.forbidden_contact[env_ids] = False
 
     def _reset_perception(self, env_ids: Sequence[int]):
         """Forget the previous throw and sample the tracker imperfections of the new one."""
@@ -419,6 +461,7 @@ class BallCommand(CommandTerm):
         # (N, T, 1, M, 3) -> strongest contact per filter body over the physics steps of this control step
         forces = data.force_matrix_w_history if data.force_matrix_w_history is not None else data.force_matrix_w.unsqueeze(1)
         magnitude = torch.norm(forces, dim=-1).amax(dim=1)[:, 0]
+        self._contact_magnitude = magnitude
         if on_palm is not None:
             self.arm_contact = (magnitude[:, self._hand_columns] > self.cfg.contact_force_threshold) & on_palm
         else:
@@ -436,38 +479,85 @@ class BallCommand(CommandTerm):
             self.torso_force = magnitude[:, self._torso_column]
         return self._steps_since_contact <= self.cfg.contact_grace_steps
 
+    def _hold_point_b(self) -> torch.Tensor | None:
+        """Hold point per env (N, 3), relative to the root in its yaw frame; ``None`` without one."""
+        if self._fixed_hold_point is None:
+            return None
+        return self._fixed_hold_point.expand(self.num_envs, 3)
+
+    def _apply_contact_map(self, on_palm: torch.Tensor) -> torch.Tensor:
+        """Per env whether the contacts of this control step obey the rules of the phase (``contact_map``); sets
+        ``support_contact`` and ``forbidden_contact``. Catching = launch until the confirmation, holding = after it."""
+        cfg = self.cfg
+        magnitude, threshold = self._contact_magnitude, cfg.contact_force_threshold
+        # arm parts other than the palms: a hand touching off its palm side, forearm and wrist links
+        arm_support = ((magnitude[:, self._hand_columns] > threshold) & ~on_palm).any(dim=-1)
+        if len(self._support_columns) > 0:
+            arm_support |= (magnitude[:, self._support_columns] > threshold).any(dim=-1)
+        forbidden = self.torso_force > cfg.max_torso_force_holding
+        if len(self._forbidden_columns) > 0:
+            forbidden |= (magnitude[:, self._forbidden_columns] > threshold).any(dim=-1)
+        # catching: only the palms count, the torso may be touched lightly; holding: support allowed (the palms must
+        # still carry the ball, which the catch check asks anyway)
+        catching_ok = ~arm_support & (self.torso_force <= cfg.max_torso_force_catching)
+        ok = ~forbidden & (self.confirmed | catching_ok)
+        self.support_contact = (arm_support | (self.torso_force > threshold)) & ~forbidden & self.launched
+        self.forbidden_contact = forbidden & self.launched
+        return ok
+
     def _update_catch_state(self, in_flight: torch.Tensor):
         """Track consecutive steps where the ball counts as held in the arms.
 
-        Held := ball in the catch box (root yaw frame), slow relative to the root, above ground and touching
-        the arms (with ``palm_hold``: both palms, ball above them) — gated by ``in_flight`` so a parked (pre-throw)
-        ball never counts.
+        Held := ball in the catch box (root yaw frame; with ``hold_radius``: within that distance of the hold point),
+        slow relative to the root, above ground and touching the arms (with ``palm_hold``: both palms, ball above
+        them; with ``contact_map``: and no contact the phase rules out) — gated by ``in_flight`` so a parked
+        (pre-throw) ball never counts.
         """
+        cfg = self.cfg
         ball_pos = self.ball.data.root_pos_w
         ball_vel = self.ball.data.root_lin_vel_w
         root_pos = self.robot.data.root_pos_w
 
         ball_b = quat_apply_inverse(yaw_quat(self.robot.data.root_quat_w), ball_pos - root_pos)
         in_zone = torch.all((ball_b >= self._catch_zone_lo) & (ball_b <= self._catch_zone_hi), dim=-1)
-        self._in_zone = in_zone
+        self._in_zone = in_zone  # the catch box also decides where the arms occlude the ball (perception)
         rel_speed = torch.norm(ball_vel - self.robot.data.root_lin_vel_w, dim=-1)
-        if self.cfg.palm_hold:
+        if cfg.palm_hold:
             on_palm, above_palms = self._palm_geometry()
             recent_contact = self._update_arm_contact(on_palm)
-            touching = recent_contact.all(dim=-1) & (above_palms >= self.cfg.min_ball_above_palms)
+            touching = recent_contact.all(dim=-1) & (above_palms >= cfg.min_ball_above_palms)
         else:
             recent_contact = self._update_arm_contact()
-            touching = recent_contact.all(dim=-1) if self.cfg.require_both_arms else recent_contact.any(dim=-1)
+            touching = recent_contact.all(dim=-1) if cfg.require_both_arms else recent_contact.any(dim=-1)
+
+        hold_point = self._hold_point_b()
+        if hold_point is not None:
+            self.hold_distance = torch.norm(ball_b - hold_point, dim=-1)
+        if cfg.hold_radius is not None:
+            if hold_point is None:
+                raise ValueError("BallCommandCfg.hold_radius needs a hold point (hold_point or the clips' hold points)")
+            in_hold_zone = self.hold_distance <= cfg.hold_radius
+        else:
+            in_hold_zone = in_zone
 
         secured = (
             in_flight
-            & in_zone
-            & (rel_speed < self.cfg.secure_rel_vel)
-            & (ball_pos[:, 2] > self.cfg.secure_min_height)
+            & in_hold_zone
+            & (rel_speed < cfg.secure_rel_vel)
+            & (ball_pos[:, 2] > cfg.secure_min_height)
             & touching
         )
-        if self.cfg.max_torso_force is not None:
-            secured &= self.torso_force <= self.cfg.max_torso_force  # held, not squeezed against the body
+        if cfg.contact_map:
+            contacts_ok = self._apply_contact_map(on_palm)
+            secured &= contacts_ok
+            palms = recent_contact.float().mean(dim=-1) * (above_palms / cfg.palm_support_height).clamp(0.0, 1.0)
+            if hold_point is not None:
+                zone = torch.exp(-torch.square(self.hold_distance) / cfg.hold_sigma**2)
+            else:
+                zone = in_zone.float()
+            self.hold_quality = palms * zone * contacts_ok.float() * in_flight.float()
+        elif cfg.max_torso_force is not None:
+            secured &= self.torso_force <= cfg.max_torso_force  # held, not squeezed against the body
         self.secured_steps = torch.where(secured, self.secured_steps + 1, torch.zeros_like(self.secured_steps))
         # confirmation once per throw; the hold phase runs on even if the secured streak breaks (a drop ends it)
         self.confirmed_now = ~self.confirmed & (self.secured_steps >= self.cfg.secure_steps)
@@ -479,6 +569,9 @@ class BallCommand(CommandTerm):
         self.metrics["ball_in_catch_zone"] = in_zone.float()
         self.metrics["ball_arm_contact"] = self.arm_contact.float().mean(dim=-1)
         self.metrics["ball_torso_force"] = self.torso_force
+        self.metrics["hold_distance"] = self.hold_distance
+        self.metrics["hold_quality"] = self.hold_quality
+        self.metrics["ball_forbidden_contact"] = self.forbidden_contact.float()
 
     def _update_perception(self):
         """Update the ball estimate the robot gets from the VICON pipeline (see the class docstring)."""
@@ -646,7 +739,49 @@ class BallCommandCfg(CommandTermCfg):
     max_torso_force: float | None = None
     """A ball pressed against the torso harder than this (N) does not count as held. Resting against the belly is
     allowed; clamping the ball to the chest (Phase 2 baseline 236 N, Unified runs 196-233 N) is not a catch with the
-    arms. ``None``: no limit."""
+    arms. ``None``: no limit. Not used with ``contact_map`` (see there)."""
+
+    # ── hold definition (since 2026-11-01): held = both palms carry the ball, where the human holds it, and nothing
+    #    else carries it (concept: H-ReACT/analysis/2026-11-01_festhalten_haltung/konzept.md, outside the repo) ──
+    hold_point: tuple[float, float, float] | None = None
+    """Hold point (m) relative to the root in the root's yaw frame: where the ball is held. A fixed point here
+    (``motion_data.G1_HOLD_POINT``); :class:`SyncedBallCommand` uses each clip's own hold point (``catch_data``)."""
+
+    hold_radius: float | None = None
+    """The ball counts as held only within this distance (m) of the hold point, instead of inside the catch box (which
+    stays for the occlusion of the perception model). ``None``: catch box. Curriculum variable."""
+
+    hold_sigma: float = 0.10
+    """Width (m) of the kernel exp(-d²/σ²) of the distance d to the hold point in ``hold_quality``."""
+
+    contact_map: bool = False
+    """Which body parts may touch the ball, by phase (needs ``palm_hold`` and ``torso_body_name``):
+
+    - palms (a hand touching the ball on its palm side): wanted, both required;
+    - support: the other arm links of the sensor (forearm, wrist), a hand touching the ball off its palm side, and the
+      torso up to ``max_torso_force_catching`` while catching / ``max_torso_force_holding`` while holding. While
+      catching (launch until the confirmation) a support contact makes the step not held; while holding (after the
+      confirmation) it may support the ball as long as both palms carry it;
+    - forbidden: ``forbidden_body_names`` and the torso above ``max_torso_force_holding``: never held, flagged in
+      ``forbidden_contact`` (reward ``ball_body_contact``).
+
+    A rule that does not count a step instead of punishing it keeps holding the ball always worth more than dropping
+    it. ``max_torso_force`` is not used then."""
+
+    forbidden_body_names: list[str] = []
+    """Filter bodies of the contact sensor whose contact with the ball is forbidden (upper arms, shoulders)."""
+
+    max_torso_force_catching: float = 5.0
+    """``contact_map``: torso force (N) up to which the ball may lean on the body while catching (launch until the
+    confirmation)."""
+
+    max_torso_force_holding: float = 10.0
+    """``contact_map``: torso force (N) up to which the belly may support the ball while holding; above it the contact
+    is forbidden in both phases (the fifth Unified run pressed the ball against chest and shoulder with 20 N)."""
+
+    palm_support_height: float = 0.04
+    """Height (m) of the ball centre above the mean palm height at which the palm part of ``hold_quality`` reaches 1
+    (0 at palm height; the reference holds the ball about 0.05 m above its palms)."""
 
     contact_grace_steps: int = 5
     """A contact within the last N control steps still counts (rolling or bouncing ball)."""

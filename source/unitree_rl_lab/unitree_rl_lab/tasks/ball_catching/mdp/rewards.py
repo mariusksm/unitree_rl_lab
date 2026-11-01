@@ -110,16 +110,40 @@ def feet_flat(
     return torch.sum(torch.sum(torch.square(gravity_feet[..., :2]), dim=-1) * (forces > force_threshold), dim=-1)
 
 
-def torso_upright_exp(
-    env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="torso_link")
+def posture_quality(
+    env: ManagerBasedRLEnv,
+    tilt_std: float = 0.35,
+    height_tolerance: float = 0.03,
+    height_std: float = 0.05,
+    torso_body_name: str = "torso_link",
+    ref_command_name: str | None = None,
+    ref_body_name: str = "pelvis",
+    ref_height: float = 0.78,
 ) -> torch.Tensor:
-    """exp(-|gravity_xy|² / std²) in the frame of the body of ``asset_cfg``: 1 upright, falling with the tilt in any
-    direction (|gravity_xy| = sin of the tilt); the heading does not count. As Phillip's g1-catch (``standing``): the
-    waist lets the torso lean although the pelvis is level, so the torso is measured, not the root."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    torso_quat = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
+    """Posture factor P in [0, 1]: torso upright and pelvis at standing height (since 2026-11-01).
+
+    P = exp(-|g_xy|² / tilt_std²) · exp(-max(0, h_ref - height_tolerance - h)² / height_std²), with g the gravity in
+    the torso frame (|g_xy| = sin of its tilt in any direction; the waist lets the torso lean although the pelvis is
+    level, so the torso is measured) and h the pelvis height. The height part is one-sided: within
+    ``height_tolerance`` below the reference and anything higher costs nothing (bent knees of up to about 35-40°), a
+    deeper squat falls off fast (fifth Unified run: pelvis 0.71 m while holding -> 0.43, 0.67 m while waiting -> 0.07).
+    h_ref is the height of ``ref_body_name`` of the motion command ``ref_command_name`` in the current frame (so a clip
+    in which the human squats is not punished), else ``ref_height``. As Phillip's ``standing`` in g1-catch, which also
+    measures the torso and the pelvis height. Used as the reward ``stand`` and as a factor of the hold reward and the
+    catch bonus, so that a hold in a bad posture is worth little instead of costing a little."""
+    asset: Articulation = env.scene["robot"]
+    torso_quat = asset.data.body_quat_w[:, asset.body_names.index(torso_body_name)]
     gravity_torso = quat_apply_inverse(torso_quat, asset.data.GRAVITY_VEC_W)
-    return torch.exp(-torch.sum(torch.square(gravity_torso[:, :2]), dim=-1) / std**2)
+    upright = torch.exp(-torch.sum(torch.square(gravity_torso[:, :2]), dim=-1) / tilt_std**2)
+    ground = env.scene.env_origins[:, 2]
+    height = asset.data.root_pos_w[:, 2] - ground
+    if ref_command_name is not None:
+        command: MotionCommand = env.command_manager.get_term(ref_command_name)
+        reference = command.body_pos_w[:, command.cfg.body_names.index(ref_body_name), 2] - ground
+    else:
+        reference = torch.full_like(height, ref_height)
+    sag = torch.clamp(reference - height_tolerance - height, min=0.0)
+    return upright * torch.exp(-torch.square(sag) / height_std**2)
 
 
 def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:
@@ -139,6 +163,7 @@ def ball_interception_exp(
     std_vel: float | None = None,
     command_name: str = "ball_throw",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    until_confirmed: bool = False,
 ) -> torch.Tensor:
     """Reward the hands for meeting the thrown ball (interim report, eq. 9.1).
 
@@ -146,6 +171,8 @@ def ball_interception_exp(
     two-arm catch is preferred over reaching with one hand), v the ball speed relative to the mean hand
     velocity. Returns exp(-d²/std_dist² - v²/std_vel²); without ``std_vel`` only the distance counts.
     Zero until the ball is launched, so the parked ball at the release point does not attract the hands.
+    With ``until_confirmed`` also zero after the catch is confirmed: then ``hold_quality`` alone says how well it is
+    held, and hands near the ball pay nothing by themselves.
     """
     command = env.command_manager.get_term(command_name)
     ball: RigidObject = command.ball
@@ -155,7 +182,42 @@ def ball_interception_exp(
     if std_vel is not None:
         hands_vel = robot.data.body_lin_vel_w[:, asset_cfg.body_ids].mean(dim=1)
         error += torch.sum(torch.square(ball.data.root_lin_vel_w - hands_vel), dim=-1) / std_vel**2
-    return torch.exp(-error) * command.launched.float()
+    active = command.launched & ~command.confirmed if until_confirmed else command.launched
+    return torch.exp(-error) * active.float()
+
+
+def hold_quality(env: ManagerBasedRLEnv, command_name: str = "ball_throw", posture: dict | None = None) -> torch.Tensor:
+    """How well the ball is held (``BallCommand.hold_quality``: both palms carry it, at the hold point, only allowed
+    contacts), times the posture factor :func:`posture_quality` with the parameters ``posture`` (if given).
+
+    Replaces the flat terms ``ball_arm_contact`` and ``ball_secured``, which paid the same for every hold inside loose
+    limits, so the policy picked the most robust one (wedged, clamped to the chest; Unified runs 1-5)."""
+    command = env.command_manager.get_term(command_name)
+    quality = command.hold_quality
+    if posture is not None:
+        quality = quality * posture_quality(env, **posture)
+    return quality
+
+
+def ball_body_contact(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
+    """1 while the launched ball touches a forbidden body part or presses on the torso above the limit
+    (``BallCommand.forbidden_contact``, ``contact_map``). Kept small: the lost hold reward is the main cost, so keeping
+    the ball always pays more than dropping it."""
+    command = env.command_manager.get_term(command_name)
+    return command.forbidden_contact.float()
+
+
+def self_contact(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float = 10.0) -> torch.Tensor:
+    """Share of the physics steps of this control step in which a filter body of the sensor presses on the sensor body
+    with more than ``threshold`` N (arms against the torso). The fifth Unified run pressed its arms against the torso
+    with more than 140 N to stiffen its grip; ``undesired_contacts`` excludes arms and torso and never saw it."""
+    sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    data = sensor.data
+    forces = data.force_matrix_w_history
+    if forces is None:
+        forces = data.force_matrix_w.unsqueeze(1)
+    pressing = (torch.norm(forces, dim=-1) > threshold).flatten(start_dim=2).any(dim=-1)  # (N, T)
+    return pressing.float().mean(dim=-1)
 
 
 def ball_arm_contact(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
@@ -165,15 +227,20 @@ def ball_arm_contact(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -
     return command.arm_contact.float().mean(dim=-1) * command.launched.float()
 
 
-def ball_caught_bonus(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
+def ball_caught_bonus(
+    env: ManagerBasedRLEnv, command_name: str = "ball_throw", posture: dict | None = None
+) -> torch.Tensor:
     """One-time bonus on the step the catch is confirmed (``secured_steps`` reaches ``secure_steps``).
 
     Fires exactly once per throw (``BallCommand.confirmed_now``), also if the secured streak breaks and restarts
-    during the hold phase. Note the reward manager multiplies by ``weight * dt`` — size the weight as
-    bonus_value / dt.
+    during the hold phase. With ``posture`` scaled by :func:`posture_quality` at that step. Note the reward manager
+    multiplies by ``weight * dt`` — size the weight as bonus_value / dt.
     """
     command = env.command_manager.get_term(command_name)
-    return command.confirmed_now.float()
+    bonus = command.confirmed_now.float()
+    if posture is not None:
+        bonus = bonus * posture_quality(env, **posture)
+    return bonus
 
 
 def ball_secured(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:

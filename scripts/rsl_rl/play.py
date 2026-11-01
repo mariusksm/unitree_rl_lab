@@ -136,7 +136,12 @@ def main():
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path)
+    if isinstance(runner, OnPolicyRunner):
+        # the actor only (all that play and the export need): checkpoints from before a change of the critic
+        # observations (2026-11-01: catch_phase) still load
+        runner.load(resume_path, load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": False})
+    else:
+        runner.load(resume_path)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)

@@ -38,21 +38,31 @@ import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
 from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # FOREARM_COLLIDERS, CONCAVE_PALMS
 
-from unitree_rl_lab.tasks.ball_catching.motion_data import TEMP_CLIP_LIFT, ball_file_for, catch_data
+from unitree_rl_lab.tasks.ball_catching.motion_data import (
+    G1_HOLD_POINT,
+    HOLD_ABOVE_PALMS,
+    TEMP_CLIP_LIFT,
+    ball_file_for,
+    catch_data,
+)
 
 # single source of truth for the reference clips (auto-discovered, see motion_data.py)
 from ..phase1.ball_catch_env_cfg import BALL_DATA_DIR, MOTION_FILES
 
-# Catch time, flight time and catch point per clip from its recording (numpy, a few seconds at import); in the
-# config, so that the motion command can cut the clips after the catch and params/env.yaml records what was used
-# The ball is aimed at the reference hands at the catch moment (wrist midpoint, raised so that the ball lands on the
-# hands), not at the recorded ball position: the recording is in the human's scale, the clip in the robot's, and at the
-# catch the clip's wrists are 0.21 m from the recorded ball (0.13 m below it). Aimed at the recorded point, the robot had
-# to leave the reference to catch and learned to clamp the ball against its upper chest and head (run of 2026-10-28).
-CATCH_ABOVE_HANDS = 0.08
+# the clip is cut this long after the recorded catch and that pose held: in 33 of 86 clips the person already puts the
+# ball down by the clip end, a reference that lets go of the ball does not go with the hold phase
+CATCH_SETTLE_S = 0.3
+
+# Catch time, flight time, catch point and hold point per clip from its recording (numpy, a few seconds at import); in
+# the config, so that the motion command can cut the clips after the catch and params/env.yaml records what was used.
+# Since 2026-11-01 the ball is aimed at the hold point of the reference: its palm midpoint at the catch moment, raised
+# by HOLD_ABOVE_PALMS (0.05 m), where it is also held (hold point, relative to the pelvis, CATCH_SETTLE_S after the
+# catch). Until then it was aimed at the wrist midpoint + 0.08 m, 0.08 m behind the palms at the heel of the hands
+# (median); before 2026-10-29 at the recorded ball position, which is in the human's scale while the clip is in the
+# robot's (the robot then clamped the ball against its upper chest and head, run of 2026-10-28).
 _RECORDED = [f for f in MOTION_FILES if ball_file_for(f, BALL_DATA_DIR)]
 _DATA = catch_data(  # TEMP_CLIP_LIFT: temporary height fix, as for the clips
-    _RECORDED, BALL_DATA_DIR, lift=TEMP_CLIP_LIFT, aim_above_hands=CATCH_ABOVE_HANDS
+    _RECORDED, BALL_DATA_DIR, lift=TEMP_CLIP_LIFT, aim_at_palms=HOLD_ABOVE_PALMS, hold_settle_s=CATCH_SETTLE_S
 )
 # Unified trains only on clips with a usable catch: without a ball the reference performs its catching motion into the
 # void, which an actor that sees only the ball cannot follow (58 % of the tracking terminations of the second run).
@@ -77,9 +87,6 @@ FALLBACK_CATCH_MOTION_TIME = 2.0
 # throw as in front of a real thrower; the 2026-10-27 Phase 2 baseline caught 28 % after 6-9 s of waiting)
 START_HOLD_S = 6.0
 START_HOLD_PROB = 0.35
-# the clip is cut this long after the recorded catch and that pose held: in 33 of 86 clips the person already puts the
-# ball down by the clip end, a reference that lets go of the ball does not go with the hold phase
-CATCH_SETTLE_S = 0.3
 HOLD_FROM_S = [d["catch_time"] + CATCH_SETTLE_S if d["valid"] else None for d in CATCH_DATA]
 # after the confirmed catch the robot keeps the ball this long before the throw counts as completed
 HOLD_AFTER_CATCH_S = 3.0
@@ -95,12 +102,45 @@ ARM_CONTACT_BODY_NAMES = [
     for side in ("left", "right")
     for link in ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
 ]
-# a ball squeezed against the torso harder than this (N) does not count as held (catch with the arms, not a chest clamp)
 TORSO_BODY_NAME = "torso_link"
-MAX_TORSO_FORCE = 50.0
 # held only in both palms from below (BallCommandCfg.palm_hold, since 2026-10-29): forearm, wrist or a squeeze between
 # them do not count (the third Unified run wedged the ball low between forearms, hands and belly)
 PALM_HOLD = True
+
+# ── what "held" means (since 2026-11-01; concept in H-ReACT/analysis/2026-11-01_festhalten_haltung/konzept.md, outside
+#    the repo): both palms carry the ball, where the reference holds it, and nothing else carries it. The fifth run met
+#    the old definition (catch box up to 0.5 m above the pelvis, torso force up to 50 N) by pressing the ball against
+#    chest and shoulder with 20 N, 0.06 m in front of and 0.38 m above the pelvis; the reference holds it 0.26 m in
+#    front of and 0.24 m above the pelvis in its palms. ──
+# the ball counts as held only within this distance (m) of the clip's hold point (curriculum: 0.25 m early on)
+HOLD_RADIUS = 0.15
+# contact map (BallCommandCfg.contact_map): while catching only the palms count and the torso may be touched with up to
+# 5 N; after the confirmation forearm, wrist and belly (up to 10 N) may support the ball as long as both palms carry it;
+# the upper arms, shoulders and a torso pressed with more than 10 N are forbidden
+FORBIDDEN_BODY_NAMES = [
+    f"{side}_{link}" for side in ("left", "right") for link in ("shoulder_pitch_link", "shoulder_yaw_link")
+]
+MAX_TORSO_FORCE_CATCHING = 5.0
+MAX_TORSO_FORCE_HOLDING = 10.0
+# arm links whose pressure on the torso is punished (reward self_contact, sensor arm_torso_contact): the fifth run
+# pressed its arms against the torso with more than 140 N to stiffen its grip
+ARM_SELF_CONTACT_BODY_NAMES = [
+    f"{side}_{link}"
+    for side in ("left", "right")
+    for link in ("shoulder_yaw_link", "elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
+]
+
+# ── correct posture: upright and at standing height (posture factor P, mdp.posture_quality). The height part is
+#    one-sided against the reference pelvis of the current frame: 3 cm lower are free (knees up to ~35-40°), deeper
+#    falls off with 5 cm (fifth run: 0.71 m while holding -> 0.43, 0.67 m while waiting -> 0.07). P is a reward of
+#    its own (`stand`) and multiplies the hold reward and the catch bonus, so a hold in a bad posture is worth little
+#    instead of costing a little: five runs traded posture for a more robust grip whenever posture was only added. ──
+POSTURE = {"tilt_std": 0.35, "height_tolerance": 0.03, "height_std": 0.05, "ref_command_name": "motion"}
+
+# ── pushes: full strength while waiting for the throw, this share of it from the launch to the end of the hold. A
+#    push changes the velocity of the whole robot, the free ball does not follow it, so full pushes rewarded clamping
+#    the ball against the chest. Unified learns the clean form; Phase 2 (stage B) is meant to ramp them up again. ──
+PUSH_BALL_PHASE_SCALE = 0.2
 
 VELOCITY_RANGE = {
     "x": (-0.5, 0.5),
@@ -143,12 +183,21 @@ class RobotSceneCfg(InteractiveSceneCfg):
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True
     )
-    # ball-arm contact for catch detection (ball = single sensor body, filtered against the arm links)
+    # ball contact for the catch check (ball = single sensor body, filtered against the arm links, the torso and the
+    # forbidden upper arms; the torso stays column 8, the evaluation reads it there)
     ball_contact = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
         filter_prim_paths_expr=[
-            f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES + [TORSO_BODY_NAME]
+            f"{{ENV_REGEX_NS}}/Robot/{name}"
+            for name in ARM_CONTACT_BODY_NAMES + [TORSO_BODY_NAME] + FORBIDDEN_BODY_NAMES
         ],
+        history_length=4,
+    )
+    # arms pressing on the torso (reward self_contact): torso = sensor body, filtered against the arm links; history =
+    # the physics steps of one control step
+    arm_torso_contact = ContactSensorCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{TORSO_BODY_NAME}",
+        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_SELF_CONTACT_BODY_NAMES],
         history_length=4,
     )
     # same ball as Phase 2 / the mjlab task (interim report ch. 9.2: ∅15 cm, 112 g)
@@ -227,8 +276,15 @@ class CommandsCfg:
         hand_body_names=HAND_BODY_NAMES,
         contact_sensor_name="ball_contact",
         torso_body_name=TORSO_BODY_NAME,
-        max_torso_force=MAX_TORSO_FORCE,
         palm_hold=PALM_HOLD,
+        # what "held" means (see above): hold point per clip from CATCH_DATA (the fixed one only in fixed mode)
+        hold_point=G1_HOLD_POINT,
+        hold_radius=HOLD_RADIUS,
+        hold_sigma=0.10,
+        contact_map=True,
+        forbidden_body_names=FORBIDDEN_BODY_NAMES,
+        max_torso_force_catching=MAX_TORSO_FORCE_CATCHING,
+        max_torso_force_holding=MAX_TORSO_FORCE_HOLDING,
         motion_command_name="motion",
         catch_data=CATCH_DATA,
         catch_motion_time=FALLBACK_CATCH_MOTION_TIME,
@@ -303,6 +359,8 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         actions = ObsTerm(func=mdp.last_action)
+        # -- phase of the throw (since 2026-11-01): the reward depends on it, the history cannot show it
+        catch_phase = ObsTerm(func=mdp.catch_phase, params={"command_name": "ball_throw"})
 
         def __post_init__(self):
             self.history_length = 5
@@ -380,23 +438,31 @@ class EventCfg:
         },
     )
 
-    # interval — gentler than the pure-mimic task: a push during ball flight makes
-    # the catch itself noisy training signal, but robustness still needs pushes
+    # interval — gentler than the pure-mimic task (every 2-5 s), and from the launch to the end of the hold only at
+    # PUSH_BALL_PHASE_SCALE of the strength (see there)
     push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
+        func=mdp.push_by_setting_velocity_phased,
         mode="interval",
         interval_range_s=(2.0, 5.0),
-        params={"velocity_range": VELOCITY_RANGE},
+        params={
+            "velocity_range": VELOCITY_RANGE,
+            "command_name": "ball_throw",
+            "ball_phase_scale": PUSH_BALL_PHASE_SCALE,
+        },
     )
 
 
 @configclass
 class RewardsCfg:
-    """Tracking rewards (the 'how') + catch rewards (the 'when/where') + regularization.
+    """Tracking rewards (the 'how') + catch rewards (the 'when/where') + posture + regularization.
 
-    No standing-posture crutches (base height / flat orientation / joint deviation):
-    the reference motion already defines posture, and crutches would fight the
-    crouch/lean/reach the catch needs.
+    Since 2026-11-01 (concept: H-ReACT/analysis/2026-11-01_festhalten_haltung/konzept.md, outside the repo):
+    - tracking keeps its full weight (no taper: the throws aim at the reference hands, nothing calls for leaving it);
+    - approach terms (reach, interception) only until the catch is confirmed;
+    - one graded hold reward instead of the flat contact and secured terms, times the posture factor P;
+    - P (`stand`: torso upright, pelvis at standing height) instead of `torso_upright`;
+    - small penalties for forbidden ball contacts and for arms pressing on the torso.
+    No other standing-posture crutches (joint deviation etc.): the reference defines the posture.
     """
 
     # -- motion tracking
@@ -430,8 +496,20 @@ class RewardsCfg:
         weight=1.0,
         params={"command_name": "motion", "std": 3.14},
     )
+    # the hands on their own (since 2026-11-01): in the mean over 14 bodies they barely count (the fifth run waited with
+    # its hands at its face for about 0.15 per step); the reference hands start moving only 0.34 s after the launch
+    # (median), when the robot sees the ball already, so they can be followed while waiting
+    motion_hand_pos = RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 0.10, "body_names": HAND_BODY_NAMES},
+    )
 
-    # -- ball catching (same terms as Phase 2; all zero before the launch)
+    # -- correct posture: torso upright, pelvis at standing height (P, see POSTURE). Replaces torso_upright (tilt only,
+    # since 2026-10-30), under which the fifth run kept its torso upright but sank into a squat (knees 69°)
+    stand = RewTerm(func=mdp.posture_quality, weight=5.0, params=POSTURE)
+
+    # -- ball catching (all zero before the launch). Approach until the confirmed catch, then the hold reward alone
     ball_reach = RewTerm(
         func=mdp.ball_interception_exp,
         weight=1.0,
@@ -439,6 +517,7 @@ class RewardsCfg:
             "command_name": "ball_throw",
             "asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES),
             "std_dist": 0.3,
+            "until_confirmed": True,
         },
     )
     ball_interception = RewTerm(
@@ -449,38 +528,36 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", body_names=HAND_BODY_NAMES),
             "std_dist": 0.2,
             "std_vel": 1.0,
+            "until_confirmed": True,
         },
     )
-    ball_arm_contact = RewTerm(
-        func=mdp.ball_arm_contact,
-        weight=3.0,
-        params={"command_name": "ball_throw"},
+    # how well the ball is held (both palms, at the clip's hold point, contact map; BallCommand.hold_quality) times P.
+    # Replaces ball_arm_contact (3) and ball_secured_hold (5), which paid the same for any hold inside loose limits
+    hold_quality = RewTerm(
+        func=mdp.hold_quality,
+        weight=8.0,
+        params={"command_name": "ball_throw", "posture": POSTURE},
     )
     catch_success = RewTerm(
         func=mdp.ball_caught_bonus,
-        weight=500.0,               # once per throw at the confirmation; effective value = weight * dt = 10
-        params={"command_name": "ball_throw"},
+        weight=500.0,               # once per throw at the confirmation, times P; effective value = weight * dt = 10
+        params={"command_name": "ball_throw", "posture": POSTURE},
     )
-    ball_secured_hold = RewTerm(
-        func=mdp.ball_secured,
-        weight=5.0,
-        params={"command_name": "ball_throw"},
-    )
+    # forbidden ball contacts (upper arm, shoulder, torso above 10 N): small on purpose, the lost hold reward is the
+    # main cost, so keeping the ball always pays more than dropping it (harsh penalties teach avoiding the ball)
+    ball_body_contact = RewTerm(func=mdp.ball_body_contact, weight=-1.0, params={"command_name": "ball_throw"})
     ball_height_penalty = RewTerm(
         func=mdp.ball_height_penalty,
         weight=-5.0,
         params={"ball_name": "ball", "min_height": 0.5},
     )
 
-    # -- posture: upright torso (since 2026-10-30). With the palm hold the fourth run leaned far back while holding
-    # (torso 30°, pelvis 35° backward; the reference leans back 9° and 14°): tracking the anchor orientation (0.5) is
-    # too weak against the ball terms. The term counts a lean in any direction; std 0.35 lets the reference's own
-    # lean pass (10° -> 0.78, 15° -> 0.58, 30° -> 0.13);
-    # weight as Phillip's `standing` (5, his hold reward is 5 as well)
-    torso_upright = RewTerm(
-        func=mdp.torso_upright_exp,
-        weight=5.0,
-        params={"std": 0.35, "asset_cfg": SceneEntityCfg("robot", body_names="torso_link")},
+    # -- arms free of the body: share of the physics steps with an arm pressing on the torso above 10 N (light touches
+    # of the reference, whose right upper arm overlaps the torso in 20 % of the frames, stay below)
+    self_contact = RewTerm(
+        func=mdp.self_contact,
+        weight=-5.0,
+        params={"sensor_cfg": SceneEntityCfg("arm_torso_contact"), "threshold": 10.0},
     )
 
     # -- regularization (mimic-task set)
@@ -572,10 +649,12 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    """Widen the throw distribution, then loosen the tracking leash so the policy
-    may deviate from the reference for off-nominal balls. Anchor tracking stays at
-    full weight (keeps the robot in place); only relative body tracking is tapered.
-    Steps are common_step_counter values (24 per iteration)."""
+    """Widen the throw distribution and narrow the hold radius. Steps are common_step_counter values (24 per
+    iteration).
+
+    No tracking taper since 2026-11-01: it loosened the body tracking to 40-50 % so that the policy could leave the
+    reference for off-nominal balls, but the throws aim at the reference hands since 2026-10-29, and the fifth run sank
+    into a squat once the body tracking weighed less than about 0.75 (iteration 11500 -> end)."""
 
     ball_throws = CurrTerm(
         func=mdp.ball_throw_curriculum,
@@ -591,11 +670,12 @@ class CurriculumCfg:
                 "apex_height_range": (1.85, 1.95),
                 "velocity_noise": 0.0,
                 "secure_steps": 25,
+                "hold_radius": 0.25,               # the stricter hold definition starts generous
                 "obs_delay_steps_range": (1, 1),
                 "obs_dropout_prob": 0.0,
                 "hide_in_catch_zone_prob": 0.0,
             },
-            "final": {  # = BallCommandCfg defaults
+            "final": {  # = BallCommandCfg defaults and CommandsCfg.ball_throw
                 "throw_distance_range": (2.0, 5.0),
                 "throw_direction_range": (-math.radians(75.0), math.radians(75.0)),
                 "target_lateral_range": (-0.1, 0.1),
@@ -603,51 +683,11 @@ class CurriculumCfg:
                 "apex_height_range": (1.75, 2.1),
                 "velocity_noise": 0.1,
                 "secure_steps": 50,
+                "hold_radius": HOLD_RADIUS,
                 "obs_delay_steps_range": (1, 5),
                 "obs_dropout_prob": 0.05,
                 "hide_in_catch_zone_prob": 0.5,
             },
-        },
-    )
-
-    body_pos_taper = CurrTerm(
-        func=mdp.modify_reward_weight_linear,
-        params={
-            "term_name": "motion_body_pos",
-            "start_weight": 1.0,
-            "end_weight": 0.4,
-            "start_step": 150_000,
-            "end_step": 500_000,
-        },
-    )
-    body_ori_taper = CurrTerm(
-        func=mdp.modify_reward_weight_linear,
-        params={
-            "term_name": "motion_body_ori",
-            "start_weight": 1.0,
-            "end_weight": 0.4,
-            "start_step": 150_000,
-            "end_step": 500_000,
-        },
-    )
-    body_lin_vel_taper = CurrTerm(
-        func=mdp.modify_reward_weight_linear,
-        params={
-            "term_name": "motion_body_lin_vel",
-            "start_weight": 1.0,
-            "end_weight": 0.5,
-            "start_step": 150_000,
-            "end_step": 500_000,
-        },
-    )
-    body_ang_vel_taper = CurrTerm(
-        func=mdp.modify_reward_weight_linear,
-        params={
-            "term_name": "motion_body_ang_vel",
-            "start_weight": 1.0,
-            "end_weight": 0.5,
-            "start_step": 150_000,
-            "end_step": 500_000,
         },
     )
 

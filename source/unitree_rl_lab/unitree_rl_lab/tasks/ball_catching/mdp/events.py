@@ -5,11 +5,37 @@ from typing import TYPE_CHECKING, Literal
 
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
-from isaaclab.envs.mdp.events import _randomize_prop_by_op
+from isaaclab.envs.mdp.events import _randomize_prop_by_op, push_by_setting_velocity
 from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
+
+def push_by_setting_velocity_phased(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    velocity_range: dict[str, tuple[float, float]],
+    command_name: str = "ball_throw",
+    ball_phase_scale: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """``push_by_setting_velocity`` with the velocity range scaled by ``ball_phase_scale`` once the ball is launched
+    (flight, catch and hold phase); full strength while waiting for the throw.
+
+    Unified (since 2026-11-01) pushes at 20 % in the ball phase: a push changes the velocity of the whole robot by up
+    to 0.5 m/s, the free ball does not follow, and a clean grip with two palms loses it, so the full pushes rewarded
+    clamping the ball against the chest. Phase 2 (stage B) is meant to ramp them up again with the clean grip defined.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device)
+    launched = env.command_manager.get_term(command_name).launched[env_ids]
+    waiting_ids, ball_ids = env_ids[~launched], env_ids[launched]
+    if len(waiting_ids) > 0:
+        push_by_setting_velocity(env, waiting_ids, velocity_range, asset_cfg)
+    if len(ball_ids) > 0 and ball_phase_scale > 0.0:
+        scaled = {key: (low * ball_phase_scale, high * ball_phase_scale) for key, (low, high) in velocity_range.items()}
+        push_by_setting_velocity(env, ball_ids, scaled, asset_cfg)
 
 
 def randomize_joint_default_pos(

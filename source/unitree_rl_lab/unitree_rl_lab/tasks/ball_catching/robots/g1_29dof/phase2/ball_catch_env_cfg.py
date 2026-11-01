@@ -18,6 +18,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
+from unitree_rl_lab.tasks.ball_catching.motion_data import G1_HOLD_POINT
 from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # FOREARM_COLLIDERS, CONCAVE_PALMS
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
@@ -30,12 +31,21 @@ ARM_CONTACT_BODY_NAMES = [
     for side in ("left", "right")
     for link in ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")
 ]
-# a ball squeezed against the torso harder than this (N) does not count as held (catch with the arms, not a chest clamp)
 TORSO_BODY_NAME = "torso_link"
-MAX_TORSO_FORCE = 50.0
 # held only in both palms from below (BallCommandCfg.palm_hold, since 2026-10-29): forearm, wrist or a squeeze between
 # them do not count (the third Unified run wedged the ball low between forearms, hands and belly)
 PALM_HOLD = True
+# What "held" means, as in Unified since 2026-11-01 (both palms, at the hold point, contact map; see the Unified config):
+# switched on here already so that Phase 2 environments (evaluation, the env.yaml of Sim2Sim) count catches the same
+# way. Without a reference the hold point is the median of the clips' hold points (motion_data.G1_HOLD_POINT) with a
+# larger radius: the clips' own hold points spread by 0.09 m around it (median; 90 % within 0.19 m). The rewards,
+# posture terms and pushes of Phase 2 are unchanged until Phase 2 itself is reworked.
+HOLD_RADIUS = 0.20
+FORBIDDEN_BODY_NAMES = [
+    f"{side}_{link}" for side in ("left", "right") for link in ("shoulder_pitch_link", "shoulder_yaw_link")
+]
+MAX_TORSO_FORCE_CATCHING = 5.0
+MAX_TORSO_FORCE_HOLDING = 10.0
 # aim point of the final throw distribution (root heading frame; height above the ground). A real thrower misses, so
 # since 2026-10-29 throws are aimed up to 0.3 m to the side (was 0.1 m; with the launch velocity noise 12 % then
 # arrive more than 0.3 m off the centre), a bit shorter or longer and up to chest height: what the arms can reach
@@ -85,7 +95,8 @@ class RobotSceneCfg(InteractiveSceneCfg):
     ball_contact = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
         filter_prim_paths_expr=[
-            f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_CONTACT_BODY_NAMES + [TORSO_BODY_NAME]
+            f"{{ENV_REGEX_NS}}/Robot/{name}"
+            for name in ARM_CONTACT_BODY_NAMES + [TORSO_BODY_NAME] + FORBIDDEN_BODY_NAMES
         ],
         history_length=4,
     )
@@ -243,8 +254,13 @@ class CommandsCfg:
         hand_body_names=HAND_BODY_NAMES,
         contact_sensor_name="ball_contact",
         torso_body_name=TORSO_BODY_NAME,
-        max_torso_force=MAX_TORSO_FORCE,
         palm_hold=PALM_HOLD,
+        hold_point=G1_HOLD_POINT,
+        hold_radius=HOLD_RADIUS,
+        contact_map=True,
+        forbidden_body_names=FORBIDDEN_BODY_NAMES,
+        max_torso_force_catching=MAX_TORSO_FORCE_CATCHING,
+        max_torso_force_holding=MAX_TORSO_FORCE_HOLDING,
         # wait as in front of a real thrower (final range, the curriculum starts at 0.5-1.5 s; the baseline trained on
         # 0.5-1.5 s caught 28 % after 6-9 s), then keep the ball (it walked off with it)
         throw_delay_range=(0.5, 8.0),
@@ -331,6 +347,8 @@ class ObservationsCfg:
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         last_action = ObsTerm(func=mdp.last_action)
+        # -- phase of the throw (since 2026-11-01, real here and in Unified, zeros in Phase 1)
+        catch_phase = ObsTerm(func=mdp.catch_phase, params={"command_name": "ball_throw"})
 
         def __post_init__(self):
             self.history_length = 5

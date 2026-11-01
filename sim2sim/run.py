@@ -6,7 +6,9 @@ heading frame (``ball.Throw``: release point, aim point, apex, drag; parameters 
 ``params/env.yaml``); the ball parked at the release point until the wait is over, then launched with the
 drag-compensated velocity, air drag as an external force every control step; the actor sees the ball through the
 VICON model (``ball.Perception``); the catch is checked as in Isaac (``ball.CatchState``: both arms or, with
-``palm_hold``, both palms from below, catch box, slow, torso force at most 50 N, 1 s secured, then the hold phase); an
+``palm_hold``, both palms from below, catch box, slow, torso force at most 50 N; since 2026-11-01 with ``contact_map``
+within ``hold_radius`` of the hold point and the contact rules of the phase instead of box and 50 N; 1 s secured, then
+the hold phase); an
 episode ends as with the Phase 2 terminations (catch completed, ball below 10 cm, ball 6 m away, pelvis below 0.2 m or
 tilted more than 0.8 rad, 20 s).
 
@@ -190,6 +192,8 @@ class Sim:
         self.torso = bid("torso_link")
         self.arm_side = {bid(f"{s}_{link}"): i for i, s in enumerate(("left", "right")) for link in ARM_LINKS}
         self.hands = [bid(f"{s}_wrist_yaw_link") for s in ("left", "right")]  # rubber hands (palm hold)
+        # bodies whose ball contact is forbidden (contact_map since 2026-11-01: upper arms, shoulders)
+        self.forbidden = {bid(name) for name in self.cmd_cfg.get("forbidden_body_names", []) or []}
         part_of = lambda names: np.array([i for i, j in enumerate(joints) if any(k in j for k in names)])  # noqa: E731
         self.arm_joints, self.leg_joints = part_of(("shoulder", "elbow", "wrist")), part_of(("hip", "knee", "ankle"))
         self.robot_geoms = [g for g in range(m.ngeom) if 0 < m.geom_bodyid[g] != self.ball_body and m.geom_contype[g]]
@@ -198,6 +202,7 @@ class Sim:
         self.clip = np.load(args.start_clip) if args.start_clip else None
         self.policy = None
         self.last_action = np.zeros(len(joints))
+        self.support_force, self.forbidden_force = 0.0, 0.0  # ball forces of the last control step
         self.renderer = self.writer = self.cam = None
 
     # ── state ──
@@ -258,28 +263,33 @@ class Sim:
             parts.append(np.concatenate(buf))  # oldest first, per term
         return np.concatenate(parts)
 
-    def ball_contacts(self) -> tuple[np.ndarray, np.ndarray, float]:
+    def ball_contacts(self) -> tuple[np.ndarray, np.ndarray, float, float, float]:
         """Force (N) between the ball and each arm (strongest link), each hand and the torso, as the ball_contact
-        sensor."""
+        sensor, and the strongest force on an arm link other than the hands (support) and on a forbidden body."""
         m, d = self.m, self.d
         per_body: dict[int, np.ndarray] = {}
         pairs = np.stack([d.contact.geom1, d.contact.geom2], axis=1)[: d.ncon]
         for i in np.nonzero((pairs == self.ball_geom).any(axis=1))[0]:
             body = m.geom_bodyid[pairs[i, 1] if pairs[i, 0] == self.ball_geom else pairs[i, 0]]
-            if body in self.arm_side or body == self.torso:
+            if body in self.arm_side or body == self.torso or body in self.forbidden:
                 f = np.zeros(6)
                 mujoco.mj_contactForce(m, d, i, f)
                 per_body[body] = per_body.get(body, 0.0) + d.contact.frame[i].reshape(3, 3).T @ f[:3]
-        arm, hand, torso_force = np.zeros(2), np.zeros(2), 0.0
+        arm, hand, torso_force, support, forbidden = np.zeros(2), np.zeros(2), 0.0, 0.0, 0.0
         for body, force in per_body.items():
+            magnitude = float(np.linalg.norm(force))
             if body == self.torso:
-                torso_force = float(np.linalg.norm(force))
+                torso_force = magnitude
+            elif body in self.forbidden:
+                forbidden = max(forbidden, magnitude)
             else:
                 side = self.arm_side[body]
-                arm[side] = max(arm[side], float(np.linalg.norm(force)))
+                arm[side] = max(arm[side], magnitude)
                 if body == self.hands[side]:
-                    hand[side] = float(np.linalg.norm(force))
-        return arm, hand, torso_force
+                    hand[side] = magnitude
+                else:
+                    support = max(support, magnitude)
+        return arm, hand, torso_force, support, forbidden
 
     def hand_poses(self) -> tuple[np.ndarray, np.ndarray]:
         """Position (2, 3) and rotation matrix (2, 3, 3) of the [left, right] hand body."""
@@ -296,15 +306,17 @@ class Sim:
         target = self.default + self.scale * action
         clamped = int(np.sum((target < self.lower) | (target > self.upper)))
         self.d.ctrl[self.acts] = np.clip(target, self.lower, self.upper)
-        arm_force, hand_force, torso_force = np.zeros(2), np.zeros(2), 0.0
+        arm_force, hand_force, torso_force, support_force, forbidden_force = np.zeros(2), np.zeros(2), 0.0, 0.0, 0.0
         for _ in range(DECIMATION):
             mujoco.mj_step(self.m, self.d)
-            arm, hand, tf = self.ball_contacts()
+            arm, hand, tf, support, forbidden = self.ball_contacts()
             arm_force, hand_force = np.maximum(arm_force, arm), np.maximum(hand_force, hand)
             torso_force = max(torso_force, tf)
+            support_force, forbidden_force = max(support_force, support), max(forbidden_force, forbidden)
         saturated = int(np.sum(np.abs(self.d.actuator_force[self.acts]) >= 0.99 * self.effort))
         change = float(np.abs(action - self.last_action).mean())
         self.last_action = action
+        self.support_force, self.forbidden_force = support_force, forbidden_force
         return arm_force, hand_force, torso_force, clamped, saturated, change
 
     # ── video ──
@@ -435,7 +447,7 @@ def throws(sim: Sim):
             hand_pos, hand_rot = sim.hand_poses()
             catch.update(
                 in_flight, ball_pos, ball_vel, d.qpos[:3], d.qpos[3:7], d.qvel[:3], arm_force, torso_force,
-                hand_force, hand_pos, hand_rot,
+                hand_force, hand_pos, hand_rot, sim.support_force, sim.forbidden_force,
             )
             if catch.confirmed and not was_confirmed:
                 confirm_t = time_since_throw

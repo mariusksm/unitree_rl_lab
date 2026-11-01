@@ -2,9 +2,13 @@
 
 Runs the task's play config (final throw distribution) with the deterministic policy and measures what the
 training statistics do not show: outcomes per episode, foot behavior (gliding vs. pivoting, drift of each stance,
-lift-offs, tilt of the feet in contact), posture while waiting and while holding, where the ball sits while held
-(incl. contact with the torso), joints at their limits and torque saturation, and whether confirmed catches last
-through the hold phase. Scenarios change the env config before the env is built:
+lift-offs, tilt of the feet in contact), posture while waiting and while holding (incl. the posture factor P of the
+reward and the pelvis height against the reference), where the ball sits while held (distance to the hold point,
+contact with the torso, forbidden and support contacts) and while it lies in both palms (whether or not it counts as
+held, to compare runs trained under other hold definitions), arms pressing on the torso, joints at their limits and
+torque saturation, and whether confirmed catches last through the hold phase. Only the actor of the checkpoint is
+loaded, so checkpoints from before a change of the critic observations still load. Scenarios change the env config
+before the env is built:
 
   base       play config as is
   fric_high  robot friction fixed to static 1.0 / dynamic 0.8 (rubber on a lab floor)
@@ -83,9 +87,18 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_apply_inve
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
 import unitree_rl_lab.tasks  # noqa: F401
+from unitree_rl_lab.tasks.ball_catching.mdp.rewards import posture_quality
 from unitree_rl_lab.utils.parser_cfg import parse_env_cfg
 
 SECURE_STEPS_FINAL = 50  # 1 s at 50 Hz: a hold this long counts as a confirmed catch
+# columns of the ball_contact sensor reported per link (label, filter body); the forbidden upper arms exist since
+# 2026-11-01
+BALL_CONTACT_LINKS = [
+    (f"{s[0].upper()}_{label}", f"{s}_{link}")
+    for s in ("left", "right")
+    for label, link in (("elbow", "elbow_link"), ("wroll", "wrist_roll_link"), ("wpitch", "wrist_pitch_link"),
+                        ("wyaw", "wrist_yaw_link"), ("shpitch", "shoulder_pitch_link"), ("shyaw", "shoulder_yaw_link"))
+]
 
 
 def apply_scenario(env_cfg, name: str):
@@ -160,6 +173,16 @@ class Stats:
         self.pelvis_c = self.cf.find_bodies("pelvis")[0]
         self.hand_b = r.find_bodies(["left_wrist_yaw_link", "right_wrist_yaw_link"], preserve_order=True)[0]
         self.elbow_b = r.find_bodies(["left_elbow_link", "right_elbow_link"], preserve_order=True)[0]
+        bc_names = [path.rsplit("/", 1)[-1] for path in self.bc.cfg.filter_prim_paths_expr]
+        self.bc_torso = bc_names.index("torso_link") if "torso_link" in bc_names else None
+        self.bc_links = [(label, bc_names.index(link)) for label, link in BALL_CONTACT_LINKS if link in bc_names]
+        self.atc = ue.scene.sensors.get("arm_torso_contact")  # arms pressing on the torso (since 2026-11-01)
+        self.motion = (
+            ue.command_manager.get_term("motion") if "motion" in ue.command_manager.active_terms else None
+        )
+        # posture factor P with the parameters of the task's `stand` reward (fixed reference height without one)
+        rm = ue.reward_manager
+        self.posture_params = dict(rm.get_term_cfg("stand").params) if "stand" in rm.active_terms else {}
         self.knee_j = r.find_joints(".*_knee_joint")[0]
         self.shroll_j = r.find_joints(["left_shoulder_roll_joint", "right_shoulder_roll_joint"], preserve_order=True)[0]
         self.arm_j = r.find_joints([".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"])[0]
@@ -283,11 +306,24 @@ class Stats:
         jp, jv = r.data.joint_pos, r.data.joint_vel
         da = (ue.action_manager.action - ue.action_manager.prev_action).abs().mean(dim=-1)
         sec = (cmd.secured_steps > 0) & valid
+        posture = posture_quality(ue, **self.posture_params)
+        ground = ue.scene.env_origins[:, 2]
+        if self.motion is not None:
+            ref_pelvis = self.motion.body_pos_w[:, self.motion.cfg.body_names.index("pelvis"), 2] - ground
+            below_ref = ref_pelvis - (r.data.root_pos_w[:, 2] - ground)
+        if self.atc is not None:
+            arm_torso = self.atc.data.force_matrix_w.norm(dim=-1).flatten(start_dim=1).sum(dim=-1)  # all arm links
         for tag, m in (("wait", ~launched & settled), ("held", sec)):
             k = int(m.sum())
             if k == 0:
                 continue
             cnt[f"n_{tag}"] += k
+            acc[f"posture_P_{tag}"] += float(posture[m].sum())
+            if self.motion is not None:
+                acc[f"pelvis_below_ref_m_{tag}"] += float(below_ref[m].sum())
+            if self.atc is not None:
+                acc[f"arm_torso_force_N_{tag}"] += float(arm_torso[m].sum())
+                cnt[f"arm_torso_over_10N_{tag}"] += int((arm_torso[m] > 10.0).sum())
             acc[f"pelvis_z_{tag}"] += float(r.data.root_pos_w[m, 2].sum())
             acc[f"pelvis_tilt_{tag}"] += float(tilt_deg(r.data.root_quat_w[m]).sum())
             acc[f"torso_tilt_{tag}"] += float(tilt_deg(r.data.body_quat_w[m][:, self.torso_b[0]]).sum())
@@ -326,11 +362,33 @@ class Stats:
             cnt["pelvis_contact"] += int((self.cf.data.net_forces_w[sec][:, self.pelvis_c[0]].norm(dim=-1) > 1.0).sum())
             acc["torso_force"] += float(torso_f.sum())
             fm = self.bc.data.force_matrix_w[sec].norm(dim=-1).amax(dim=1)
-            if fm.shape[1] > 8:  # torso column of ball_contact (since 2026-10-29): force between ball and torso only
-                acc["ball_torso_force"] += float(fm[:, 8].sum())
-                cnt["ball_torso_over_50"] += int((fm[:, 8] > 50.0).sum())
-            for j, nm in enumerate(["L_elbow", "L_wroll", "L_wpitch", "L_wyaw", "R_elbow", "R_wroll", "R_wpitch", "R_wyaw"]):
+            if self.bc_torso is not None:  # torso column of ball_contact (since 2026-10-29): ball against the torso only
+                acc["ball_torso_force"] += float(fm[:, self.bc_torso].sum())
+                cnt["ball_torso_over_50"] += int((fm[:, self.bc_torso] > 50.0).sum())
+            for nm, j in self.bc_links:
                 cnt[f"c_{nm}"] += int((fm[:, j] > 0.1).sum())
+            # hold definition of 2026-11-01 (BallCommand.contact_map): distance to the hold point, graded quality,
+            # forbidden and support contacts
+            acc["hold_distance"] += float(cmd.hold_distance[sec].sum())
+            acc["hold_quality"] += float(cmd.hold_quality[sec].sum())
+            cnt["held_forbidden"] += int(cmd.forbidden_contact[sec].sum())
+            cnt["held_support"] += int(cmd.support_contact[sec].sum())
+
+        # ---- where the ball sits while it lies in both palms (counted as held or not): compares runs trained under
+        #      different hold definitions (the fifth Unified run clamped it against the chest, which is not held now)
+        in_hands = launched & cmd.arm_contact.all(dim=-1) & valid
+        if in_hands.any():
+            cnt["hands"] += int(in_hands.sum())
+            b = quat_apply_inverse(yaw_quat(r.data.root_quat_w[in_hands]), cmd.ball.data.root_pos_w[in_hands]
+                                   - r.data.root_pos_w[in_hands])
+            for i, ax in enumerate("xyz"):
+                acc[f"hands_ball_{ax}"] += float(b[:, i].sum())
+            acc["hands_hold_distance"] += float(cmd.hold_distance[in_hands].sum())
+            cnt["hands_counted"] += int(sec[in_hands].sum())
+            cnt["hands_forbidden"] += int(cmd.forbidden_contact[in_hands].sum())
+            if self.bc_torso is not None:
+                fh = self.bc.data.force_matrix_w[in_hands].norm(dim=-1).amax(dim=1)
+                acc["hands_ball_torso_force"] += float(fh[:, self.bc_torso].sum())
 
         # ---- joint limits, target outside the range, tracking error, torques
         if valid.any():
@@ -404,10 +462,16 @@ class Stats:
             R["wait_time_s_median"] = round(float(torch.tensor(L["wait_time"]).median()), 2)
         for tag in ("wait", "held"):
             n = max(1, cnt[f"n_{tag}"])
-            R[f"posture_{tag}"] = {k: round(acc[f"{k}_{tag}"] / n, 3) for k in (
-                "pelvis_z", "pelvis_tilt", "torso_tilt", "pelvis_lean_fwd", "torso_lean_fwd", "knee_deg",
-                "shoulder_roll_abs_deg", "arm_joint_vel_rms",
-                "leg_joint_vel_rms", "action_change", "root_speed")}
+            keys = ["pelvis_z", "pelvis_tilt", "torso_tilt", "pelvis_lean_fwd", "torso_lean_fwd", "knee_deg",
+                    "shoulder_roll_abs_deg", "arm_joint_vel_rms", "leg_joint_vel_rms", "action_change", "root_speed",
+                    "posture_P"]
+            if self.motion is not None:
+                keys.append("pelvis_below_ref_m")
+            if self.atc is not None:
+                keys.append("arm_torso_force_N")
+            R[f"posture_{tag}"] = {k: round(acc[f"{k}_{tag}"] / n, 3) for k in keys}
+            if self.atc is not None:
+                R[f"posture_{tag}"]["pct_arm_torso_over_10N"] = round(100 * cnt[f"arm_torso_over_10N_{tag}"] / n, 1)
         s = max(1, cnt["sec"])
         R["held"] = {
             "steps": cnt["sec"],
@@ -424,6 +488,19 @@ class Stats:
             "ball_torso_force_N_mean": round(acc["ball_torso_force"] / s, 1),
             "pct_ball_torso_over_50N": round(100 * cnt["ball_torso_over_50"] / s, 1),
             "arm_link_contact_pct": {k[2:]: round(100 * v / s, 1) for k, v in cnt.items() if k.startswith("c_")},
+            "hold_distance_m_mean": round(acc["hold_distance"] / s, 3),
+            "hold_quality_mean": round(acc["hold_quality"] / s, 3),
+            "pct_forbidden_contact": round(100 * cnt["held_forbidden"] / s, 1),
+            "pct_support_contact": round(100 * cnt["held_support"] / s, 1),
+        }
+        h = max(1, cnt["hands"])
+        R["in_hands"] = {
+            "steps": cnt["hands"],
+            "ball_from_pelvis_xyz_m": [round(acc[f"hands_ball_{a}"] / h, 3) for a in "xyz"],
+            "hold_distance_m_mean": round(acc["hands_hold_distance"] / h, 3),
+            "ball_torso_force_N_mean": round(acc["hands_ball_torso_force"] / h, 1),
+            "pct_counted_as_held": round(100 * cnt["hands_counted"] / h, 1),
+            "pct_forbidden_contact": round(100 * cnt["hands_forbidden"] / h, 1),
         }
         vs = max(1, self.valid_steps)
         near, err, out, beyond = (x.cpu() / vs for x in (self.near_lim, self.trk_err, self.tgt_out, self.tgt_beyond))
@@ -467,6 +544,19 @@ def summary(R: dict) -> str:
         f"of the steps; joint targets beyond the hard limit: at most {R['target_beyond_hard_limit_max']['pct_time']} % "
         f"of the steps ({R['target_beyond_hard_limit_max']['joint']})",
     ]
+    lines.append(
+        f"[eval] hold definition: held {R['held']['steps']} steps, {R['held']['hold_distance_m_mean']} m from the hold "
+        f"point, quality {R['held']['hold_quality_mean']}, support contact {R['held']['pct_support_contact']} %; ball in "
+        f"both palms {R['in_hands']['steps']} steps at {R['in_hands']['ball_from_pelvis_xyz_m']} m from the pelvis, "
+        f"{R['in_hands']['hold_distance_m_mean']} m from the hold point, counted as held {R['in_hands']['pct_counted_as_held']} %"
+    )
+    lines.append(
+        f"[eval] posture P waiting / holding: {R['posture_wait']['posture_P']} / {R['posture_held']['posture_P']}, pelvis "
+        f"{R['posture_wait']['pelvis_z']} / {R['posture_held']['pelvis_z']} m, knees {R['posture_wait']['knee_deg']}° / "
+        f"{R['posture_held']['knee_deg']}°"
+        + (f", arms on the torso {R['posture_wait']['arm_torso_force_N']} / {R['posture_held']['arm_torso_force_N']} N"
+           if "arm_torso_force_N" in R["posture_wait"] else "")
+    )
     if "after_confirmation_pct" in R:
         lines.append(f"[eval] confirmed catches: {R['confirmed_pct']} % of the episodes; how they ended: "
                      f"{R['after_confirmation_pct']} (ball_caught = hold phase completed), held "
@@ -512,7 +602,8 @@ def main():
             steps = args_cli.video_length
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        runner.load(args_cli.checkpoint)
+        # the actor only: the critic's observations changed with the tasks (2026-11-01: catch_phase), the actor's did not
+        runner.load(args_cli.checkpoint, load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": False})
         policy = runner.get_inference_policy(device=env.unwrapped.device)
 
         with torch.inference_mode():

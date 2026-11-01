@@ -28,6 +28,16 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    from .rubber_hand import PALM_POINTS
+except ImportError:  # loaded by file path (numpy-only scripts): load the sibling module the same way
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location("rubber_hand", Path(__file__).with_name("rubber_hand.py"))
+    _rubber_hand = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_rubber_hand)
+    PALM_POINTS = _rubber_hand.PALM_POINTS
+
 REPO_ROOT = Path(__file__).resolve().parents[5]
 PHASE1_MOTION_DIR = Path(__file__).resolve().parent / "robots" / "g1_29dof" / "phase1" / "motions"
 
@@ -62,6 +72,17 @@ G1_JOINT_NAMES = [
     "right_wrist_pitch_joint", "left_wrist_yaw_joint", "right_wrist_yaw_joint",
 ]
 G1_HAND_BODY_INDEXES = [28, 29]  # left_wrist_yaw_link, right_wrist_yaw_link
+
+# ── Where the ball is held (since 2026-11-01) ─────────────────────────────────────────────────────────────────────
+# The hold point is the palm midpoint of the reference (rubber_hand.PALM_POINTS of both hands) plus this much upward:
+# the ball rests between the palms and above them. Unified throws at it (catch_data(aim_at_palms=...)) and holds the
+# ball there (SyncedBallCommand, one hold point per clip). The wrist midpoint + 0.08 m aimed at until then lies 0.07 m
+# behind the palms (median over the clips), at the heel of the hands.
+HOLD_ABOVE_PALMS = 0.05  # m
+# Fixed hold point for a task without a reference (Phase 2), relative to the pelvis in its yaw frame: median over the
+# 84 clips with a usable catch of their hold points (x 0.259, y 0.028, z 0.235 m, measured 2026-11-01), lateral on the
+# centre line. The clips' hold points spread by 0.09 m around it (median distance; 90 % within 0.19 m).
+G1_HOLD_POINT = (0.26, 0.0, 0.235)
 # clip body index and the human body point of the recording it is compared with (compare_with_human)
 G1_ARM_POINTS = {
     "left elbow": (22, "LeftForeArm"),
@@ -135,6 +156,33 @@ def _yaw_wxyz(q: np.ndarray) -> np.ndarray:
 def _rot_z(p: np.ndarray, angle: np.ndarray | float) -> np.ndarray:
     c, s = np.cos(angle), np.sin(angle)
     return np.stack([c * p[..., 0] - s * p[..., 1], s * p[..., 0] + c * p[..., 1], p[..., 2]], axis=-1)
+
+
+def _quat_apply(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Rotate ``v`` by the quaternions ``q`` (w, x, y, z), broadcast over the leading dimensions."""
+    w, u = q[..., :1], q[..., 1:]
+    t = 2.0 * np.cross(u, v)
+    return v + w * t + np.cross(u, t)
+
+
+def palm_midpoint(clip: np.lib.npyio.NpzFile, frame: int, hand_body_indexes: Sequence[int]) -> np.ndarray:
+    """Midpoint of the two palm centres (``rubber_hand.PALM_POINTS``) in a clip frame, in the clip's frame (m)."""
+    hands = list(hand_body_indexes)
+    pos = clip["body_pos_w"][frame, hands]
+    quat = clip["body_quat_w"][frame, hands]
+    return (pos + _quat_apply(quat, np.asarray(PALM_POINTS, dtype=np.float64))).mean(axis=0)
+
+
+def hold_point_b(
+    clip: np.lib.npyio.NpzFile, frame: int, hand_body_indexes: Sequence[int], above: float = HOLD_ABOVE_PALMS
+) -> list[float]:
+    """Hold point of a clip frame (palm midpoint raised by ``above``) relative to the pelvis, in the pelvis' yaw frame.
+
+    A height offset of the clips (``TEMP_CLIP_LIFT``) cancels out here: pelvis and palms are lifted alike.
+    """
+    point = palm_midpoint(clip, frame, hand_body_indexes) + np.array([0.0, 0.0, above])
+    pelvis = clip["body_pos_w"][frame, 0]
+    return [float(x) for x in _rot_z(point - pelvis, -_yaw_wxyz(clip["body_quat_w"][frame, 0]))]
 
 
 def align_recording(clip: np.lib.npyio.NpzFile, rec: np.lib.npyio.NpzFile, joint_names: Sequence[str]) -> dict | None:
@@ -216,7 +264,12 @@ def compare_with_human(
 
 
 def compute_catch_info(
-    clip_file: str, ball_file: str, joint_names: Sequence[str], hand_body_indexes: Sequence[int]
+    clip_file: str,
+    ball_file: str,
+    joint_names: Sequence[str],
+    hand_body_indexes: Sequence[int],
+    hold_settle_s: float = 0.0,
+    hold_above: float = HOLD_ABOVE_PALMS,
 ) -> dict:
     """Align a recording with its clip; return the catch moment and point in the clip's time and frame.
 
@@ -233,11 +286,15 @@ def compute_catch_info(
         ball_file: recording ``.npz`` of the same take.
         joint_names: joint names in the clip's (Isaac) order.
         hand_body_indexes: left and right hand body indices in the clip's body order.
+        hold_settle_s: the hold point is taken this long after the catch (where Unified starts holding the pose).
+        hold_above: height (m) of the hold point above the palm midpoint.
 
     Returns:
         Dict with ``valid``, ``reason`` and, when the alignment succeeded, ``catch_time`` / ``launch_time`` /
         ``flight_time`` (s into the clip), ``catch_point`` (clip frame, m), ``ball_hands_distance`` (m) and the
-        alignment diagnostics ``joint_rmse``, ``arm_rmse``, ``yaw_std_deg``, ``translation_std``, ``offset``.
+        alignment diagnostics ``joint_rmse``, ``arm_rmse``, ``yaw_std_deg``, ``translation_std``, ``offset``. If the
+        catch lies inside the clip also ``hands_point`` (wrist midpoint) and ``palm_point`` (palm midpoint) at the
+        catch, clip frame, and ``hold_point`` (:func:`hold_point_b`, relative to the pelvis in its yaw frame).
     """
     clip = np.load(clip_file)
     rec = np.load(ball_file)
@@ -291,6 +348,10 @@ def compute_catch_info(
         hands = clip["body_pos_w"][clip_catch_frame, list(hand_body_indexes)].mean(axis=0)
         info["ball_hands_distance"] = float(np.linalg.norm(catch_point - hands))
         info["hands_point"] = hands.tolist()
+        info["palm_point"] = palm_midpoint(clip, clip_catch_frame, hand_body_indexes).tolist()
+        # hold point in the frame where the held pose starts (Unified holds the pose hold_settle_s after the catch)
+        hold_frame = min(num_frames - 1, clip_catch_frame + int(round(hold_settle_s * fps)))
+        info["hold_point"] = hold_point_b(clip, hold_frame, hand_body_indexes, hold_above)
 
     reason = ""
     if best_rmse > MAX_JOINT_RMSE:
@@ -311,40 +372,63 @@ def compute_catch_info(
 
 
 def catch_data(
-    clip_files: Sequence[str], ball_dir: str | None, lift: float = 0.0, aim_above_hands: float | None = None
+    clip_files: Sequence[str],
+    ball_dir: str | None,
+    lift: float = 0.0,
+    aim_above_hands: float | None = None,
+    aim_at_palms: float | None = None,
+    hold_settle_s: float = 0.0,
+    hold_above: float = HOLD_ABOVE_PALMS,
 ) -> list[dict]:
     """What the Unified task needs per clip, from :func:`catch_infos` with the G1 asset constants.
 
-    Returns per clip ``valid``, ``reason`` and, for valid clips, ``catch_time`` and ``flight_time`` (s into the clip)
-    and ``catch_point`` (clip frame, m), as plain Python values for the env config. ``lift`` (m) is added to the catch
-    point height; it must equal the lift of the clips (``MotionCommandCfg.clip_lift``), the catch point lives in their
-    frame.
+    Returns per clip ``valid``, ``reason`` and, for valid clips, ``catch_time`` and ``flight_time`` (s into the clip),
+    ``catch_point`` (clip frame, m) and ``hold_point`` (m, relative to the reference pelvis in its yaw frame,
+    :func:`hold_point_b` ``hold_settle_s`` after the catch, where Unified starts holding the pose), as plain Python
+    values for the env config. ``lift`` (m) is added to the catch point height; it must equal the lift of the clips
+    (``MotionCommandCfg.clip_lift``), the catch point lives in their frame.
 
     By default the catch point is the recorded ball position at the catch. With ``aim_above_hands`` (m) it is instead
     the clip's wrist midpoint at the catch moment, raised by that much: the recording is in the human's scale, the clip
-    in the robot's, and at the catch the clip's wrists are about 0.21 m from the recorded ball (0.13 m below it).
+    in the robot's, and at the catch the clip's wrists are about 0.21 m from the recorded ball (0.13 m below it). With
+    ``aim_at_palms`` (m, wins over ``aim_above_hands``) it is the clip's palm midpoint at the catch moment raised by
+    that much, i.e. the hold point (since 2026-11-01: the ball arrives where it is held).
     """
     data = []
-    for info in catch_infos(clip_files, ball_dir, G1_JOINT_NAMES, G1_HAND_BODY_INDEXES):
+    infos = catch_infos(
+        clip_files, ball_dir, G1_JOINT_NAMES, G1_HAND_BODY_INDEXES, hold_settle_s=hold_settle_s, hold_above=hold_above
+    )
+    for info in infos:
         entry = {"valid": bool(info["valid"]), "reason": str(info["reason"])}
         if info["valid"]:
             entry.update(
                 catch_time=float(info["catch_time"]),
                 flight_time=float(info["flight_time"]),
-                catch_point=_catch_target(info, lift, aim_above_hands),
+                catch_point=_catch_target(info, lift, aim_above_hands, aim_at_palms),
+                hold_point=[float(x) for x in info["hold_point"]],
             )
         data.append(entry)
     return data
 
 
-def _catch_target(info: dict, lift: float, aim_above_hands: float | None) -> list[float]:
-    point = list(info["catch_point"]) if aim_above_hands is None else list(info["hands_point"])
-    point[2] += lift + (aim_above_hands or 0.0)
+def _catch_target(info: dict, lift: float, aim_above_hands: float | None, aim_at_palms: float | None) -> list[float]:
+    if aim_at_palms is not None:
+        point, above = list(info["palm_point"]), aim_at_palms
+    elif aim_above_hands is not None:
+        point, above = list(info["hands_point"]), aim_above_hands
+    else:
+        point, above = list(info["catch_point"]), 0.0
+    point[2] += lift + above
     return [float(x) for x in point]
 
 
 def catch_infos(
-    clip_files: Sequence[str], ball_dir: str | None, joint_names: Sequence[str], hand_body_indexes: Sequence[int]
+    clip_files: Sequence[str],
+    ball_dir: str | None,
+    joint_names: Sequence[str],
+    hand_body_indexes: Sequence[int],
+    hold_settle_s: float = 0.0,
+    hold_above: float = HOLD_ABOVE_PALMS,
 ) -> list[dict]:
     """:func:`compute_catch_info` for every clip; clips without a recording get ``valid=False``."""
     infos = []
@@ -353,5 +437,7 @@ def catch_infos(
         if ball_file is None:
             infos.append({"valid": False, "reason": "no ball recording"})
         else:
-            infos.append(compute_catch_info(clip_file, ball_file, joint_names, hand_body_indexes))
+            infos.append(
+                compute_catch_info(clip_file, ball_file, joint_names, hand_body_indexes, hold_settle_s, hold_above)
+            )
     return infos
