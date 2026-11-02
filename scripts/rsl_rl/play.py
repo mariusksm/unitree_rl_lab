@@ -39,7 +39,8 @@ args_cli = parser.parse_args()
 if args_cli.video:
     args_cli.enable_cameras = True
 
-# launch omniverse app
+# launch omniverse app (one tasking thread: random heap corruption while the scene is built, see cli_args)
+cli_args.add_setup_workaround(args_cli)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 

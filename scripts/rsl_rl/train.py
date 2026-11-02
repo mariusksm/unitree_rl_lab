@@ -57,7 +57,8 @@ if args_cli.video:
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 
-# launch omniverse app
+# launch omniverse app (one tasking thread: random heap corruption while the scene is built, see cli_args)
+cli_args.add_setup_workaround(args_cli)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 

@@ -12,6 +12,23 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg
 
+# Isaac Sim 5.1 (omni.physx 107.3) parses the cloned scene in parallel carb.tasking tasks when the simulation starts
+# (PhysX replicator). With the extra collider meshes of the ball tasks' robot (forearms, split rubber hands; not
+# instanced, unlike the G1's own colliders) a data race in that parse corrupts the heap: random aborts
+# ("malloc(): invalid size (unsorted)", "free(): invalid next size") or a hang with one core busy while the scene is
+# built. Measured on workstation 2 (2026-11-02): 6 of 39 starts failed with these colliders, 0 of 28 with the G1's own
+# and 0 of 29 with one tasking thread (24 by default), which removes the race; the scene build takes ~2 s longer, the
+# simulation steps are as fast. NVIDIA fixed the same kind of race in the parallel USD physics parsing in Isaac Sim 6.1
+# (OpenUSD PR #4002): drop this after an upgrade.
+SINGLE_TASKING_THREAD = "--/plugins/carb.tasking.plugin/threadCount=1"
+
+
+def add_setup_workaround(args_cli: argparse.Namespace):
+    """Append ``SINGLE_TASKING_THREAD`` to ``args_cli.kit_args`` (call before ``AppLauncher(args_cli)``)."""
+    kit_args = getattr(args_cli, "kit_args", None) or ""
+    if SINGLE_TASKING_THREAD not in kit_args:
+        args_cli.kit_args = f"{kit_args} {SINGLE_TASKING_THREAD}".strip()
+
 
 def add_rsl_rl_args(parser: argparse.ArgumentParser):
     """Add RSL-RL arguments to the parser.

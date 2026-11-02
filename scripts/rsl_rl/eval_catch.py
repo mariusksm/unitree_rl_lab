@@ -24,6 +24,12 @@ before the env is built:
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
 
+The play config throws the final distribution of the training curriculum. ``--curriculum_progress p`` uses the
+curriculum's values at progress p instead (0 = easy, 1 = final, linear as in training), so checkpoints of one run can
+be compared at the same difficulty: does a falling catch rate during training come from harder throws or from a
+worse policy? ``--hold_rules_progress q`` sets the hold rules alone (``secure_steps``, ``hold_radius``) to progress q,
+to tell the throws from the stricter hold definition.
+
     python scripts/rsl_rl/eval_catch.py --headless --task Unitree-G1-29dof-BallCatch-Phase2 \\
         --checkpoint /abs/path/model_29999.pt --scenario base --out eval/base
     # full-body video of one robot (on the workstations add the two extras below the example)
@@ -61,6 +67,10 @@ parser.add_argument("--eye", type=str, default="2.6,-2.6,1.3", help="Camera posi
 parser.add_argument("--lookat", type=str, default="0.0,0.0,0.55", help="Camera target relative to the robot root.")
 parser.add_argument("--no_push", action="store_true", default=False,
                     help="Switch off the training pushes (to tell the policy's own unsteadiness from the recovery).")
+parser.add_argument("--curriculum_progress", type=float, default=None,
+                    help="Throws and hold rules of the ball_throws curriculum at this progress (0 easy .. 1 final).")
+parser.add_argument("--hold_rules_progress", type=float, default=None,
+                    help="Hold rules alone (secure_steps, hold_radius) at this curriculum progress.")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -72,6 +82,7 @@ if "Unified" in args_cli.task and args_cli.scenario == "lateral":
           "clip (launch time and aim from the recording)", flush=True)
     sys.exit(2)
 
+cli_args.add_setup_workaround(args_cli)  # one tasking thread: random heap corruption while the scene is built
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -87,6 +98,7 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_apply_inve
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
 import unitree_rl_lab.tasks  # noqa: F401
+from unitree_rl_lab.tasks.ball_catching.mdp.curriculums import _lerp
 from unitree_rl_lab.tasks.ball_catching.mdp.rewards import posture_quality
 from unitree_rl_lab.utils.parser_cfg import parse_env_cfg
 
@@ -128,6 +140,31 @@ def apply_scenario(env_cfg, name: str):
     elif name == "delay":
         # the perception ring buffer is sized from this range, so it must be set before the env is built
         env_cfg.commands.ball_throw.obs_delay_steps_range = (4, 6)
+
+
+HOLD_RULE_KEYS = ("secure_steps", "hold_radius")
+
+
+def apply_curriculum_progress(env_cfg, progress: float | None, hold_rules_progress: float | None) -> dict:
+    """Set the ball command to the values of the training's ``ball_throws`` curriculum at ``progress`` (throws and
+    hold rules) and ``hold_rules_progress`` (hold rules only); None keeps the play config's final values. The play
+    config drops the curriculum, so its easy/final values come from the training config of the same task. Returns
+    the values set."""
+    if progress is None and hold_rules_progress is None:
+        return {}
+    train_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=1)
+    term = getattr(train_cfg.curriculum, "ball_throws", None) if train_cfg.curriculum is not None else None
+    if term is None:
+        raise ValueError(f"{args_cli.task} has no ball_throws curriculum")
+    easy, final = term.params["easy"], term.params["final"]
+    applied = {}
+    for key, easy_value in easy.items():
+        p = hold_rules_progress if key in HOLD_RULE_KEYS and hold_rules_progress is not None else progress
+        if p is None:
+            continue
+        applied[key] = _lerp(easy_value, final[key], min(max(p, 0.0), 1.0))
+        setattr(env_cfg.commands.ball_throw, key, applied[key])
+    return applied
 
 
 def wrap(a):
@@ -572,6 +609,10 @@ def main():
         entry_point_key="play_env_cfg_entry_point",
     )
     apply_scenario(env_cfg, args_cli.scenario)
+    curriculum = apply_curriculum_progress(env_cfg, args_cli.curriculum_progress, args_cli.hold_rules_progress)
+    if curriculum:
+        print(f"[eval] curriculum progress {args_cli.curriculum_progress} (hold rules {args_cli.hold_rules_progress}): "
+              f"{curriculum}", flush=True)
     if args_cli.no_push:
         env_cfg.events.push_robot = None
     if args_cli.video:
@@ -613,7 +654,9 @@ def main():
                 obs, _, _, _ = env.step(policy(obs))
                 stats.step()
             R = stats.report(args_cli.scenario)
-        R.update({"task": args_cli.task, "checkpoint": args_cli.checkpoint, "num_envs": args_cli.num_envs, "steps": steps})
+        R.update({"task": args_cli.task, "checkpoint": args_cli.checkpoint, "num_envs": args_cli.num_envs,
+                  "steps": steps, "curriculum_progress": args_cli.curriculum_progress,
+                  "hold_rules_progress": args_cli.hold_rules_progress, "curriculum_values": curriculum})
         os.makedirs(os.path.dirname(os.path.abspath(args_cli.out)), exist_ok=True)
         with open(args_cli.out + ".json", "w") as f:
             json.dump(R, f, indent=1)
