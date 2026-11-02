@@ -24,7 +24,12 @@ SINGLE_TASKING_THREAD = "--/plugins/carb.tasking.plugin/threadCount=1"
 
 
 def add_setup_workaround(args_cli: argparse.Namespace):
-    """Append ``SINGLE_TASKING_THREAD`` to ``args_cli.kit_args`` (call before ``AppLauncher(args_cli)``)."""
+    """Append ``SINGLE_TASKING_THREAD`` to ``args_cli.kit_args`` (call before ``AppLauncher(args_cli)``).
+
+    Skipped for a single robot: without clones the replicator does not run, and camera rendering (videos) also runs
+    on the tasking pool and becomes several times slower with one thread (2026-11-02)."""
+    if getattr(args_cli, "num_envs", None) == 1:
+        return
     kit_args = getattr(args_cli, "kit_args", None) or ""
     if SINGLE_TASKING_THREAD not in kit_args:
         args_cli.kit_args = f"{kit_args} {SINGLE_TASKING_THREAD}".strip()
