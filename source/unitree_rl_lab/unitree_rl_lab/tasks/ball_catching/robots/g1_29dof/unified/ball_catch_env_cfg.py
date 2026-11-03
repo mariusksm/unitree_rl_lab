@@ -10,8 +10,8 @@ pose before the throw (lead-in), the catch, then the catch pose held while the r
 keeps the ball (hold phase).
 
 The actor sees the ball and proprioception only (the reference is critic-only), so it
-must react to the ball as on the real robot. Its observations equal Phase 2's, which
-makes this task stage A of the mjlab recipe: fine-tune its actor in Phase 2 (stage B).
+must react to the ball as on the real robot. Its observations equal those of the Advanced
+tasks, which makes this task stage A: its actor is fine-tuned there (stage B, Advanced-A..E).
 """
 
 from __future__ import annotations
@@ -139,7 +139,7 @@ POSTURE = {"tilt_std": 0.35, "height_tolerance": 0.03, "height_std": 0.05, "ref_
 
 # ── pushes: full strength while waiting for the throw, this share of it from the launch to the end of the hold. A
 #    push changes the velocity of the whole robot, the free ball does not follow it, so full pushes rewarded clamping
-#    the ball against the chest. Unified learns the clean form; Phase 2 (stage B) is meant to ramp them up again. ──
+#    the ball against the chest. Unified learns the clean form; stage B (Advanced-D) ramps them up again. ──
 PUSH_BALL_PHASE_SCALE = 0.2
 
 VELOCITY_RANGE = {
@@ -200,7 +200,7 @@ class RobotSceneCfg(InteractiveSceneCfg):
         filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_SELF_CONTACT_BODY_NAMES],
         history_length=4,
     )
-    # same ball as Phase 2 / the mjlab task (interim report ch. 9.2: ∅15 cm, 112 g)
+    # same ball as the Advanced tasks / the mjlab task (interim report ch. 9.2: ∅15 cm, 112 g)
     ball = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
         spawn=sim_utils.SphereCfg(
@@ -306,14 +306,14 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """The actor gets only what the real robot has: the same terms as Phase 2 (actor contract), so this
-    task's actor can be fine-tuned in Phase 2 (stage A -> stage B). The reference motion goes to the critic
+    """The actor gets only what the real robot has: the same terms as the Advanced tasks (actor contract), so
+    this task's actor can be fine-tuned there (stage A -> stage B). The reference motion goes to the critic
     only; otherwise the policy could take the catch timing from the clip clock, which no human thrower
     follows. The critic keeps the slot layout shared by all three tasks."""
 
     @configclass
     class PolicyCfg(ObsGroup):
-        # -- ball as the robot perceives it via VICON (see Phase 2) --
+        # -- ball as the robot perceives it via VICON (BallCommand) --
         ball_state = ObsTerm(func=mdp.ball_perceived_pos_vel_b, params={"command_name": "ball_throw"})
         ball_visible = ObsTerm(func=mdp.ball_visible, params={"command_name": "ball_throw"})
         ball_intercept = ObsTerm(
@@ -572,7 +572,7 @@ class RewardsCfg:
     # targets beyond the joint limits change nothing since the clamp (ClampedJointPositionAction): keep them inside
     joint_target_excess = RewTerm(func=mdp.joint_target_excess, weight=-1.0)
     # tracking the feet's orientation alone let the left foot stand on its edge (17° in 84 % of the contact steps at
-    # iteration 7000 of the run of 2026-10-28); same term and weight as Phase 2
+    # iteration 7000 of the run of 2026-10-28); same term and weight as the Advanced tasks
     feet_flat = RewTerm(
         func=mdp.feet_flat,
         weight=-2.0,

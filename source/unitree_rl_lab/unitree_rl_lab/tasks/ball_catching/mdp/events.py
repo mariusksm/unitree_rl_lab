@@ -25,7 +25,7 @@ def push_by_setting_velocity_phased(
 
     Unified (since 2026-11-01) pushes at 20 % in the ball phase: a push changes the velocity of the whole robot by up
     to 0.5 m/s, the free ball does not follow, and a clean grip with two palms loses it, so the full pushes rewarded
-    clamping the ball against the chest. Phase 2 (stage B) is meant to ramp them up again with the clean grip defined.
+    clamping the ball against the chest. Stage B (Advanced-D) ramps them up again with the clean grip defined.
     """
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=env.device)

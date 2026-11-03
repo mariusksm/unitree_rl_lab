@@ -1,11 +1,11 @@
 """Ball against the arm in Isaac: how close does the ball come to the real arm surface?
 
-The robot hangs fixed at 1 m with stiff arms, upper arms 46 deg forward and forearms horizontal (clear of the upper
-arm above them). The ball of the ball tasks (Phase 2 scene: r 7.5 cm, 112 g, same material and simulation step) is
-dropped onto the forearm (elbow link), the wrist (wrist pitch link) and the hand of each arm: from 2 cm (impact
-≈ 0.6 m/s) and from 30 cm with 0, 2, 4 and 6 m/s start speed (impact ≈ 2.4-6.4 m/s). Every physics step the ball
-centre and the poses of the arm links are recorded; ``analyze_arm_contacts.py`` measures the distance to the visual
-meshes, i.e. the real surface. Run in the Isaac Lab environment:
+The robot hangs fixed at 1 m with stiff arms, upper arms 46 deg forward and forearms horizontal (clear of the upper arm
+above them). The ball of the ball tasks (Advanced scene, formerly Phase 2: r 7.5 cm, 112 g, same material and simulation
+step) is dropped onto the forearm (elbow link), the wrist (wrist pitch link) and the hand of each arm: from 2 cm (impact
+≈ 0.6 m/s) and from 30 cm with 0, 2, 4 and 6 m/s start speed (impact ≈ 2.4-6.4 m/s). Every physics step the ball centre
+and the poses of the arm links are recorded; ``analyze_arm_contacts.py`` measures the distance to the visual meshes,
+i.e. the real surface. Run in the Isaac Lab environment:
 
     python sim2sim/tools/probe_arm_contacts.py --headless [--ball_asset] --out probe.npz
 """
@@ -34,11 +34,11 @@ from isaaclab.utils.math import quat_apply  # noqa: E402
 
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG  # noqa: E402
 from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # noqa: E402
-from unitree_rl_lab.tasks.ball_catching.robots.g1_29dof.phase2.ball_catch_env_cfg import (  # noqa: E402
-    RobotSceneCfg as Phase2SceneCfg,
+from unitree_rl_lab.tasks.ball_catching.robots.g1_29dof.advanced.ball_catch_env_cfg import (  # noqa: E402
+    RobotSceneCfg as AdvancedSceneCfg,
 )
 
-PHASE2 = Phase2SceneCfg(num_envs=1, env_spacing=2.5)
+SCENE = AdvancedSceneCfg(num_envs=1, env_spacing=2.5)
 ROBOT = ROBOT_CFG if args_cli.ball_asset else UNITREE_G1_29DOF_MIMIC_CFG
 ARM_POSE = {  # every joint matched once: upper arms down, forearms forward, slightly apart
     ".*_hip_.*": 0.0,
@@ -62,18 +62,18 @@ STEPS = 100  # 0.5 s per test
 
 @configclass
 class ProbeSceneCfg(InteractiveSceneCfg):
-    terrain = PHASE2.terrain
+    terrain = SCENE.terrain
     robot = ROBOT.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         spawn=ROBOT.spawn.replace(articulation_props=ROBOT.spawn.articulation_props.replace(fix_root_link=True)),
         init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 1.0), joint_pos=ARM_POSE),
     )
-    ball = PHASE2.ball
+    ball = SCENE.ball
 
 
 def main():
     sim = sim_utils.SimulationContext(
-        sim_utils.SimulationCfg(dt=0.005, device=args_cli.device, physics_material=PHASE2.terrain.physics_material)
+        sim_utils.SimulationCfg(dt=0.005, device=args_cli.device, physics_material=SCENE.terrain.physics_material)
     )
     scene = InteractiveScene(ProbeSceneCfg(num_envs=1, env_spacing=2.5))
     sim.reset()
@@ -104,7 +104,7 @@ def main():
             )
             for height, speed in DROPS:
                 state = torch.zeros(1, 13, device=sim.device)
-                lift = ARM_TOP + PHASE2.ball.spawn.radius + height
+                lift = ARM_TOP + SCENE.ball.spawn.radius + height
                 state[0, :3] = point + torch.tensor([0.0, 0.0, lift], device=sim.device)
                 state[0, 3] = 1.0
                 state[0, 9] = -speed
@@ -133,7 +133,7 @@ def main():
         args_cli.out,
         **{k: np.array(v) for k, v in records.items()},
         links=np.array(LINKS),
-        radius=PHASE2.ball.spawn.radius,
+        radius=SCENE.ball.spawn.radius,
         forearm_colliders=bool(getattr(ROBOT.spawn, "forearm_colliders", False)),
     )
     print(f"[probe] {len(records['side'])} drops -> {args_cli.out}", flush=True)

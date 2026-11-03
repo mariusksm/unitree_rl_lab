@@ -1,4 +1,4 @@
-"""Evaluate a ball-catching checkpoint under one stress-test scenario (Phase 2 and Unified).
+"""Evaluate a ball-catching checkpoint under one stress-test scenario (Unified and the Advanced tasks).
 
 Runs the task's play config (final throw distribution) with the deterministic policy and measures what the
 training statistics do not show: outcomes per episode, foot behavior (gliding vs. pivoting, drift of each stance,
@@ -14,12 +14,12 @@ before the env is built:
   fric_high  robot friction fixed to static 1.0 / dynamic 0.8 (rubber on a lab floor)
   fric_low   robot friction fixed to static 0.4 / dynamic 0.3
   hold       no ball_caught termination, 12 s episodes: does the robot keep holding after the confirmation?
-             (Phase 2: throws after 0.5-1.5 s as until 2026-10-27, so ~9 s of holding; Unified: until its clip ends)
-  wait       throw after 6-9 s, as on the real robot (Phase 2 trains 0.5-8 s since 2026-10-28, 0.5-1.5 s before);
+             (Advanced: throws after 0.5-1.5 s, so ~9 s of holding; Unified: until its clip ends)
+  wait       throw after 6-9 s, as on the real robot (Advanced trains 0.5-8 s, log-uniform);
              Unified: every cycle starts at the beginning of its 6 s lead-in (throw after ~6.9 s)
   push       velocity pushes of ±0.5 m/s every 1-2 s
-  lateral    throws aimed ±0.45 m sideways, beyond the trained ±0.3 m           (Phase 2 only: Unified aims at the clip;
-             until 2026-10-29 ±0.3 m against a trained ±0.1 m)
+  lateral    throws aimed ±0.45 m sideways (Advanced only: Unified aims at the clip; Advanced-A trains -0.10 to
+             +0.17 m, the former Phase 2 trained ±0.3 m)
   delay      perception latency 4-6 control steps (training until 2026-10-27: 1-3, since then 1-5; kept for comparison)
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
@@ -30,7 +30,7 @@ be compared at the same difficulty: does a falling catch rate during training co
 worse policy? ``--hold_rules_progress q`` sets the hold rules alone (``secure_steps``, ``hold_radius``) to progress q,
 to tell the throws from the stricter hold definition.
 
-    python scripts/rsl_rl/eval_catch.py --headless --task Unitree-G1-29dof-BallCatch-Phase2 \\
+    python scripts/rsl_rl/eval_catch.py --headless --task Unitree-G1-29dof-BallCatch-Advanced-A \\
         --checkpoint /abs/path/model_29999.pt --scenario base --out eval/base
     # full-body video of one robot (on the workstations add the two extras below the example)
     python scripts/rsl_rl/eval_catch.py --headless --checkpoint /abs/path/model.pt --scenario hold --out eval/hold \\
@@ -56,7 +56,7 @@ import cli_args  # isort: skip
 SCENARIOS = ("base", "fric_high", "fric_low", "hold", "wait", "push", "lateral", "delay")
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-parser.add_argument("--task", type=str, default="Unitree-G1-29dof-BallCatch-Phase2")
+parser.add_argument("--task", type=str, default="Unitree-G1-29dof-BallCatch-Advanced-A")
 parser.add_argument("--num_envs", type=int, default=512)
 parser.add_argument("--steps", type=int, default=3000, help="Control steps (50 Hz) to simulate.")
 parser.add_argument("--scenario", type=str, default="base", choices=SCENARIOS)

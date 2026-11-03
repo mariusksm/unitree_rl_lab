@@ -79,7 +79,7 @@ G1_HAND_BODY_INDEXES = [28, 29]  # left_wrist_yaw_link, right_wrist_yaw_link
 # ball there (SyncedBallCommand, one hold point per clip). The wrist midpoint + 0.08 m aimed at until then lies 0.07 m
 # behind the palms (median over the clips), at the heel of the hands.
 HOLD_ABOVE_PALMS = 0.05  # m
-# Fixed hold point for a task without a reference (Phase 2), relative to the pelvis in its yaw frame: median over the
+# Fixed hold point for a task without a reference (Advanced), relative to the pelvis in its yaw frame: median over the
 # 84 clips with a usable catch of their hold points (x 0.259, y 0.028, z 0.235 m, measured 2026-11-01), lateral on the
 # centre line. The clips' hold points spread by 0.09 m around it (median distance; 90 % within 0.19 m).
 G1_HOLD_POINT = (0.26, 0.0, 0.235)

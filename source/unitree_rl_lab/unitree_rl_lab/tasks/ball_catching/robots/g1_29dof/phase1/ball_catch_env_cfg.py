@@ -158,7 +158,7 @@ class ObservationsCfg:
 
         Pure motion tracking (BeyondMimic): the actor needs the reference, because without a ball nothing
         else tells it where in the clip it is. This task therefore is a trackability check for new clips,
-        not a warm start: its actor input differs from the Phase 2 / Unified actor contract.
+        not a warm start: its actor input differs from the Unified / Advanced actor contract.
         """
 
         motion_command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"})
@@ -166,7 +166,7 @@ class ObservationsCfg:
         motion_anchor_ori_b = ObsTerm(
             func=mdp.motion_anchor_ori_b, params={"command_name": "motion"}, noise=Unoise(n_min=-0.05, n_max=0.05)
         )
-        # -- proprioception (same scales/noise as Phase 2 / Unified) --
+        # -- proprioception (same scales/noise as Unified / Advanced) --
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
@@ -174,7 +174,7 @@ class ObservationsCfg:
         last_action = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self):
-            self.history_length = 5         # same as Phase 2 / Unified
+            self.history_length = 5         # same as Unified / Advanced
             self.enable_corruption = True
             self.concatenate_terms = True
 
@@ -182,7 +182,7 @@ class ObservationsCfg:
     class PrivilegedCfg(ObsGroup):
         # (critic slot layout shared by all three tasks)
         command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"})
-        # -- ball placeholders (zero in Phase 1, real in Phase 2 / Unified) --
+        # -- ball placeholders (zero in Phase 1, real in Unified / Advanced) --
         ball_state = ObsTerm(func=mdp.dummy_zeros, params={"dim": 6})
         ball_visible = ObsTerm(func=mdp.dummy_zeros, params={"dim": 1})
         ball_relative = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
@@ -193,18 +193,18 @@ class ObservationsCfg:
         motion_anchor_ori_b = ObsTerm(func=mdp.motion_anchor_ori_b, params={"command_name": "motion"})
         body_pos = ObsTerm(func=mdp.robot_body_pos_b, params={"command_name": "motion"})
         body_ori = ObsTerm(func=mdp.robot_body_ori_b, params={"command_name": "motion"})
-        # -- proprioception (same scales as Phase 2 / Unified) --
+        # -- proprioception (same scales as Unified / Advanced) --
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         actions = ObsTerm(func=mdp.last_action)
-        # -- phase of the throw (zeros: no ball in Phase 1; real in Phase 2 and Unified)
+        # -- phase of the throw (zeros: no ball in Phase 1; real in Unified and Advanced)
         catch_phase = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
 
         def __post_init__(self):
-            self.history_length = 5         # same as Phase 2 / Unified
+            self.history_length = 5         # same as Unified / Advanced
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()

@@ -33,11 +33,11 @@ from isaaclab.utils.math import quat_apply  # noqa: E402
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG  # noqa: E402
 from unitree_rl_lab.tasks.ball_catching import rubber_hand  # noqa: E402
 from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # noqa: E402
-from unitree_rl_lab.tasks.ball_catching.robots.g1_29dof.phase2.ball_catch_env_cfg import (  # noqa: E402
-    RobotSceneCfg as Phase2SceneCfg,
+from unitree_rl_lab.tasks.ball_catching.robots.g1_29dof.advanced.ball_catch_env_cfg import (  # noqa: E402
+    RobotSceneCfg as AdvancedSceneCfg,
 )
 
-PHASE2 = Phase2SceneCfg(num_envs=1, env_spacing=2.5)
+SCENE = AdvancedSceneCfg(num_envs=1, env_spacing=2.5)
 ROBOT = ROBOT_CFG if args_cli.ball_asset else UNITREE_G1_29DOF_MIMIC_CFG
 ARM_POSE = {  # every joint matched once: upper arms forward, forearms horizontal, palms up
     ".*_hip_.*": 0.0,
@@ -60,22 +60,22 @@ STEPS = 40  # 0.2 s per placement
 
 @configclass
 class ProbeSceneCfg(InteractiveSceneCfg):
-    terrain = PHASE2.terrain
+    terrain = SCENE.terrain
     robot = ROBOT.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         spawn=ROBOT.spawn.replace(articulation_props=ROBOT.spawn.articulation_props.replace(fix_root_link=True)),
         init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, 1.0), joint_pos=ARM_POSE),
     )
-    ball = PHASE2.ball.replace(
-        spawn=PHASE2.ball.spawn.replace(
-            rigid_props=PHASE2.ball.spawn.rigid_props.replace(disable_gravity=True)
+    ball = SCENE.ball.replace(
+        spawn=SCENE.ball.spawn.replace(
+            rigid_props=SCENE.ball.spawn.rigid_props.replace(disable_gravity=True)
         )
     )
 
 
 def main():
     sim = sim_utils.SimulationContext(
-        sim_utils.SimulationCfg(dt=0.005, device=args_cli.device, physics_material=PHASE2.terrain.physics_material)
+        sim_utils.SimulationCfg(dt=0.005, device=args_cli.device, physics_material=SCENE.terrain.physics_material)
     )
     scene = InteractiveScene(ProbeSceneCfg(num_envs=1, env_spacing=2.5))
     sim.reset()

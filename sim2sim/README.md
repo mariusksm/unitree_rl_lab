@@ -33,7 +33,7 @@ python sim2sim/tools/export_onnx.py /abs/path/model_3000.pt --out policy
     [--easy] [--ball_dampratio 0.7] [--video throws.mp4 --video_throws 6]
 ```
 
-Episodes as in Phase 2: throw sampled from `commands.ball_throw` of the run's `env.yaml` (`ball.Throw`), parked until the wait (`--wait`, log-uniform 0.5–8 s) is over, launched with the drag-compensated velocity, air drag every control step, VICON model, catch check (`ball.CatchState`) and the Phase 2 terminations. MuJoCo's contacts spring at every speed while PhysX's restitution only acts above its bounce threshold; with a damping ratio that matches Isaac's free bounce (0.4) a ball wedged between forearms and belly is shot out, so the default is 0.7 (drop bounce e = 0.14, `--drop_test`). 2026-10-29 with `model_4500.pt` of the third Unified run: 23 % caught (Isaac 44 %).
+Episodes as in the Advanced tasks (formerly Phase 2): throw sampled from `commands.ball_throw` of the run's `env.yaml` (`ball.Throw`), parked until the wait (`--wait`, log-uniform 0.5–8 s) is over, launched with the drag-compensated velocity, air drag every control step, VICON model, catch check (`ball.CatchState`) and the Phase 2 terminations. MuJoCo's contacts spring at every speed while PhysX's restitution only acts above its bounce threshold; with a damping ratio that matches Isaac's free bounce (0.4) a ball wedged between forearms and belly is shot out, so the default is 0.7 (drop bounce e = 0.14, `--drop_test`). 2026-10-29 with `model_4500.pt` of the third Unified run: 23 % caught (Isaac 44 %).
 
 ## Ball observations
 

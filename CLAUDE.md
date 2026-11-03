@@ -33,9 +33,10 @@ Not substantial: pure formatting, typos, comments.
 
 ## Key invariants (details in the spec)
 
-- The actor observations of Phase 2 and Unified must stay identical (Unified's actor is fine-tuned in Phase 2) and
-  contain only what the real robot has: no motion reference, no hand positions, the ball only as perceived through
-  the VICON model of `BallCommand`. The critic slot layout is shared by all three tasks. Phase 1's actor is separate.
+- The actor observations of the Advanced tasks and Unified must stay identical (Unified's actor is fine-tuned in the
+  Advanced chain A → E, each stage from the previous one's checkpoint) and contain only what the real robot has: no
+  motion reference, no hand positions, the ball only as perceived through the VICON model of `BallCommand`. The critic
+  slot layout is shared by all ball tasks. Phase 1's actor is separate.
 - Ball and hand observations are in the robot's yaw frame, never in world coordinates.
 - The action scale is `UNITREE_G1_29DOF_MIMIC_ACTION_SCALE` everywhere.
 
@@ -43,4 +44,4 @@ Not substantial: pure formatting, typos, comments.
 
 - Python: `/home/marius/miniconda3/envs/env_isaaclab_downgrade/bin/python`
 - Train: `./unitree_rl_lab.sh -t --task <Task>` · Play: `-p` · List: `-l`
-- Evaluate a checkpoint (stress tests, Phase 2 / Unified): `scripts/rsl_rl/eval_catch_all.sh <Task> <abs/path/model.pt> <out_dir>`
+- Evaluate a checkpoint (stress tests, Advanced / Unified): `scripts/rsl_rl/eval_catch_all.sh <Task> <abs/path/model.pt> <out_dir>`

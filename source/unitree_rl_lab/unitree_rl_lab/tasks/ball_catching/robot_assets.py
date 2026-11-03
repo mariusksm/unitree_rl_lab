@@ -30,7 +30,7 @@ from isaaclab.utils import configclass
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_CFG, UnitreeUsdFileCfg
 from unitree_rl_lab.tasks.ball_catching import rubber_hand
 
-# Switches for all three ball tasks (the Unified actor is fine-tuned in Phase 2, so they share the robot)
+# Switches for all three ball tasks (the Unified actor is fine-tuned in the Advanced tasks, so they share the robot)
 FOREARM_COLLIDERS = True
 CONCAVE_PALMS = True
 

@@ -1,16 +1,15 @@
 """Run a ball-catching policy trained in Isaac Lab in MuJoCo (Sim2Sim).
 
-Without ``--throws`` the robot only stands (step 2 of the plan in spec Section 11, item 9). With ``--throws N`` it
-plays N episodes the way Phase 2 does in Isaac (step 4): reset to the start pose; a throw sampled in the robot's
+Without ``--throws`` the robot only stands (step 2 of the plan in spec Section 11, item 9). With ``--throws N`` it plays
+N episodes the way the Advanced tasks do in Isaac (step 4): reset to the start pose; a throw sampled in the robot's
 heading frame (``ball.Throw``: release point, aim point, apex, drag; parameters of ``commands.ball_throw`` in the run's
 ``params/env.yaml``); the ball parked at the release point until the wait is over, then launched with the
-drag-compensated velocity, air drag as an external force every control step; the actor sees the ball through the
-VICON model (``ball.Perception``); the catch is checked as in Isaac (``ball.CatchState``: both arms or, with
-``palm_hold``, both palms from below, catch box, slow, torso force at most 50 N; since 2026-11-01 with ``contact_map``
-within ``hold_radius`` of the hold point and the contact rules of the phase instead of box and 50 N; 1 s secured, then
-the hold phase); an
-episode ends as with the Phase 2 terminations (catch completed, ball below 10 cm, ball 6 m away, pelvis below 0.2 m or
-tilted more than 0.8 rad, 20 s).
+drag-compensated velocity, air drag as an external force every control step; the actor sees the ball through the VICON
+model (``ball.Perception``); the catch is checked as in Isaac (``ball.CatchState``: both arms or, with ``palm_hold``,
+both palms from below, catch box, slow, torso force at most 50 N; since 2026-11-01 with ``contact_map`` within
+``hold_radius`` of the hold point and the contact rules of the phase instead of box and 50 N; 1 s secured, then the hold
+phase); an episode ends as with the Advanced terminations (catch completed, ball below 10 cm, ball 6 m away, pelvis
+below 0.2 m or tilted more than 0.8 rad, 20 s).
 
 - Robot: ``model.py`` (``g1.xml`` with the collision shapes of the Isaac asset from the dump), the armature of the
   Isaac asset per joint, no passive damping or friction, position actuators with the Isaac drive gains and effort
@@ -45,7 +44,7 @@ parser.add_argument("--isaac", required=True, help="JSON of tools/dump_isaac_mod
 parser.add_argument("--mjcf_dir", default=os.path.expanduser("~/unitree_mjcf/g1"))
 parser.add_argument("--seconds", type=float, default=30.0, help="Length of the standing test (without --throws).")
 parser.add_argument("--throws", type=int, default=0, help="Number of throw episodes.")
-parser.add_argument("--wait", type=str, default="0.5,8", help="Wait before the throw, min,max s (Phase 2: 0.5,8).")
+parser.add_argument("--wait", type=str, default="0.5,8", help="Wait before the throw, min,max s (Advanced: 0.5,8).")
 parser.add_argument("--uniform_wait", action="store_true", help="Uniform instead of log-uniform wait.")
 parser.add_argument("--ball_dampratio", type=float, default=0.7, help="Ball contact damping ratio (0.7: e = 0.14).")
 parser.add_argument("--start_clip", default=None, help="Start in frame 0 of this clip instead of the default pose.")
@@ -339,7 +338,7 @@ class Sim:
             self.writer.append_data(self.renderer.render())
 
 
-EASY = {  # easy stage of the ball_throws curriculum (Phase 2 and Unified)
+EASY = {  # easy stage of the ball_throws curriculum (Unified, former Phase 2)
     "throw_distance_range": (2.0, 2.5), "throw_direction_range": (-0.2618, 0.2618),
     "target_lateral_range": (-0.03, 0.03),
     "target_height_range": (0.85, 0.95), "apex_height_range": (1.85, 1.95), "velocity_noise": 0.0, "secure_steps": 25,
@@ -396,7 +395,7 @@ def stand(sim: Sim):
 
 
 def throws(sim: Sim):
-    """``--throws`` episodes with the Phase 2 lifecycle (see the module docstring)."""
+    """``--throws`` episodes with the Advanced lifecycle (see the module docstring)."""
     d, rng = sim.d, np.random.default_rng(args.seed)
     perception, catch = Perception(sim.cmd_cfg, STEP_DT, rng), CatchState(sim.cmd_cfg, STEP_DT)
     wait = tuple(float(x) for x in args.wait.split(","))

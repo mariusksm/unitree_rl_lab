@@ -3,7 +3,7 @@
 # comparison table. Run it from the repository root in the Isaac Lab environment.
 #
 #   scripts/rsl_rl/eval_catch_all.sh <task> <checkpoint.pt> <out_dir> [more eval_catch.py arguments]
-#   scripts/rsl_rl/eval_catch_all.sh Unitree-G1-29dof-BallCatch-Phase2 logs/rsl_rl/<exp>/<run>/model_29999.pt eval/run1
+#   scripts/rsl_rl/eval_catch_all.sh Unitree-G1-29dof-BallCatch-Advanced-A logs/rsl_rl/<exp>/<run>/model_<N>.pt eval/a
 #
 # Takes about 4 minutes per scenario with the defaults (512 robots, 60 s).
 set -u

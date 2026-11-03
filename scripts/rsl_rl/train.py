@@ -167,7 +167,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        # the checkpoint may come from another experiment (e.g. Phase 1 -> Phase 2) without
+        # the checkpoint may come from another experiment (e.g. Unified -> Advanced) without
         # redirecting this run's logs into that experiment's folder
         resume_root_path = log_root_path
         if args_cli.resume_experiment is not None:

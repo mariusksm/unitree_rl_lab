@@ -1,9 +1,9 @@
 """Record the actor's ball terms in Isaac together with the true states they come from (for check_ball_obs.py).
 
-Phase 2 env (the perception code is shared with Unified), zero actions, the final throw distribution without the
-curriculum, throws after 0.5-1.5 s. Unless ``--random``, the VICON model is made deterministic so that the numpy port
-must reproduce it exactly: fixed latency (3 steps) and detection delay (70 ms), no noise, bias or dropouts, and the
-ball hidden in the catch box on every throw, so that coasting and losing the ball happen. Run in the Isaac Lab
+Advanced-A env (formerly Phase 2; the perception code is shared with Unified), zero actions, its throw distribution
+without a curriculum, throws after 0.5-1.5 s. Unless ``--random``, the VICON model is made deterministic so that the
+numpy port must reproduce it exactly: fixed latency (3 steps) and detection delay (70 ms), no noise, bias or dropouts,
+and the ball hidden in the catch box on every throw, so that coasting and losing the ball happen. Run in the Isaac Lab
 environment:
 
     python sim2sim/tools/record_ball_obs.py --headless --num_envs 16 --steps 1000 --out ball_obs.npz
@@ -33,7 +33,7 @@ import torch  # noqa: E402
 import unitree_rl_lab.tasks  # noqa: E402,F401
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 
-TASK = "Unitree-G1-29dof-BallCatch-Phase2"
+TASK = "Unitree-G1-29dof-BallCatch-Advanced-A"
 DETERMINISTIC = {
     "obs_delay_steps_range": (3, 3),
     "detection_delay_range": (0.07, 0.07),  # not a multiple of the 20 ms step: no float32/float64 tie
@@ -53,7 +53,8 @@ BALL_TERMS = ("ball_state", "ball_visible", "ball_intercept")
 
 def main():
     cfg = parse_env_cfg(TASK, num_envs=args_cli.num_envs)
-    cfg.curriculum.ball_throws = None  # keep the command cfg (= final throw distribution)
+    if cfg.curriculum is not None:  # keep the command cfg (= final throw distribution)
+        cfg.curriculum.ball_throws = None
     cfg.events.push_robot = None
     cfg.observations.policy.enable_corruption = False
     cmd = cfg.commands.ball_throw
