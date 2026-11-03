@@ -189,6 +189,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
+    # AnchoredPPO with per-joint anchor weights needs the joints of the action dimensions, in order
+    if getattr(agent_cfg.algorithm, "anchor_joint_weights", None):
+        am = env.unwrapped.action_manager
+        agent_cfg.algorithm.anchor_joint_names = [n for t in am.active_terms for n in am.get_term(t)._joint_names]
+
     # create runner from rsl-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     # write git state to logs

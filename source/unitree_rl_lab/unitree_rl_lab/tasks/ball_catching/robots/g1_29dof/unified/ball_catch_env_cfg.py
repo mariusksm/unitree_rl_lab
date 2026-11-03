@@ -36,7 +36,16 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
-from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # FOREARM_COLLIDERS, CONCAVE_PALMS
+from unitree_rl_lab.tasks.ball_catching.robot_assets import (  # FOREARM_COLLIDERS, CONCAVE_PALMS
+    ARM_JOINT_NAMES,
+    ARM_TORQUE_THRESHOLD,
+    ARM_TORQUE_WEIGHT,
+    HAND_CONTACT_THRESHOLD,
+    HAND_CONTACT_WEIGHT,
+    OTHER_ARM_LINKS,
+    ROBOT_CFG,
+    hand_contact_sensor,
+)
 
 from unitree_rl_lab.tasks.ball_catching.motion_data import (
     G1_HOLD_POINT,
@@ -200,6 +209,10 @@ class RobotSceneCfg(InteractiveSceneCfg):
         filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{name}" for name in ARM_SELF_CONTACT_BODY_NAMES],
         history_length=4,
     )
+    # a hand pressing on the other hand or forearm (rewards hand_contact_*, since 2026-11-03; the hand-hand contact is
+    # counted once)
+    hand_contact_left = hand_contact_sensor("left", "right", OTHER_ARM_LINKS)
+    hand_contact_right = hand_contact_sensor("right", "left", OTHER_ARM_LINKS[1:])
     # same ball as the Advanced tasks / the mjlab task (interim report ch. 9.2: ∅15 cm, 112 g)
     ball = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
@@ -558,6 +571,24 @@ class RewardsCfg:
         func=mdp.self_contact,
         weight=-5.0,
         params={"sensor_cfg": SceneEntityCfg("arm_torso_contact"), "threshold": 10.0},
+    )
+    # -- joint load (since 2026-11-03, for the next run): Advanced-A, fine-tuned from the sixth run, pressed its hands
+    # against each other with 20-30 N and drove the left wrist yaw (5 Nm) to its torque limit; the sixth run did the
+    # same to a lesser degree. A hand pressing on the other arm above 5 N and arm torques above 60 % of the limit cost.
+    hand_contact_left = RewTerm(
+        func=mdp.self_contact,
+        weight=HAND_CONTACT_WEIGHT,
+        params={"sensor_cfg": SceneEntityCfg("hand_contact_left"), "threshold": HAND_CONTACT_THRESHOLD},
+    )
+    hand_contact_right = RewTerm(
+        func=mdp.self_contact,
+        weight=HAND_CONTACT_WEIGHT,
+        params={"sensor_cfg": SceneEntityCfg("hand_contact_right"), "threshold": HAND_CONTACT_THRESHOLD},
+    )
+    arm_torque_limit = RewTerm(
+        func=mdp.torque_limit_excess,
+        weight=ARM_TORQUE_WEIGHT,
+        params={"threshold": ARM_TORQUE_THRESHOLD, "asset_cfg": SceneEntityCfg("robot", joint_names=ARM_JOINT_NAMES)},
     )
 
     # -- regularization (mimic-task set)

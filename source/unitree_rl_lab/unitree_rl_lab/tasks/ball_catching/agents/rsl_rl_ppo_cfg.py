@@ -59,8 +59,36 @@ class AnchoredPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     anchor_kl_final_coef: float = 0.0
     anchor_kl_decay_iterations: int = 0
     """Iterations after the critic warm-up over which the anchor weight falls linearly to its final value."""
+    anchor_joint_weights: dict[str, float] | None = None
+    """Per-joint weights of the anchor KL (joint-name regex -> weight, first match wins, other joints 1). None: plain
+    KL over all action dimensions."""
+    anchor_joint_names: list[str] | None = None
+    """Joints of the action dimensions in order; filled in by train.py from the action term."""
     max_std: float | None = None
     """Upper bound of the action std, applied after every update."""
+
+
+ADVANCED_PPO = dict(
+    value_loss_coef=1.0,
+    use_clipped_value_loss=True,
+    clip_param=0.2,
+    entropy_coef=0.0,
+    num_learning_epochs=5,
+    num_mini_batches=4,
+    learning_rate=1.0e-3,  # critic
+    schedule="adaptive",  # actor: KL guard only, never above actor_learning_rate
+    gamma=0.99,
+    lam=0.95,
+    desired_kl=0.01,
+    max_grad_norm=1.0,
+    actor_learning_rate=1.0e-4,
+    actor_lr_warmup_iterations=100,
+    critic_warmup_iterations=100,
+    anchor_kl_coef=1.0,
+    anchor_kl_final_coef=0.1,
+    anchor_kl_decay_iterations=3000,
+    max_std=0.6,
+)
 
 
 @configclass
@@ -79,24 +107,23 @@ class AdvancedPPORunnerCfg(BasePPORunnerCfg):
     """
 
     max_iterations = 4000
-    algorithm = AnchoredPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.0,
-        num_learning_epochs=5,
-        num_mini_batches=4,
-        learning_rate=1.0e-3,  # critic
-        schedule="adaptive",  # actor: KL guard only, never above actor_learning_rate
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-        actor_learning_rate=1.0e-4,
-        actor_lr_warmup_iterations=100,
-        critic_warmup_iterations=100,
-        anchor_kl_coef=1.0,
-        anchor_kl_final_coef=0.1,
-        anchor_kl_decay_iterations=3000,
-        max_std=0.6,
-    )
+    algorithm = AnchoredPpoAlgorithmCfg(**ADVANCED_PPO)
+
+
+# arm joints with a weak anchor (A2 on): a visible change of the arm pose is a large KL for the wrists (0.075 rad per
+# action unit), and the full anchor held Advanced-A's pressed hands
+ARM_ANCHOR_WEIGHTS = {r".*_shoulder_.*": 0.1, r".*_elbow_joint": 0.1, r".*_wrist_.*": 0.1}
+
+
+@configclass
+class AdvancedArmAnchorPPORunnerCfg(AdvancedPPORunnerCfg):
+    """Advanced stages after A (A2, B to E): as ``AdvancedPPORunnerCfg``, with the anchor on the arm joints at 10 %."""
+
+    algorithm = AnchoredPpoAlgorithmCfg(**ADVANCED_PPO, anchor_joint_weights=dict(ARM_ANCHOR_WEIGHTS))
+
+
+@configclass
+class AdvancedA2PPORunnerCfg(AdvancedArmAnchorPPORunnerCfg):
+    """Advanced-A2: 2000 iterations (a narrow fix of the arm load; the weak arm anchor lets it act from the start)."""
+
+    max_iterations = 2000

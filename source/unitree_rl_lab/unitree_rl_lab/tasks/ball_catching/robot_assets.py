@@ -23,6 +23,7 @@ import numpy as np
 from pxr import Usd, UsdGeom, UsdPhysics, Vt
 from scipy.spatial import ConvexHull
 
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim.spawners.from_files.from_files import _spawn_from_usd_file
 from isaaclab.sim.utils import clone
 from isaaclab.utils import configclass
@@ -134,3 +135,34 @@ ROBOT_CFG = UNITREE_G1_29DOF_MIMIC_CFG.replace(
         concave_palms=CONCAVE_PALMS,
     )
 )
+
+
+# ── Joint load (since 2026-11-03): Advanced-A pressed its hands against each other with 20-30 N while waiting and
+#    holding, and its left wrist yaw (5 Nm) worked at its torque limit. Advanced-A2 (and the Advanced stages built on
+#    it) and Unified penalize both: the share of the physics steps in which a hand presses on the other arm above
+#    HAND_CONTACT_THRESHOLD (``mdp.self_contact`` with the sensors below), and the commanded torque of the arm joints
+#    above ARM_TORQUE_THRESHOLD of the limit (``mdp.torque_limit_excess``). ──
+HAND_CONTACT_THRESHOLD = 5.0
+"""Force (N) above which a hand presses on the other arm: light touch allowed, A pressed with 20-30 N."""
+HAND_CONTACT_WEIGHT = -5.0
+"""Weight per hand sensor (as `self_contact` of the arms on the torso)."""
+ARM_JOINT_NAMES = [".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"]
+"""Joints of the torque-limit penalty. The leg joints stay out: steps and push recovery are not affected."""
+ARM_TORQUE_THRESHOLD = 0.6
+"""Share of the effort limit above which the commanded torque is penalized (A: no joint but the left wrist yaw above
+0.6 in more than 1 % of the steps)."""
+ARM_TORQUE_WEIGHT = -20.0
+"""Weight of the squared excess."""
+OTHER_ARM_LINKS = ("wrist_yaw_link", "wrist_pitch_link", "wrist_roll_link", "elbow_link")
+"""Links of the other arm a hand may press on (the hand first)."""
+
+
+def hand_contact_sensor(side: str, other: str, links=OTHER_ARM_LINKS) -> ContactSensorCfg:
+    """The ``side`` hand as the single sensor body, filtered against ``links`` of the ``other`` arm (Isaac Lab reports
+    filtered contacts only one-to-many). Use ("left", "right") with all links and ("right", "left") without the hand,
+    so the hand-hand contact is counted once."""
+    return ContactSensorCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{side}_wrist_yaw_link",
+        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/Robot/{other}_{link}" for link in links],
+        history_length=4,
+    )

@@ -6,10 +6,12 @@ Analysis and sources: H-ReACT/analysis/2026-11-03_phase2_analyse/ (outside the r
 from __future__ import annotations
 
 import copy
+import re
 
 import torch
 import torch.nn as nn
 from rsl_rl.algorithms import PPO
+from torch.distributions import Normal, kl_divergence
 
 
 class AnchoredPPO(PPO):
@@ -31,6 +33,10 @@ class AnchoredPPO(PPO):
       over ``anchor_kl_decay_iterations`` updates after the critic warm-up. KL to the pretrained policy (kickstarting)
       is the best-supported measure against forgetting (Wołczyk et al. 2024, VPT, TWIST, OP3 soccer). The anchor is
       saved with every checkpoint and restored on a full resume; ``--finetune`` (actor only) takes a new anchor.
+      With ``anchor_joint_weights`` (joint-name regex -> weight, first match wins, others 1) the KL is weighted per
+      action dimension (``anchor_joint_names``: the joints of the action dimensions in order, filled in by train.py).
+      Since 2026-11-03 the arm joints are weighted 0.1: one action unit of a wrist is only 0.075 rad, so a visible
+      change of an arm pose is a large KL and the full anchor held Advanced-A's pressed hands.
     - **Std cap:** ``max_std`` clamps the action std after every update (with unbounded std Andy's runs diverged).
 
     Supports the non-recurrent MLP actor and critic used here; RND, symmetry and multi-GPU training are not supported.
@@ -45,6 +51,8 @@ class AnchoredPPO(PPO):
         anchor_kl_coef: float = 0.0,
         anchor_kl_final_coef: float = 0.0,
         anchor_kl_decay_iterations: int = 0,
+        anchor_joint_weights: dict[str, float] | None = None,
+        anchor_joint_names: list[str] | None = None,
         max_std: float | None = None,
         **kwargs,
     ) -> None:
@@ -61,6 +69,11 @@ class AnchoredPPO(PPO):
         self.anchor_kl_final_coef = anchor_kl_final_coef
         self.anchor_kl_decay_iterations = anchor_kl_decay_iterations
         self.max_std = max_std
+        # per-dimension weights of the anchor KL, built at the first update (inference runners never need them, and
+        # only train.py fills in the joint names)
+        self.anchor_joint_weights = anchor_joint_weights
+        self.anchor_joint_names = anchor_joint_names
+        self.anchor_dim_weights = None
         self.anchor = None
         self.updates_done = 0  # PPO updates (= iterations) of this algorithm, restored on a full resume
         self.kl_guard = 1.0  # factor of the adaptive schedule on the actor rate, at most 1
@@ -81,6 +94,17 @@ class AnchoredPPO(PPO):
         for param in self.anchor.parameters():
             param.requires_grad_(False)
 
+    def _build_anchor_dim_weights(self) -> None:
+        """Weights of the action dimensions in the anchor KL from ``anchor_joint_weights`` (first regex match wins)."""
+        if not self.anchor_joint_names:
+            raise ValueError("AnchoredPPO: anchor_joint_weights needs anchor_joint_names (filled in by train.py)")
+        weights = [
+            float(next((w for pattern, w in self.anchor_joint_weights.items() if re.fullmatch(pattern, n)), 1.0))
+            for n in self.anchor_joint_names
+        ]
+        self.anchor_dim_weights = torch.tensor(weights, device=self.device)
+        print(f"[AnchoredPPO] anchor weights per joint: {dict(zip(self.anchor_joint_names, weights))}", flush=True)
+
     def _schedule(self) -> tuple[bool, float, float]:
         """(critic warm-up running, actor learning rate, anchor weight) for the current update."""
         if self.updates_done < self.critic_warmup_iterations:
@@ -98,6 +122,8 @@ class AnchoredPPO(PPO):
         """PPO update with critic warm-up, separate actor rate and anchor (see the class docstring)."""
         if self.anchor is None and self.anchor_kl_coef > 0.0:
             self.set_anchor()  # no update has happened yet: this is the loaded stage-A actor
+        if self.anchor_joint_weights and self.anchor_dim_weights is None:
+            self._build_anchor_dim_weights()
         warmup, actor_lr, anchor_coef = self._schedule()
         self.optimizer.param_groups[1]["lr"] = self.critic_learning_rate
         sums = dict.fromkeys(("value", "surrogate", "entropy", "anchor_kl", "kl"), 0.0)
@@ -141,7 +167,13 @@ class AnchoredPPO(PPO):
                 with torch.no_grad():
                     self.anchor(batch.observations, stochastic_output=True)
                     anchor_params = tuple(p.detach() for p in self.anchor.output_distribution_params)
-                anchor_kl = torch.mean(self.actor.get_kl_divergence(anchor_params, distribution_params))
+                if self.anchor_dim_weights is None:
+                    anchor_kl = torch.mean(self.actor.get_kl_divergence(anchor_params, distribution_params))
+                else:
+                    if self.anchor_dim_weights.shape[0] != distribution_params[0].shape[-1]:
+                        raise ValueError("AnchoredPPO: anchor_joint_names do not match the action dimensions")
+                    per_dim = kl_divergence(Normal(*anchor_params), Normal(*distribution_params))
+                    anchor_kl = torch.mean(torch.sum(per_dim * self.anchor_dim_weights, dim=-1))
 
             loss = self.value_loss_coef * value_loss
             if not warmup:  # during the warm-up the actor is not part of the loss and keeps its weights

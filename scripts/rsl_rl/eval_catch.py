@@ -226,6 +226,9 @@ class Stats:
         self.bc_torso = bc_names.index("torso_link") if "torso_link" in bc_names else None
         self.bc_links = [(label, bc_names.index(link)) for label, link in BALL_CONTACT_LINKS if link in bc_names]
         self.atc = ue.scene.sensors.get("arm_torso_contact")  # arms pressing on the torso (since 2026-11-01)
+        # a hand pressing on the other arm (sensors of Advanced-A2 on and Unified, since 2026-11-03)
+        self.hand_sensors = [ue.scene.sensors[n] for n in ("hand_contact_left", "hand_contact_right")
+                             if n in ue.scene.sensors]
         self.motion = (
             ue.command_manager.get_term("motion") if "motion" in ue.command_manager.active_terms else None
         )
@@ -370,6 +373,10 @@ class Stats:
             below_ref = ref_pelvis - (r.data.root_pos_w[:, 2] - ground)
         if self.atc is not None:
             arm_torso = self.atc.data.force_matrix_w.norm(dim=-1).flatten(start_dim=1).sum(dim=-1)  # all arm links
+        if self.hand_sensors:
+            hand_force = sum(  # strongest contact of each hand with the other arm
+                sn.data.force_matrix_w.norm(dim=-1).flatten(start_dim=1).amax(dim=-1) for sn in self.hand_sensors
+            )
         for tag, m in (("wait", ~launched & settled), ("held", sec)):
             k = int(m.sum())
             if k == 0:
@@ -381,6 +388,9 @@ class Stats:
             if self.atc is not None:
                 acc[f"arm_torso_force_N_{tag}"] += float(arm_torso[m].sum())
                 cnt[f"arm_torso_over_10N_{tag}"] += int((arm_torso[m] > 10.0).sum())
+            if self.hand_sensors:
+                acc[f"hand_contact_N_{tag}"] += float(hand_force[m].sum())
+                cnt[f"hand_contact_over_5N_{tag}"] += int((hand_force[m] > 5.0).sum())
             acc[f"pelvis_z_{tag}"] += float(r.data.root_pos_w[m, 2].sum())
             acc[f"pelvis_tilt_{tag}"] += float(tilt_deg(r.data.root_quat_w[m]).sum())
             acc[f"torso_tilt_{tag}"] += float(tilt_deg(r.data.body_quat_w[m][:, self.torso_b[0]]).sum())
@@ -553,9 +563,13 @@ class Stats:
                 keys.append("pelvis_below_ref_m")
             if self.atc is not None:
                 keys.append("arm_torso_force_N")
+            if self.hand_sensors:
+                keys.append("hand_contact_N")
             R[f"posture_{tag}"] = {k: round(acc[f"{k}_{tag}"] / n, 3) for k in keys}
             if self.atc is not None:
                 R[f"posture_{tag}"]["pct_arm_torso_over_10N"] = round(100 * cnt[f"arm_torso_over_10N_{tag}"] / n, 1)
+            if self.hand_sensors:
+                R[f"posture_{tag}"]["pct_hand_contact_over_5N"] = round(100 * cnt[f"hand_contact_over_5N_{tag}"] / n, 1)
         s = max(1, cnt["sec"])
         R["held"] = {
             "steps": cnt["sec"],
@@ -641,6 +655,8 @@ def summary(R: dict) -> str:
         f"{R['posture_held']['knee_deg']}°"
         + (f", arms on the torso {R['posture_wait']['arm_torso_force_N']} / {R['posture_held']['arm_torso_force_N']} N"
            if "arm_torso_force_N" in R["posture_wait"] else "")
+        + (f", hands on the other arm {R['posture_wait']['hand_contact_N']} / {R['posture_held']['hand_contact_N']} N"
+           if "hand_contact_N" in R["posture_wait"] else "")
     )
     if "after_confirmation_pct" in R:
         lines.append(f"[eval] confirmed catches: {R['confirmed_pct']} % of the throws; how they ended: "

@@ -220,6 +220,21 @@ def self_contact(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: 
     return pressing.float().mean(dim=-1)
 
 
+def torque_limit_excess(
+    env: ManagerBasedRLEnv, threshold: float = 0.6, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Sum over the joints of ``asset_cfg`` of the squared excess of the commanded torque over ``threshold`` times the
+    joint's effort limit: max(0, |tau| / tau_max - threshold)^2. Uses the commanded (not the clipped) torque, so the
+    penalty keeps growing beyond the limit. Normalized per joint, unlike ``joint_torques_l2``, where the 5 Nm wrist
+    motors vanish next to the 100 Nm leg joints (Advanced-A pressed its hands together with the left wrist yaw at its
+    limit; since 2026-11-03)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    tau = asset.data.computed_torque[:, asset_cfg.joint_ids]
+    limit = asset.data.joint_effort_limits[:, asset_cfg.joint_ids]
+    excess = (tau.abs() / limit - threshold).clamp(min=0.0)
+    return torch.sum(excess**2, dim=1)
+
+
 def ball_arm_contact(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> torch.Tensor:
     """Fraction of arms (left, right) the launched ball touches in this step (interim report, eq. 9.2); with the
     command's ``palm_hold`` only palm contacts count."""

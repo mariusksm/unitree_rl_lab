@@ -9,6 +9,8 @@ every stage is measured (evaluation suite, Sim2Sim) against the stage before and
   aimed where the clips catch, the same pushes, randomization and perception), fine-tuned with the safeguards of
   ``AnchoredPPO`` (critic warm-up, small actor rate, KL anchor to the Unified actor). The stage checks that the
   fine-tuning machinery and the reference-free reward keep what Unified learned.
+- **A2:** A plus penalties against pressing the hands together and against arm torques near the limit (the left
+  wrist of A worked at its torque limit); B to E build on it.
 - **B:** ball rebound at low speeds (PhysX bounces only above its threshold of 0.5 m/s, B lowers it to 0.1 m/s; in
   MuJoCo a springy ball halves the catches of the sixth Unified run).
 - **C:** the real lifecycle: start in the FixStand pose of the deploy FSM, several throws per episode, the ball taken
@@ -45,7 +47,16 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 import unitree_rl_lab.tasks.ball_catching.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_MIMIC_ACTION_SCALE
 from unitree_rl_lab.tasks.ball_catching.motion_data import G1_HOLD_POINT
-from unitree_rl_lab.tasks.ball_catching.robot_assets import ROBOT_CFG  # FOREARM_COLLIDERS, CONCAVE_PALMS
+from unitree_rl_lab.tasks.ball_catching.robot_assets import (  # FOREARM_COLLIDERS, CONCAVE_PALMS
+    ARM_JOINT_NAMES,
+    ARM_TORQUE_THRESHOLD,
+    ARM_TORQUE_WEIGHT,
+    HAND_CONTACT_THRESHOLD,
+    HAND_CONTACT_WEIGHT,
+    OTHER_ARM_LINKS,
+    ROBOT_CFG,
+    hand_contact_sensor,
+)
 
 HAND_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 FEET_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
@@ -515,6 +526,66 @@ class AdvancedAPlayEnvCfg(AdvancedAEnvCfg):
         self.scene.num_envs = 32
 
 
+# ── Advanced-A2: no pressing of the hands. Advanced-A presses its hands against each other with 20-30 N while waiting
+#    and holding (the ball itself carries only ≈ 6 N per palm), the left arm actively, so the left wrist yaw (5 Nm)
+#    works at its torque limit: above 80 % in up to 58 % of the held steps and in 77 % of the steps waiting after a
+#    catch in the C lifecycle. Wrist motors that overheat switch off the arm of a real G1. Inherited from Unified, where
+#    nothing costs it: the hold reward wants both palms on the ball, and joint_torques_l2 (absolute Nm²) does not see
+#    5 Nm next to the leg joints. A2 keeps the catching pose and adds two penalties:
+#    - hand_contact_{left,right}: share of the physics steps in which a hand presses on the other hand or forearm with
+#      more than 5 N (light touch allowed; the ball's contacts with the palms are other contact pairs and do not count);
+#    - arm_torque_limit: commanded torque of the arm joints above 60 % of their limit, squared excess. Measured on A: no
+#      other joint exceeds 60 % in more than 1 % of the steps, also with pushes every 1-2 s, so large arm motions and
+#      steps are not affected. The leg joints are left out on purpose.
+#    The anchor weighs the arm joints at 10 % (AdvancedA2PPORunnerCfg), 2000 iterations from A's checkpoint.
+#    Thresholds, weights and the sensor builder are shared with Unified (robot_assets.py, "Joint load"). ──
+
+
+@configclass
+class A2SceneCfg(RobotSceneCfg):
+    """The Advanced scene plus the hand contact sensors of A2."""
+
+    # left hand against the right hand and forearm; right hand against the left forearm (hand-hand counted once)
+    hand_contact_left = hand_contact_sensor("left", "right", OTHER_ARM_LINKS)
+    hand_contact_right = hand_contact_sensor("right", "left", OTHER_ARM_LINKS[1:])
+
+
+@configclass
+class A2RewardsCfg(RewardsCfg):
+    """Advanced-A's rewards plus the penalties against pressed hands and arm torques near the limit."""
+
+    hand_contact_left = RewTerm(
+        func=mdp.self_contact,
+        weight=HAND_CONTACT_WEIGHT,
+        params={"sensor_cfg": SceneEntityCfg("hand_contact_left"), "threshold": HAND_CONTACT_THRESHOLD},
+    )
+    hand_contact_right = RewTerm(
+        func=mdp.self_contact,
+        weight=HAND_CONTACT_WEIGHT,
+        params={"sensor_cfg": SceneEntityCfg("hand_contact_right"), "threshold": HAND_CONTACT_THRESHOLD},
+    )
+    arm_torque_limit = RewTerm(
+        func=mdp.torque_limit_excess,
+        weight=ARM_TORQUE_WEIGHT,
+        params={"threshold": ARM_TORQUE_THRESHOLD, "asset_cfg": SceneEntityCfg("robot", joint_names=ARM_JOINT_NAMES)},
+    )
+
+
+@configclass
+class AdvancedA2EnvCfg(AdvancedAEnvCfg):
+    """Advanced-A2: Advanced-A plus penalties against pressing the hands together and against arm torques near the
+    limit. Fine-tuned from Advanced-A's final checkpoint with the arm anchor at 10 %; B to E build on it."""
+
+    scene: A2SceneCfg = A2SceneCfg(num_envs=4096, env_spacing=2.5)
+    rewards: A2RewardsCfg = A2RewardsCfg()
+
+
+class AdvancedA2PlayEnvCfg(AdvancedA2EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+
+
 # ── Advanced-B: ball rebound at low speeds. PhysX applies restitution only to contacts whose normal relative speed
 #    exceeds the scene's bounce threshold (Isaac Lab default 0.5 m/s), so a ball that lands softly in the palms or is
 #    jostled while held never bounces; MuJoCo's contacts spring at every speed (Sim2Sim of the sixth Unified run: 44 %
@@ -533,10 +604,10 @@ BOUNCE_THRESHOLD_VELOCITY = 0.1
 
 
 @configclass
-class AdvancedBEnvCfg(AdvancedAEnvCfg):
-    """Advanced-B: Advanced-A plus ball rebound at low speeds (bounce threshold 0.1 m/s instead of 0.5 m/s).
+class AdvancedBEnvCfg(AdvancedA2EnvCfg):
+    """Advanced-B: Advanced-A2 plus ball rebound at low speeds (bounce threshold 0.1 m/s instead of 0.5 m/s).
 
-    Fine-tuned from Advanced-A's final checkpoint (``--finetune``: the A actor is the new anchor)."""
+    Fine-tuned from Advanced-A2's final checkpoint (``--finetune``: the A2 actor is the new anchor)."""
 
     def __post_init__(self):
         super().__post_init__()
