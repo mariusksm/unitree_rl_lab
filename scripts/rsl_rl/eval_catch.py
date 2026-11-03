@@ -25,6 +25,8 @@ before the env is built:
   lateral    throws aimed ±0.45 m sideways (Advanced only: Unified aims at the clip; Advanced-A trains -0.10 to
              +0.17 m, the former Phase 2 trained ±0.3 m)
   delay      perception latency 4-6 control steps (training until 2026-10-27: 1-3, since then 1-5; kept for comparison)
+  arcs       flat and high lobs: apex 1.55-2.6 m above the ground (A-D train 1.75-2.1 m, Advanced-E widens to this),
+             mean horizontal speed capped at 8.5 m/s (Advanced only)
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
 
@@ -57,7 +59,7 @@ from isaaclab.app import AppLauncher
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cli_args  # isort: skip
 
-SCENARIOS = ("base", "fric_high", "fric_low", "hold", "wait", "push", "lateral", "delay")
+SCENARIOS = ("base", "fric_high", "fric_low", "hold", "wait", "push", "lateral", "delay", "arcs")
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--task", type=str, default="Unitree-G1-29dof-BallCatch-Advanced-A")
@@ -81,7 +83,7 @@ args_cli = parser.parse_args()
 if args_cli.video:
     args_cli.enable_cameras = True
 # checked before Isaac Sim starts: once it runs, closing it ends the process without printing an error
-if "Unified" in args_cli.task and args_cli.scenario == "lateral":
+if "Unified" in args_cli.task and args_cli.scenario in ("lateral", "arcs"):
     print(f"[eval] scenario '{args_cli.scenario}' does not apply to {args_cli.task}: its throws follow the reference "
           "clip (launch time and aim from the recording)", flush=True)
     sys.exit(2)
@@ -119,7 +121,7 @@ BALL_CONTACT_LINKS = [
 
 def apply_scenario(env_cfg, name: str):
     synced = type(env_cfg.commands.ball_throw).__name__ == "SyncedBallCommandCfg"
-    if synced and name == "lateral":
+    if synced and name in ("lateral", "arcs"):
         raise ValueError(f"scenario '{name}' does not apply to a task whose throws follow the reference clip")
     if name == "base":
         return
@@ -146,6 +148,10 @@ def apply_scenario(env_cfg, name: str):
     elif name == "delay":
         # the perception ring buffer is sized from this range, so it must be set before the env is built
         env_cfg.commands.ball_throw.obs_delay_steps_range = (4, 6)
+    elif name == "arcs":
+        env_cfg.commands.ball_throw.apex_height_range = (1.55, 2.6)
+        env_cfg.commands.ball_throw.apex_height_range_hard = None
+        env_cfg.commands.ball_throw.max_horizontal_speed = 8.5
 
 
 HOLD_RULE_KEYS = ("secure_steps", "hold_radius")

@@ -17,8 +17,8 @@ OUT=$3
 shift 3
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$TASK" in
-    *Unified*) SCENARIOS="base fric_high fric_low hold wait push delay" ;;  # lateral: the clips set the aim
-    *) SCENARIOS="base fric_high fric_low hold wait push lateral delay" ;;
+    *Unified*) SCENARIOS="base fric_high fric_low hold wait push delay" ;;  # lateral, arcs: the clips set the throw
+    *) SCENARIOS="base fric_high fric_low hold wait push lateral delay arcs" ;;
 esac
 mkdir -p "$OUT"
 for s in $SCENARIOS; do

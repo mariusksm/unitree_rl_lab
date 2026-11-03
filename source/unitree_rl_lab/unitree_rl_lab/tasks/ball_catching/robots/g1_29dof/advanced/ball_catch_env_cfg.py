@@ -14,13 +14,17 @@ every stage is measured (evaluation suite, Sim2Sim) against the stage before and
 - **C:** the real lifecycle: start in the FixStand pose of the deploy FSM, several throws per episode, the ball taken
   out of the hands after the hold.
 - **D:** pushes in the ball phase ramped from 20 % up to full strength by a success-gated curriculum.
-- Planned: E, wider, realistic throws. F (sketch): lunges for throws beyond the arms' reach.
+- **E:** wider, realistic throws: aim and arc (flatter and higher lobs) widened by the same curriculum, half the throws
+  from the front.
+- Planned (sketch): F, lunges for throws beyond the arms' reach.
 
 Analysis and sources: H-ReACT/analysis/2026-11-03_phase2_analyse/ (outside the repository).
 
 The actor observations, the action term and the critic slot layout must stay identical to Unified (``--finetune``
 moves the actor between them).
 """
+
+import math
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -641,3 +645,55 @@ class AdvancedDPlayEnvCfg(AdvancedDEnvCfg):
         self.scene.num_envs = 32
         self.curriculum = None
         self.events.push_robot.params["difficulty"] = 1.0  # final level: shares of 20-100 % in the ball phase
+
+
+# ── Advanced-E: wider, realistic throws. A to D aim where Unified's throws arrive (0.15-0.40 m in front, -0.10..+0.17 m
+#    to the side, 0.85-1.28 m high) on lobs with an apex of 1.75-2.1 m, as the recorded throws. Real throwers miss and
+#    throw flatter or higher. E widens the aim and the arc by the success-gated curriculum of D up to the hard ranges
+#    below (each throw draws its level in [0, difficulty], so the easy throws stay in the mix) and releases half the
+#    throws from the front (2-4 m, ±30°, as the recorded ones; spec Section 11, item 13). A flat lob over a long
+#    distance would be faster than an underhand throw, so the mean horizontal speed is capped at 8.5 m/s by a higher
+#    arc (A's fastest throws reach ≈ 7.8 m/s). The pushes stay at D's final level. Throws beyond the arms' reach
+#    (lunges) are stage F. ──
+TARGET_FORWARD_RANGE_HARD = (0.10, 0.50)
+TARGET_LATERAL_RANGE_HARD = (-0.45, 0.45)
+TARGET_HEIGHT_RANGE_HARD = (0.75, 1.40)
+APEX_HEIGHT_RANGE_HARD = (1.55, 2.60)
+MAX_HORIZONTAL_SPEED = 8.5
+FRONTAL_SHARE = 0.5
+FRONTAL_DISTANCE_RANGE = (2.0, 4.0)
+FRONTAL_DIRECTION_RANGE = (-math.radians(30.0), math.radians(30.0))
+
+
+@configclass
+class AdvancedECurriculumCfg:
+    throw_difficulty = CurrTerm(func=mdp.success_gated_difficulty, params={"target": "throws", **SUCCESS_GATE})
+
+
+@configclass
+class AdvancedEEnvCfg(AdvancedDEnvCfg):
+    """Advanced-E: Advanced-D plus wider, realistic throws (aim and arc widened, success-gated; half the throws from the
+    front). Fine-tuned from Advanced-D's final checkpoint."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.curriculum = AdvancedECurriculumCfg()
+        self.events.push_robot.params["difficulty"] = 1.0  # D's final level, fixed
+        cmd = self.commands.ball_throw
+        cmd.target_forward_range_hard = TARGET_FORWARD_RANGE_HARD
+        cmd.target_lateral_range_hard = TARGET_LATERAL_RANGE_HARD
+        cmd.target_height_range_hard = TARGET_HEIGHT_RANGE_HARD
+        cmd.apex_height_range_hard = APEX_HEIGHT_RANGE_HARD
+        cmd.max_horizontal_speed = MAX_HORIZONTAL_SPEED
+        cmd.frontal_share = FRONTAL_SHARE
+        cmd.frontal_distance_range = FRONTAL_DISTANCE_RANGE
+        cmd.frontal_direction_range = FRONTAL_DIRECTION_RANGE
+        cmd.difficulty = 0.0  # set by the curriculum
+
+
+class AdvancedEPlayEnvCfg(AdvancedEEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+        self.curriculum = None
+        self.commands.ball_throw.difficulty = 1.0  # final level: throws from the easy to the hard ranges

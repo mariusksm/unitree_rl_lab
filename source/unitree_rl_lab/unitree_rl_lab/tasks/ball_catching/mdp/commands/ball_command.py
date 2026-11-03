@@ -261,31 +261,53 @@ class BallCommand(CommandTerm):
         """Sample release point, target point, flight time and drag of a new throw (heading frame)."""
         n = len(env_ids)
         device = self.device
+        cfg = self.cfg
 
         root_pos = self.robot.data.root_pos_w[env_ids]
         heading = yaw_quat(self.robot.data.root_quat_w[env_ids])
         ground_z = self._env.scene.env_origins[env_ids, 2]
 
-        distance = sample_uniform(*self.cfg.throw_distance_range, (n,), device)
-        azimuth = sample_uniform(*self.cfg.throw_direction_range, (n,), device)
+        # success-gated curriculum (Advanced-E): each throw draws a level in [0, difficulty] and interpolates the bounds
+        # of the staged ranges from their easy (``*_range``) to their hard values (``*_range_hard``)
+        level = torch.rand(n, device=device) * cfg.difficulty
+
+        def staged(easy: tuple[float, float], hard: tuple[float, float] | None) -> torch.Tensor:
+            if hard is None:
+                return sample_uniform(*easy, (n,), device)
+            low = easy[0] + level * (hard[0] - easy[0])
+            high = easy[1] + level * (hard[1] - easy[1])
+            return low + torch.rand(n, device=device) * (high - low)
+
+        distance = sample_uniform(*cfg.throw_distance_range, (n,), device)
+        azimuth = sample_uniform(*cfg.throw_direction_range, (n,), device)
+        if cfg.frontal_share > 0.0:
+            # a share of throws from the front, as the recorded ones (2.8-3.3 m straight ahead)
+            frontal = torch.rand(n, device=device) < cfg.frontal_share
+            distance = torch.where(frontal, sample_uniform(*cfg.frontal_distance_range, (n,), device), distance)
+            azimuth = torch.where(frontal, sample_uniform(*cfg.frontal_direction_range, (n,), device), azimuth)
         release = torch.stack([distance * torch.cos(azimuth), distance * torch.sin(azimuth), torch.zeros_like(distance)], dim=1)
         spawn = root_pos + quat_apply(heading, release)
-        spawn[:, 2] = ground_z + sample_uniform(*self.cfg.release_height_range, (n,), device)
+        spawn[:, 2] = ground_z + sample_uniform(*cfg.release_height_range, (n,), device)
         self._spawn_pos[env_ids] = spawn
 
         aim = torch.zeros(n, 3, device=device)
-        aim[:, 0] = sample_uniform(*self.cfg.target_forward_range, (n,), device)
-        aim[:, 1] = sample_uniform(*self.cfg.target_lateral_range, (n,), device)
+        aim[:, 0] = staged(cfg.target_forward_range, cfg.target_forward_range_hard)
+        aim[:, 1] = staged(cfg.target_lateral_range, cfg.target_lateral_range_hard)
         target = root_pos + quat_apply(heading, aim)
-        target[:, 2] = ground_z + sample_uniform(*self.cfg.target_height_range, (n,), device)
+        target[:, 2] = ground_z + staged(cfg.target_height_range, cfg.target_height_range_hard)
         self._target_pos[env_ids] = target
 
         # the lob's apex fixes the flight time; farther throws are then faster, as with a human thrower
-        apex = ground_z + sample_uniform(*self.cfg.apex_height_range, (n,), device)
+        apex = ground_z + staged(cfg.apex_height_range, cfg.apex_height_range_hard)
         apex = torch.maximum(apex, torch.maximum(spawn[:, 2], target[:, 2]) + 0.05)
-        self._flight_time[env_ids] = flight_time_from_apex(spawn[:, 2], target[:, 2], apex)
-        drag_coefficient = sample_uniform(*self.cfg.drag_coefficient_range, (n,), device)
-        self._drag_coeff[env_ids] = 0.5 * self.cfg.air_density * drag_coefficient * self._ball_area
+        flight_time = flight_time_from_apex(spawn[:, 2], target[:, 2], apex)
+        if cfg.max_horizontal_speed is not None:
+            # a flat lob over a long distance would be faster than an underhand throw: lengthen its flight (higher arc)
+            horizontal = torch.norm(target[:, :2] - spawn[:, :2], dim=1)
+            flight_time = torch.maximum(flight_time, horizontal / cfg.max_horizontal_speed)
+        self._flight_time[env_ids] = flight_time
+        drag_coefficient = sample_uniform(*cfg.drag_coefficient_range, (n,), device)
+        self._drag_coeff[env_ids] = 0.5 * cfg.air_density * drag_coefficient * self._ball_area
 
     def _resample_command(self, env_ids: Sequence[int]):
         """Sample a new throw, park the ball at its release point and arm the launch timer."""
@@ -698,6 +720,40 @@ class BallCommandCfg(CommandTermCfg):
 
     velocity_noise: float = 0.1
     """Std (m/s) of Gaussian noise added per axis to the launch velocity."""
+
+    # ── success-gated widening of the throws (Advanced-E): with a ``*_hard`` range set, each throw draws a level in
+    #    [0, ``difficulty``] and interpolates both bounds from the easy range to the hard one; ``difficulty`` is set by
+    #    the curriculum ``mdp.success_gated_difficulty`` (target "throws") ──
+    difficulty: float = 0.0
+    """Difficulty in [0, 1] of the staged ranges (0: the easy ranges only). Set at runtime by the curriculum."""
+
+    target_forward_range_hard: tuple[float, float] | None = None
+    """Aim point distance (m) in front of the root at difficulty 1. None: not staged."""
+
+    target_lateral_range_hard: tuple[float, float] | None = None
+    """Aim point lateral offset (m) at difficulty 1. None: not staged."""
+
+    target_height_range_hard: tuple[float, float] | None = None
+    """Aim point height (m) above the ground at difficulty 1. None: not staged."""
+
+    apex_height_range_hard: tuple[float, float] | None = None
+    """Apex height (m) above the ground at difficulty 1: lower = flatter and faster, higher = steeper and slower.
+    None: not staged."""
+
+    max_horizontal_speed: float | None = None
+    """Upper bound (m/s) of the mean horizontal speed of a throw: a flat lob over a long distance gets a longer flight
+    (a higher arc) instead. None: no bound."""
+
+    frontal_share: float = 0.0
+    """Share of the throws released from the front (``frontal_distance_range``, ``frontal_direction_range``) instead
+    of ``throw_distance_range`` / ``throw_direction_range``: the recorded throws came from 2.8-3.3 m straight ahead
+    (spec Section 11, item 13)."""
+
+    frontal_distance_range: tuple[float, float] = (2.0, 4.0)
+    """Release distance (m) of the frontal throws."""
+
+    frontal_direction_range: tuple[float, float] = (-math.radians(30.0), math.radians(30.0))
+    """Release azimuth (rad) of the frontal throws."""
 
     # ── air drag (matters for a light 15 cm ball: ~0.3 m shorter over a real 3 m throw) ──
     air_density: float = 1.2

@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-ORDER = ("base", "fric_high", "fric_low", "hold", "wait", "push", "lateral", "delay")
+ORDER = ("base", "fric_high", "fric_low", "hold", "wait", "push", "lateral", "delay", "arcs")
 
 
 def row(name: str, r: dict) -> str:
