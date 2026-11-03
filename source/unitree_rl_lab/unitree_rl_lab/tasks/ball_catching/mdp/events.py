@@ -18,6 +18,8 @@ def push_by_setting_velocity_phased(
     velocity_range: dict[str, tuple[float, float]],
     command_name: str = "ball_throw",
     ball_phase_scale: float = 1.0,
+    ball_phase_scale_final: float | None = None,
+    difficulty: float = 0.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
     """``push_by_setting_velocity`` with the velocity range scaled by ``ball_phase_scale`` once the ball is launched
@@ -25,7 +27,11 @@ def push_by_setting_velocity_phased(
 
     Unified (since 2026-11-01) pushes at 20 % in the ball phase: a push changes the velocity of the whole robot by up
     to 0.5 m/s, the free ball does not follow, and a clean grip with two palms loses it, so the full pushes rewarded
-    clamping the ball against the chest. Stage B (Advanced-D) ramps them up again with the clean grip defined.
+    clamping the ball against the chest.
+
+    With ``ball_phase_scale_final`` (Advanced-D) the share in the ball phase is drawn per push: ``ball_phase_scale``
+    plus a level uniform in [0, ``difficulty``] times the way to ``ball_phase_scale_final``. The success-gated
+    curriculum (``mdp.success_gated_difficulty``) raises ``difficulty``; weaker pushes stay in the mix.
     """
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=env.device)
@@ -33,9 +39,34 @@ def push_by_setting_velocity_phased(
     waiting_ids, ball_ids = env_ids[~launched], env_ids[launched]
     if len(waiting_ids) > 0:
         push_by_setting_velocity(env, waiting_ids, velocity_range, asset_cfg)
-    if len(ball_ids) > 0 and ball_phase_scale > 0.0:
-        scaled = {key: (low * ball_phase_scale, high * ball_phase_scale) for key, (low, high) in velocity_range.items()}
-        push_by_setting_velocity(env, ball_ids, scaled, asset_cfg)
+    if len(ball_ids) == 0:
+        return
+    if ball_phase_scale_final is None:
+        if ball_phase_scale > 0.0:
+            s = ball_phase_scale
+            scaled = {key: (low * s, high * s) for key, (low, high) in velocity_range.items()}
+            push_by_setting_velocity(env, ball_ids, scaled, asset_cfg)
+        return
+    level = torch.rand(len(ball_ids), device=env.device) * difficulty
+    scale = ball_phase_scale + level * (ball_phase_scale_final - ball_phase_scale)
+    _push_scaled(env, ball_ids, velocity_range, scale, asset_cfg)
+
+
+def _push_scaled(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    velocity_range: dict[str, tuple[float, float]],
+    scale: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+):
+    """``push_by_setting_velocity`` with a velocity change scaled per env (``scale``, shape (len(env_ids),))."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    vel_w = asset.data.root_vel_w[env_ids]
+    range_list = [velocity_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
+    ranges = torch.tensor(range_list, device=asset.device)
+    push = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], vel_w.shape, device=asset.device)
+    vel_w += push * scale.unsqueeze(1)
+    asset.write_root_velocity_to_sim(vel_w, env_ids=env_ids)
 
 
 def reset_joints_to_pose(

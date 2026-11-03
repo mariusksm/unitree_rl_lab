@@ -13,7 +13,8 @@ every stage is measured (evaluation suite, Sim2Sim) against the stage before and
   MuJoCo a springy ball halves the catches of the sixth Unified run).
 - **C:** the real lifecycle: start in the FixStand pose of the deploy FSM, several throws per episode, the ball taken
   out of the hands after the hold.
-- Planned: D, pushes in the ball phase ramped up. E: wider, realistic throws.
+- **D:** pushes in the ball phase ramped from 20 % up to full strength by a success-gated curriculum.
+- Planned: E, wider, realistic throws. F (sketch): lunges for throws beyond the arms' reach.
 
 Analysis and sources: H-ReACT/analysis/2026-11-03_phase2_analyse/ (outside the repository).
 
@@ -24,6 +25,7 @@ moves the actor between them).
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -601,3 +603,41 @@ class AdvancedCPlayEnvCfg(AdvancedCEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
+
+
+# ── Advanced-D: pushes in the ball phase ramped up. A to C push at 20 % of the waiting strength from the launch to the
+#    end of the hold (under the old hold definition full pushes in the ball phase rewarded clamping the ball to the
+#    chest). With the clean grip defined, D raises the share toward full strength by a success-gated curriculum: each
+#    push in the ball phase draws its share between 20 % and 20 % + level · 80 %, the level uniform in [0, difficulty],
+#    and the difficulty rises while at least 70 % of the finished throws succeed and falls below 50 %. Phillip's
+#    g1-catch raises at 80 %; the stochastic training catch rate of Advanced-A sat near 77 %, so 80 % would stall the
+#    curriculum. ≈ 24 calls per iteration at 1e-4 each: the full ramp takes at least ≈ 420 iterations. Measured with the
+#    suite's `push` scenario (pushes every 1-2 s; the sixth Unified run caught 65 % of them in A). ──
+PUSH_BALL_PHASE_SCALE_FINAL = 1.0
+SUCCESS_GATE = {"up": 0.7, "down": 0.5, "step": 1e-4, "smoothing": 0.01}
+
+
+@configclass
+class AdvancedDCurriculumCfg:
+    push_difficulty = CurrTerm(func=mdp.success_gated_difficulty, params={"target": "pushes", **SUCCESS_GATE})
+
+
+@configclass
+class AdvancedDEnvCfg(AdvancedCEnvCfg):
+    """Advanced-D: Advanced-C plus pushes in the ball phase ramped from 20 % up to full strength (success-gated).
+
+    Fine-tuned from Advanced-C's final checkpoint."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.curriculum = AdvancedDCurriculumCfg()
+        self.events.push_robot.params["ball_phase_scale_final"] = PUSH_BALL_PHASE_SCALE_FINAL
+        self.events.push_robot.params["difficulty"] = 0.0  # set by the curriculum
+
+
+class AdvancedDPlayEnvCfg(AdvancedDEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+        self.curriculum = None
+        self.events.push_robot.params["difficulty"] = 1.0  # final level: shares of 20-100 % in the ball phase
