@@ -29,7 +29,8 @@ def row(name: str, r: dict) -> str:
     # hold definition of 2026-11-01: ball in both palms, distance to the hold point (cm); posture factor P while holding
     hold_cm = 100 * r.get("in_hands", {}).get("hold_distance_m_mean", float("nan"))
     posture = r["posture_held"].get("posture_P", float("nan"))
-    return (f"{name:10s} {r['episodes']:6d} {caught_txt} {full_txt} {o.get('ball_dropped', 0):6.1f} {fell:6.1f} {tracking:6.1f} "
+    throws = r.get("throws", r["episodes"])  # results before 2026-11-03: one throw per episode
+    return (f"{name:10s} {throws:6d} {caught_txt} {full_txt} {o.get('ball_dropped', 0):6.1f} {fell:6.1f} {tracking:6.1f} "
             f"{tilt:6.1f} {r['feet_wait']['liftoffs_per_s']:6.2f} {drift:7.1f} "
             f"{r['held']['pct_torso_contact']:6.0f} {hold_cm:6.1f} {posture:5.2f}  {sat['joint']} {sat['pct_steps_over_80pct']:.0f} %")
 
@@ -48,10 +49,11 @@ def main():
             continue
         any_r = next(iter(results.values()))
         print(f"\n{d}  ({any_r.get('task')}, {os.path.basename(str(any_r.get('checkpoint')))})")
-        print("scenario   episod caught  full  dropp   fell  track  tilt°  lift/s  driftcm torso% holdcm     P  most saturated joint (steps > 80 %)")
+        print("scenario   throws caught  full  dropp   fell  track  tilt°  lift/s  driftcm torso% holdcm     P  most saturated joint (steps > 80 %)")
         for name in sorted(results, key=lambda n: ORDER.index(n) if n in ORDER else len(ORDER)):
             print(row(name, results[name]))
-        print("caught: % of the episodes (hold: % of the confirmed catches still held at the end); full: % of the "
+        print("throws: throws with an outcome (= episodes, except in tasks with several throws per episode); caught: "
+              "% of the throws (hold: % of the confirmed catches still held at the end); full: % of the "
               "confirmed catches that completed the hold phase (runs from 2026-10-28 on); fell: bad orientation "
               "or base height; track: tracking terminations (Unified); tilt: mean foot tilt in firm contact; lift/s: "
               "lift-offs per second while waiting; driftcm: median drift until the launch; torso%: share of the hold "

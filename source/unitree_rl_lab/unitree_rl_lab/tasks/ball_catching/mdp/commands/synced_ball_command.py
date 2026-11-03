@@ -51,6 +51,8 @@ class SyncedBallCommand(BallCommand):
     cfg: SyncedBallCommandCfg
 
     def __init__(self, cfg: SyncedBallCommandCfg, env: ManagerBasedRLEnv):
+        if cfg.rethrow_after_catch:
+            raise ValueError("SyncedBallCommand does not support rethrow_after_catch: its throws follow the clip")
         super().__init__(cfg, env)
 
         self._armed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)

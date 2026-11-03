@@ -38,6 +38,35 @@ def push_by_setting_velocity_phased(
         push_by_setting_velocity(env, ball_ids, scaled, asset_cfg)
 
 
+def reset_joints_to_pose(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    joint_pos: dict[str, float],
+    position_noise: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Reset the joints to a fixed pose plus uniform noise of ±``position_noise`` rad per joint, at zero velocity and
+    within the soft joint limits. ``joint_pos`` maps joint-name regexes to angles (rad); every other joint gets 0.
+
+    Advanced-C starts each episode in the pose in which the deploy FSM hands the robot to the policy (FixStand), not in
+    the default pose. The default pose stays the offset of the actions and of ``joint_pos_rel``, so the actor's
+    observations and actions keep their meaning.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=asset.device)
+    pose = torch.zeros(asset.num_joints, device=asset.device)
+    for pattern, value in joint_pos.items():
+        ids, _ = asset.find_joints(pattern)  # raises if the pattern matches no joint
+        pose[ids] = value
+    pos = pose.unsqueeze(0).repeat(len(env_ids), 1)
+    if position_noise > 0.0:
+        pos += math_utils.sample_uniform(-position_noise, position_noise, pos.shape, asset.device)
+    limits = asset.data.soft_joint_pos_limits[env_ids]
+    pos = pos.clamp(limits[..., 0], limits[..., 1])
+    asset.write_joint_state_to_sim(pos, torch.zeros_like(pos), env_ids=env_ids)
+
+
 def randomize_joint_default_pos(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,

@@ -1,7 +1,9 @@
 """Evaluate a ball-catching checkpoint under one stress-test scenario (Unified and the Advanced tasks).
 
 Runs the task's play config (final throw distribution) with the deterministic policy and measures what the
-training statistics do not show: outcomes per episode, foot behavior (gliding vs. pivoting, drift of each stance,
+training statistics do not show: outcomes per throw (= per episode, except in tasks with several throws per episode,
+Advanced-C on: there a completed catch counts as caught and arms the next throw, and a throw cut off by the episode's
+time-out counts as unfinished, not as an outcome), foot behavior (gliding vs. pivoting, drift of each stance,
 lift-offs, tilt of the feet in contact), posture while waiting and while holding (incl. the posture factor P of the
 reward and the pelvis height against the reference), where the ball sits while held (distance to the hold point,
 contact with the torso, forbidden and support contacts) and while it lies in both palms (whether or not it counts as
@@ -14,8 +16,10 @@ before the env is built:
   fric_high  robot friction fixed to static 1.0 / dynamic 0.8 (rubber on a lab floor)
   fric_low   robot friction fixed to static 0.4 / dynamic 0.3
   hold       no ball_caught termination, 12 s episodes: does the robot keep holding after the confirmation?
-             (Advanced: throws after 0.5-1.5 s, so ~9 s of holding; Unified: until its clip ends)
-  wait       throw after 6-9 s, as on the real robot (Advanced trains 0.5-8 s, log-uniform);
+             (Advanced: throws after 0.5-1.5 s, so ~9 s of holding, one throw per episode also in Advanced-C;
+             Unified: until its clip ends)
+  wait       throw after 6-9 s, as on the real robot (Advanced trains 0.5-8 s, log-uniform; Advanced-C also waits 6-9 s
+             before its later throws);
              Unified: every cycle starts at the beginning of its 6 s lead-in (throw after ~6.9 s)
   push       velocity pushes of ±0.5 m/s every 1-2 s
   lateral    throws aimed ±0.45 m sideways (Advanced only: Unified aims at the clip; Advanced-A trains -0.10 to
@@ -128,11 +132,13 @@ def apply_scenario(env_cfg, name: str):
         env_cfg.episode_length_s = 12.0
         if not synced:
             env_cfg.commands.ball_throw.throw_delay_range = (0.5, 1.5)
+            env_cfg.commands.ball_throw.rethrow_after_catch = False
     elif name == "wait":
         if synced:
             env_cfg.commands.motion.start_hold_from_begin = True
         else:
             env_cfg.commands.ball_throw.throw_delay_range = (6.0, 9.0)
+            env_cfg.commands.ball_throw.rethrow_delay_range = (6.0, 9.0)  # later throws of an episode (Advanced-C)
     elif name == "push":
         env_cfg.events.push_robot.interval_range_s = (1.0, 2.0)
     elif name == "lateral":
@@ -236,8 +242,13 @@ class Stats:
         self.st_launched = torch.zeros(N, 2, dtype=torch.bool, device=dev)
         self.prev_foot_xy = r.data.body_pos_w[:, self.feet_b, :2].clone()
         self.prev_foot_yaw = yaw_of(r.data.body_quat_w[:, self.feet_b])
-        self.ep_xy = r.data.root_pos_w[:, :2].clone()
+        # tasks that re-throw after a completed catch (Advanced-C): several throws per episode, counted one by one
+        self.multi = bool(getattr(self.cmd.cfg, "rethrow_after_catch", False))
+        self.episode_ends = 0
+        self.unfinished = 0  # launched throws cut off by the time-out (several throws per episode only)
+        self.ep_xy = r.data.root_pos_w[:, :2].clone()  # where the current throw's wait started
         self.ep_yaw = yaw_of(r.data.root_quat_w)
+        self.throw_start = torch.zeros(N, dtype=torch.long, device=dev)  # episode step at which that wait started
         self.was_launched = self.cmd.launched.clone()
         self.launch_xy = self.ep_xy.clone()
         self.prev_root_xy = self.ep_xy.clone()
@@ -263,30 +274,33 @@ class Stats:
         launched = cmd.launched
         settled = valid & (ue.episode_length_buf > 15)  # skip the first 0.3 s after a reset
 
+        # ---- throws completed within an episode (Advanced-C): the command already armed the next throw
+        if self.multi:
+            done = self.cmd.completed_now & valid
+            if done.any():
+                ids = done.nonzero().flatten()
+                for i in ids.tolist():
+                    self._end_throw(i, "ball_caught")
+                self._start_throw(ids)
         # ---- episode ends: outcome, longest hold, drift after the launch; stances cut by the reset
         if reset.any():
             ids = reset.nonzero().flatten()
             reasons = {name: tm.get_term(name)[ids] for name in tm.active_terms}
             for k, i in enumerate(ids.tolist()):
                 why = next((n for n, v in reasons.items() if bool(v[k])), "unknown")
-                self.terms[why] += 1
-                L["ep_max_sec"].append(int(self.max_sec[i]))
-                L["ep_reason"].append(why)
-                if bool(self.ep_confirmed[i]):
-                    L["confirmed_reason"].append(why)
-                    L["hold_after_confirm"].append(int(self.ep_hold_steps[i]) * self.dt)
-                if bool(self.was_launched[i]):
-                    L["drift_after_launch"].append(float((self.prev_root_xy[i] - self.launch_xy[i]).norm()))
+                self.episode_ends += 1
+                # with several throws per episode the time-out only cuts the current throw off (waiting, in flight or
+                # held): no outcome, so the catch rate compares with the single-throw tasks
+                if self.multi and why == "time_out":
+                    self.unfinished += int(bool(self.was_launched[i]))
+                    continue
+                self._end_throw(i, why)
             cut = self.in_stance & reset[:, None]
             if cut.any():
                 L["stance_disp"] += (self.prev_foot_xy - self.st_xy).norm(dim=-1)[cut].tolist()
                 L["stance_dyaw"] += wrap(self.prev_foot_yaw - self.st_yaw)[cut].abs().tolist()
                 L["stance_launched"] += self.st_launched[cut].tolist()
-            self.max_sec[ids] = 0
-            self.ep_confirmed[ids] = False
-            self.ep_hold_steps[ids] = 0
-            self.ep_xy[ids] = r.data.root_pos_w[ids, :2]
-            self.ep_yaw[ids] = yaw_of(r.data.root_quat_w[ids])
+            self._start_throw(ids)
             self.in_stance[ids] = False
         self.max_sec = torch.maximum(self.max_sec, cmd.secured_steps)
         self.ep_confirmed |= cmd.confirmed
@@ -298,7 +312,7 @@ class Stats:
             ids = new.nonzero().flatten()
             L["wait_drift"] += (r.data.root_pos_w[ids, :2] - self.ep_xy[ids]).norm(dim=-1).tolist()
             L["wait_dyaw"] += wrap(yaw_of(r.data.root_quat_w[ids]) - self.ep_yaw[ids]).abs().tolist()
-            L["wait_time"] += (ue.episode_length_buf[ids].float() * self.dt).tolist()
+            L["wait_time"] += ((ue.episode_length_buf[ids] - self.throw_start[ids]).float() * self.dt).tolist()
             self.launch_xy[ids] = r.data.root_pos_w[ids, :2]
         self.was_launched = launched.clone()
 
@@ -447,11 +461,38 @@ class Stats:
                     cnt[f"tau_n_{tag}"] += int(m.sum())
             self.valid_steps += int(valid.sum())
 
+    def _end_throw(self, i: int, why: str):
+        """Record the outcome of env ``i``'s current throw: ``why`` is the termination term or ``ball_caught``."""
+        L = self.lists
+        self.terms[why] += 1
+        L["ep_max_sec"].append(int(self.max_sec[i]))
+        L["ep_reason"].append(why)
+        if bool(self.ep_confirmed[i]):
+            L["confirmed_reason"].append(why)
+            L["hold_after_confirm"].append(int(self.ep_hold_steps[i]) * self.dt)
+        if bool(self.was_launched[i]):
+            L["drift_after_launch"].append(float((self.prev_root_xy[i] - self.launch_xy[i]).norm()))
+
+    def _start_throw(self, ids: torch.Tensor):
+        """Reset the per-throw trackers of ``ids`` (new episode, or the next throw in a task with several)."""
+        r = self.r
+        self.max_sec[ids] = 0
+        self.ep_confirmed[ids] = False
+        self.ep_hold_steps[ids] = 0
+        self.ep_xy[ids] = r.data.root_pos_w[ids, :2]
+        self.ep_yaw[ids] = yaw_of(r.data.root_quat_w[ids])
+        self.throw_start[ids] = self.ue.episode_length_buf[ids]
+        self.was_launched[ids] = self.cmd.launched[ids]
+
     def report(self, scenario: str) -> dict:
         acc, cnt, L = self.acc, self.cnt, self.lists
         R = {"scenario": scenario}
-        ends = sum(self.terms.values())
-        R["episodes"] = ends
+        ends = sum(self.terms.values())  # throws with an outcome
+        R["episodes"] = self.episode_ends
+        R["throws"] = ends
+        R["throws_per_episode"] = bool(self.multi)
+        if self.multi:
+            R["unfinished_throws"] = self.unfinished
         R["outcomes_pct"] = {k: round(100 * v / max(1, ends), 2) for k, v in sorted(self.terms.items(), key=lambda x: -x[1])}
         mx = torch.tensor(L["ep_max_sec"], dtype=torch.float) if L["ep_max_sec"] else torch.zeros(1)
         reached = mx >= SECURE_STEPS_FINAL
@@ -568,8 +609,9 @@ def summary(R: dict) -> str:
     fell = o.get("bad_orientation", 0) + o.get("base_height", 0)
     top = R["torque_saturation"][0]
     lines = [
-        f"[eval] {R['scenario']}: {R['episodes']} episodes, caught {o.get('ball_caught', 0)} %, dropped "
-        f"{o.get('ball_dropped', 0)} %, fell {round(fell, 2)} %, outcomes {o}",
+        f"[eval] {R['scenario']}: {R['throws']} throws in {R['episodes']} episodes, caught {o.get('ball_caught', 0)} "
+        f"%, dropped {o.get('ball_dropped', 0)} %, fell {round(fell, 2)} %, outcomes {o}"
+        + (f"; {R['unfinished_throws']} throws cut off by the time-out" if "unfinished_throws" in R else ""),
         f"[eval] feet: tilt in contact L {R['foot_tilt_L']['mean_deg']}° / R {R['foot_tilt_R']['mean_deg']}°, "
         f"gliding {R['feet_wait']['pct_contact_steps_gliding']} % (wait) / {R['feet_ball']['pct_contact_steps_gliding']} % "
         f"(ball), lift-offs {R['feet_wait']['liftoffs_per_s']}/s (wait) / {R['feet_ball']['liftoffs_per_s']}/s (ball)",
@@ -595,7 +637,7 @@ def summary(R: dict) -> str:
            if "arm_torso_force_N" in R["posture_wait"] else "")
     )
     if "after_confirmation_pct" in R:
-        lines.append(f"[eval] confirmed catches: {R['confirmed_pct']} % of the episodes; how they ended: "
+        lines.append(f"[eval] confirmed catches: {R['confirmed_pct']} % of the throws; how they ended: "
                      f"{R['after_confirmation_pct']} (ball_caught = hold phase completed), held "
                      f"{R['hold_after_confirm_s_median']} s after the confirmation (median)")
     if "after_confirmed_catch_pct" in R:

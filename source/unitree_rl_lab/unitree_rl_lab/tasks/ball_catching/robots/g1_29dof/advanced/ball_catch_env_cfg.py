@@ -11,8 +11,9 @@ every stage is measured (evaluation suite, Sim2Sim) against the stage before and
   fine-tuning machinery and the reference-free reward keep what Unified learned.
 - **B:** ball rebound at low speeds (PhysX bounces only above its threshold of 0.5 m/s, B lowers it to 0.1 m/s; in
   MuJoCo a springy ball halves the catches of the sixth Unified run).
-- Planned: C, the real lifecycle (start pose of the deploy FSM, several throws per episode, ball taken away after
-  the hold). D: pushes in the ball phase ramped up. E: wider, realistic throws.
+- **C:** the real lifecycle: start in the FixStand pose of the deploy FSM, several throws per episode, the ball taken
+  out of the hands after the hold.
+- Planned: D, pushes in the ball phase ramped up. E: wider, realistic throws.
 
 Analysis and sources: H-ReACT/analysis/2026-11-03_phase2_analyse/ (outside the repository).
 
@@ -537,6 +538,66 @@ class AdvancedBEnvCfg(AdvancedAEnvCfg):
 
 
 class AdvancedBPlayEnvCfg(AdvancedBEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+
+
+# ── Advanced-C: the real lifecycle. On the robot the deploy FSM hands over to the policy from its FixStand state, and
+#    the policy then runs throw after throw: wait, catch, hold until a person takes the ball out of the hands, wait
+#    while the thrower walks back, the next throw. A and B start every episode in the default pose and end it after
+#    one throw, so the policy never learned to let go and get ready again. C starts in the FixStand pose of the deploy
+#    config plus noise and re-throws after every completed catch instead of ending the episode (the ball is moved
+#    out of the hands to the next release point); a drop, a miss or a fall still ends it. ──
+# FixStand pose of deploy/robots/g1_29dof/config/config.yaml (qs), in which the policy takes over: straighter legs than
+# the default pose (knees 0.3 instead of 0.669 rad), upper arms down, elbows bent 0.97 rad; joints not listed are 0.
+# Change it together with the deploy config. The default pose stays the offset of actions and observations.
+DEPLOY_STAND_POSE = {
+    ".*_hip_pitch_joint": -0.1,
+    ".*_knee_joint": 0.3,
+    ".*_ankle_pitch_joint": -0.2,
+    "left_shoulder_roll_joint": 0.25,
+    "right_shoulder_roll_joint": -0.25,
+    ".*_elbow_joint": 0.97,
+    "left_wrist_roll_joint": 0.15,
+    "right_wrist_roll_joint": -0.15,
+}
+# pelvis height of that pose with the soles on the ground: 0.784 m (forward kinematics of the G1 MJCF, which gives
+# 0.757 m for the default pose, spawned at 0.76 m), plus the same 3 mm
+DEPLOY_STAND_PELVIS_HEIGHT = 0.787
+# the hand-over is not exact: FixStand holds the pose with lower PD gains than the policy's, so gravity sags the joints
+START_POSE_NOISE = 0.05
+# wait before a throw that follows a completed catch: the person takes the ball, walks back 2-5 m and throws again
+# (log-uniform like the first wait, median 4 s)
+RETHROW_DELAY_RANGE = (2.0, 8.0)
+# several throws per episode: a throw takes about 2-4 s of waiting + 1 s flight + 1 s to the confirmation + 3 s hold
+EPISODE_LENGTH_C_S = 30.0
+
+
+@configclass
+class AdvancedCEnvCfg(AdvancedBEnvCfg):
+    """Advanced-C: Advanced-B plus the real lifecycle: start in the deploy FixStand pose, several throws per episode,
+    the ball taken out of the hands after the hold.
+
+    Fine-tuned from Advanced-B's final checkpoint (or A's, if B is not trained)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = EPISODE_LENGTH_C_S
+        self.commands.ball_throw.rethrow_after_catch = True
+        self.commands.ball_throw.rethrow_delay_range = RETHROW_DELAY_RANGE
+        # the completed catch arms the next throw; time-outs (truncations) and failures end the episode
+        self.terminations.ball_caught = None
+        self.events.reset_robot_joints = EventTerm(
+            func=mdp.reset_joints_to_pose,
+            mode="reset",
+            params={"joint_pos": DEPLOY_STAND_POSE, "position_noise": START_POSE_NOISE},
+        )
+        lift = DEPLOY_STAND_PELVIS_HEIGHT - ROBOT_CFG.init_state.pos[2]
+        self.events.reset_base.params["pose_range"]["z"] = (lift, lift)
+
+
+class AdvancedCPlayEnvCfg(AdvancedCEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32

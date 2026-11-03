@@ -47,8 +47,10 @@ class BallCommand(CommandTerm):
     under gravity *and* quadratic air drag; the drag force is applied every control step during the flight.
     PhysX handles everything else (gravity, collisions).
 
-    The command does NOT re-throw within an episode. Episode outcomes are owned by the termination terms
-    (ball dropped / missed / caught / time out), which read the catch state tracked here:
+    By default the command does NOT re-throw within an episode. With ``rethrow_after_catch`` (Advanced-C on, the real
+    lifecycle) a completed catch takes the ball out of the hands and arms the next throw (``completed_now``), so an
+    episode holds several throws. Episode outcomes are owned by the termination terms (ball dropped / missed / caught /
+    time out), which read the catch state tracked here:
 
     - ``secured_steps``: consecutive control steps for which the launched ball is inside the catch box in
       front of the torso (with ``hold_radius``: within that distance of the hold point), slow relative to the root,
@@ -152,6 +154,9 @@ class BallCommand(CommandTerm):
         """The catch was confirmed in the last update (true on exactly one step per throw)."""
         self.steps_since_confirm = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         """Control steps since the confirmation (0 on the confirming step and before)."""
+        self.completed_now = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """``rethrow_after_catch``: a throw was completed in the last update and the next one armed (the catch state
+        already belongs to the new throw)."""
         self.arm_contact = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
         """Ball touches the [left, right] arm in the current control step (with ``palm_hold``: that hand's palm)."""
         self.torso_force = torch.zeros(self.num_envs, device=self.device)
@@ -223,6 +228,9 @@ class BallCommand(CommandTerm):
         self.metrics["hold_distance"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["hold_quality"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["ball_forbidden_contact"] = torch.zeros(self.num_envs, device=self.device)
+        if cfg.rethrow_after_catch:
+            # completed throws of the episode (logged at the episode end, then zeroed by CommandTerm.reset)
+            self.metrics["throws_completed"] = torch.zeros(self.num_envs, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
@@ -283,11 +291,14 @@ class BallCommand(CommandTerm):
         """Sample a new throw, park the ball at its release point and arm the launch timer."""
         if len(env_ids) == 0:
             return
+        self._arm_throw(env_ids, self.cfg.throw_delay_range)
 
+    def _arm_throw(self, env_ids: Sequence[int], delay_range: tuple[float, float]):
+        """Sample a throw, park the ball at its release point and start the wait of ``delay_range`` (s)."""
         self._sample_throw(env_ids)
         self._write_parked_state(env_ids)
 
-        low, high = self.cfg.throw_delay_range
+        low, high = delay_range
         if self.cfg.throw_delay_log_uniform:
             self.time_until_throw[env_ids] = low * (high / low) ** torch.rand(len(env_ids), device=self.device)
         else:
@@ -433,6 +444,19 @@ class BallCommand(CommandTerm):
         self._apply_drag(in_flight)
         self._update_catch_state(in_flight)
         self._update_perception()
+        if self.cfg.rethrow_after_catch:
+            self._rethrow_completed()
+
+    def _rethrow_completed(self):
+        """Several throws per episode (``rethrow_after_catch``): the ball of a completed catch is taken out of the
+        hands, parked at the release point of the next throw, and the next wait starts. Run after the perception
+        update, so the actor's next observation already shows no ball."""
+        self.completed_now = self.catch_complete
+        env_ids = self.completed_now.nonzero(as_tuple=False).flatten()
+        if len(env_ids) == 0:
+            return
+        self.metrics["throws_completed"][env_ids] += 1.0
+        self._arm_throw(env_ids, self.cfg.rethrow_delay_range or self.cfg.throw_delay_range)
 
     def _palm_geometry(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Per hand whether the ball centre lies on its palm side (``min_palm_alignment``, ``max_palm_distance``),
@@ -793,6 +817,17 @@ class BallCommandCfg(CommandTermCfg):
     hold_after_catch_s: float = 0.0
     """Hold phase (s) after the confirmed catch before the throw counts as completed (``catch_complete``, the
     ``ball_caught`` termination). A drop during it ends the episode as a failure. 0 = completed at the confirmation."""
+
+    rethrow_after_catch: bool = False
+    """Several throws per episode, as on the real robot: a completed catch (``catch_complete``) takes the ball out of
+    the hands (it is moved to the release point of the next throw, a simplification of the person taking it) and arms
+    the next throw, which then waits ``rethrow_delay_range``. The episode ends only by a failure (dropped, missed, fall)
+    or the time-out, so the ``ball_caught`` termination must be off (it would never see the completed catch). Not
+    supported by :class:`SyncedBallCommand` (its throws follow the clip)."""
+
+    rethrow_delay_range: tuple[float, float] | None = None
+    """Wait (s) before a throw that follows a completed catch: the thrower takes the ball, walks back and throws again.
+    Sampled like ``throw_delay_range`` (log-uniform with ``throw_delay_log_uniform``). None: ``throw_delay_range``."""
 
     # ── perception: how the robot gets the ball from the VICON pipeline (actor observations only).
     #    Dropout and noise values are calibrated on the same 12 VICON throws ──
