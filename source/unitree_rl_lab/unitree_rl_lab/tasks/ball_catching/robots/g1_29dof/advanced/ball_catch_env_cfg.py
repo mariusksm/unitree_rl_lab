@@ -9,9 +9,10 @@ every stage is measured (evaluation suite, Sim2Sim) against the stage before and
   aimed where the clips catch, the same pushes, randomization and perception), fine-tuned with the safeguards of
   ``AnchoredPPO`` (critic warm-up, small actor rate, KL anchor to the Unified actor). The stage checks that the
   fine-tuning machinery and the reference-free reward keep what Unified learned.
-- B (planned): ball rebound at low speeds (PhysX bounces only above 0.5 m/s; in MuJoCo a springy ball halves the
-  catches of the sixth Unified run). C: the real lifecycle (start pose of the deploy FSM, several throws per episode,
-  ball taken away after the hold). D: pushes in the ball phase ramped up. E: wider, realistic throws.
+- **B:** ball rebound at low speeds (PhysX bounces only above its threshold of 0.5 m/s, B lowers it to 0.1 m/s; in
+  MuJoCo a springy ball halves the catches of the sixth Unified run).
+- Planned: C, the real lifecycle (start pose of the deploy FSM, several throws per episode, ball taken away after
+  the hold). D: pushes in the ball phase ramped up. E: wider, realistic throws.
 
 Analysis and sources: H-ReACT/analysis/2026-11-03_phase2_analyse/ (outside the repository).
 
@@ -502,6 +503,40 @@ class AdvancedAEnvCfg(ManagerBasedRLEnvCfg):
 
 
 class AdvancedAPlayEnvCfg(AdvancedAEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+
+
+# ── Advanced-B: ball rebound at low speeds. PhysX applies restitution only to contacts whose normal relative speed
+#    exceeds the scene's bounce threshold (Isaac Lab default 0.5 m/s), so a ball that lands softly in the palms or is
+#    jostled while held never bounces; MuJoCo's contacts spring at every speed (Sim2Sim of the sixth Unified run: 44 %
+#    caught with a springy ball, e = 0.36, against 98 % with a damped one, e = 0.14). B lowers the threshold to
+#    0.1 m/s. The ball-robot restitution stays the average of the randomized ball (0.2-0.6) and arm link (0-0.5)
+#    values, 0.1-0.55: the startup randomization gives every shape its own material with combine mode average
+#    (measured 2026-11-03 with balls dropped onto a fixed robot; a combine mode authored on the ball is overwritten).
+#    Ground contacts keep restitution 0 (terrain material, multiply). Replace the ranges once the real ball is measured
+#    (spec Section 11, item 2).
+#    Measured before training B: the sixth Unified run's actor catches 81 % in B against 80 % in A (base scenario,
+#    ~4000 episodes each), so PhysX's low-speed restitution does not reproduce the MuJoCo failure with the springy ball:
+#    MuJoCo's soft contact stores energy while the ball is squeezed and releases it, a rigid contact with restitution
+#    does not. If the real ball turns out springy, compliant contacts for the ball
+#    (RigidBodyMaterialCfg.compliant_contact_stiffness / _damping) are the next candidate. ──
+BOUNCE_THRESHOLD_VELOCITY = 0.1
+
+
+@configclass
+class AdvancedBEnvCfg(AdvancedAEnvCfg):
+    """Advanced-B: Advanced-A plus ball rebound at low speeds (bounce threshold 0.1 m/s instead of 0.5 m/s).
+
+    Fine-tuned from Advanced-A's final checkpoint (``--finetune``: the A actor is the new anchor)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.sim.physx.bounce_threshold_velocity = BOUNCE_THRESHOLD_VELOCITY
+
+
+class AdvancedBPlayEnvCfg(AdvancedBEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
