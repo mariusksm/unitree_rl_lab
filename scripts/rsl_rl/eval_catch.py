@@ -44,10 +44,18 @@ to tell the throws from the stricter hold definition.
 
 On the group workstations camera rendering needs ``export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6`` and
 ``--kit_args="--portable-root $HOME/tmp/kitroot"`` (the shared environment is read-only). ``--checkpoint`` must be an
-absolute path. Output: ``<out>.json`` (all metrics) and a short summary on stdout.
+absolute path. Output: ``<out>.json`` (all metrics), a short summary on stdout, and ``<out>_throws.csv`` with one row
+per throw that has an outcome: where the throw went relative to the robot at its launch (aim point, apex, release
+direction; the command samples them relative to the robot when the wait starts, and the robot may move or turn while it
+waits), the perception delay, how it ended (lost without touching arms or torso, after touching them, after lying on a
+palm, after being held, after the confirmation) and the pushes while the ball was in play: during the flight (launch to
+the planned arrival, the same window for every throw), from the arrival to the confirmation, and while holding.
+``scripts/rsl_rl/eval_catch_throws.py`` turns these rows into catch rates per throw type.
 """
 
 import argparse
+import csv
+import functools
 import json
 import math
 import os
@@ -152,6 +160,47 @@ def apply_scenario(env_cfg, name: str):
         env_cfg.commands.ball_throw.apex_height_range = (1.55, 2.6)
         env_cfg.commands.ball_throw.apex_height_range_hard = None
         env_cfg.commands.ball_throw.max_horizontal_speed = 8.5
+
+
+def record_pushes(func):
+    """Wrap the push event term so that the evaluation sees which robots were pushed and how hard: the largest change
+    of the root's horizontal velocity (m/s) per env since the last control step, kept in ``env._eval_push``."""
+
+    @functools.wraps(func)  # the event manager checks the term's parameters against the wrapped signature
+    def pushed(env, env_ids, *args, **kwargs):
+        robot = env.scene["robot"]
+        ids = torch.arange(env.num_envs, device=env.device) if env_ids is None else env_ids
+        before = robot.data.root_lin_vel_w[ids, :2].clone()
+        result = func(env, env_ids, *args, **kwargs)
+        change = (robot.data.root_lin_vel_w[ids, :2] - before).norm(dim=-1)
+        if not hasattr(env, "_eval_push"):
+            env._eval_push = torch.zeros(env.num_envs, device=env.device)
+        env._eval_push[ids] = torch.maximum(env._eval_push[ids], change)
+        return result
+
+    return pushed
+
+
+GRAVITY = 9.81
+# per-throw records (<out>_throws.csv): parameters taken at the launch, then how the throw ended
+THROW_FIELDS = ("wait_s", "turn_wait_deg", "aim_fwd_m", "aim_lat_m", "aim_h_m", "release_dist_m", "release_az_deg",
+                "release_h_m", "apex_h_m", "flight_s", "speed_h_mps", "obs_delay_steps", "hidden_in_zone")
+THROW_COLUMNS = ("outcome", "launched") + THROW_FIELDS + (
+    "touched", "palm", "max_secured_s", "confirmed", "pushes_flight", "push_max_flight_mps", "pushes_catch",
+    "pushes_hold")
+F = {name: k for k, name in enumerate(THROW_FIELDS)}
+LOSSES = ("ball_dropped", "ball_missed")  # the ball is lost (a time-out is no loss: in `hold` it ends a held catch)
+
+
+def loss_stage(row: dict) -> str:
+    """How far a lost ball got: never touched arms or torso, touched them, lay on a palm, was held, or was confirmed."""
+    if row["confirmed"]:
+        return "confirmed"
+    if row["max_secured_s"] > 0:
+        return "held"
+    if row["palm"]:
+        return "palm"
+    return "touched" if row["touched"] else "never_touched"
 
 
 HOLD_RULE_KEYS = ("secure_steps", "hold_radius")
@@ -274,6 +323,18 @@ class Stats:
         self.tgt_beyond = torch.zeros(J, device=dev)
         self.tau_lim = r.data.joint_effort_limits[0].clone()
         self.valid_steps = 0
+        # per throw: parameters at the launch (THROW_FIELDS), contact with the robot and pushes while the ball is in
+        # play
+        self.th = torch.full((N, len(THROW_FIELDS)), float("nan"), device=dev)
+        self.th_touch = torch.zeros(N, dtype=torch.bool, device=dev)
+        self.th_palm = torch.zeros(N, dtype=torch.bool, device=dev)
+        # pushes during the flight (launch to the planned arrival: a window of the same length for caught and lost
+        # balls), from the arrival to the confirmation (ends early when the ball is lost), after the confirmation
+        self.th_push_flight = torch.zeros(N, dtype=torch.long, device=dev)
+        self.th_push_max = torch.zeros(N, device=dev)  # largest push during the flight
+        self.th_push_catch = torch.zeros(N, dtype=torch.long, device=dev)
+        self.th_push_hold = torch.zeros(N, dtype=torch.long, device=dev)
+        self.throw_rows = []
 
     def step(self):
         ue, r, cmd, acc, cnt, L = self.ue, self.r, self.cmd, self.acc, self.cnt, self.lists
@@ -323,7 +384,28 @@ class Stats:
             L["wait_dyaw"] += wrap(yaw_of(r.data.root_quat_w[ids]) - self.ep_yaw[ids]).abs().tolist()
             L["wait_time"] += ((ue.episode_length_buf[ids] - self.throw_start[ids]).float() * self.dt).tolist()
             self.launch_xy[ids] = r.data.root_pos_w[ids, :2]
+            self._record_launch(ids)
         self.was_launched = launched.clone()
+
+        # ---- per throw while the ball is in play: contact with the robot (any filter body of the ball sensor, over
+        #      the physics steps of this control step), on a palm, pushes (recorded by the wrapped push term)
+        live = launched & valid
+        data = self.bc.data
+        forces = data.force_matrix_w_history
+        if forces is None:
+            forces = data.force_matrix_w.unsqueeze(1)
+        touching = forces.norm(dim=-1).amax(dim=1).amax(dim=1) > 1.0  # (N, filter bodies)
+        self.th_touch |= live & touching.any(dim=-1)
+        self.th_palm |= live & cmd.arm_contact.any(dim=-1)
+        push = getattr(ue, "_eval_push", None)
+        if push is not None:
+            hit = live & (push > 0.01)
+            flying = hit & (cmd.time_since_throw <= cmd._flight_time)
+            self.th_push_flight += flying.long()
+            self.th_push_max = torch.where(flying, torch.maximum(self.th_push_max, push), self.th_push_max)
+            self.th_push_catch += (hit & ~flying & ~cmd.confirmed).long()
+            self.th_push_hold += (hit & cmd.confirmed).long()
+            push.zero_()
 
         # ---- feet: speed in firm contact, gliding (fast without turning), lift-offs, double support, stances
         fz = self.cf.data.net_forces_w[:, self.feet_c, :].norm(dim=-1)
@@ -488,6 +570,41 @@ class Stats:
             L["hold_after_confirm"].append(int(self.ep_hold_steps[i]) * self.dt)
         if bool(self.was_launched[i]):
             L["drift_after_launch"].append(float((self.prev_root_xy[i] - self.launch_xy[i]).norm()))
+        params = [round(x, 4) if x == x else "" for x in self.th[i].tolist()]  # NaN: not launched
+        self.throw_rows.append(
+            [why, int(bool(self.was_launched[i]))] + params
+            + [int(bool(self.th_touch[i])), int(bool(self.th_palm[i])), round(int(self.max_sec[i]) * self.dt, 2),
+               int(bool(self.ep_confirmed[i])), int(self.th_push_flight[i]), round(float(self.th_push_max[i]), 3),
+               int(self.th_push_catch[i]), int(self.th_push_hold[i])]
+        )
+
+    def _record_launch(self, ids: torch.Tensor):
+        """Parameters of the launched throws of ``ids`` relative to the robot now: the command sampled them relative
+        to the root when the wait started (aim forward / lateral of the root, heights above the ground), and the robot
+        may have moved or turned since. The apex is that of the drag-free lob with the throw's flight time."""
+        cmd, r, th = self.cmd, self.r, self.th
+        th[ids, F["wait_s"]] = (self.ue.episode_length_buf[ids] - self.throw_start[ids]).float() * self.dt
+        th[ids, F["turn_wait_deg"]] = torch.rad2deg(wrap(yaw_of(r.data.root_quat_w[ids]) - self.ep_yaw[ids]))
+        if not hasattr(cmd, "_target_pos"):
+            return
+        root = r.data.root_pos_w[ids]
+        heading = yaw_quat(r.data.root_quat_w[ids])
+        ground = self.ue.scene.env_origins[ids, 2]
+        spawn, target, flight = cmd._spawn_pos[ids], cmd._target_pos[ids], cmd._flight_time[ids]
+        aim = quat_apply_inverse(heading, target - root)
+        release = quat_apply_inverse(heading, spawn - root)
+        v0z = (target[:, 2] - spawn[:, 2] + 0.5 * GRAVITY * flight**2) / flight
+        th[ids, F["aim_fwd_m"]] = aim[:, 0]
+        th[ids, F["aim_lat_m"]] = aim[:, 1]
+        th[ids, F["aim_h_m"]] = target[:, 2] - ground
+        th[ids, F["release_dist_m"]] = release[:, :2].norm(dim=-1)
+        th[ids, F["release_az_deg"]] = torch.rad2deg(torch.atan2(release[:, 1], release[:, 0]))
+        th[ids, F["release_h_m"]] = spawn[:, 2] - ground
+        th[ids, F["apex_h_m"]] = spawn[:, 2] + v0z.clamp(min=0.0) ** 2 / (2 * GRAVITY) - ground
+        th[ids, F["flight_s"]] = flight
+        th[ids, F["speed_h_mps"]] = (target[:, :2] - spawn[:, :2]).norm(dim=-1) / flight
+        th[ids, F["obs_delay_steps"]] = cmd._obs_delay[ids].float()
+        th[ids, F["hidden_in_zone"]] = cmd._hide_in_zone[ids].float()
 
     def _start_throw(self, ids: torch.Tensor):
         """Reset the per-throw trackers of ``ids`` (new episode, or the next throw in a task with several)."""
@@ -499,6 +616,39 @@ class Stats:
         self.ep_yaw[ids] = yaw_of(r.data.root_quat_w[ids])
         self.throw_start[ids] = self.ue.episode_length_buf[ids]
         self.was_launched[ids] = self.cmd.launched[ids]
+        self.th[ids] = float("nan")
+        self.th_touch[ids] = False
+        self.th_palm[ids] = False
+        self.th_push_flight[ids] = 0
+        self.th_push_max[ids] = 0.0
+        self.th_push_catch[ids] = 0
+        self.th_push_hold[ids] = 0
+
+    def write_throws(self, path: str):
+        """One row per throw with an outcome (THROW_COLUMNS); empty parameters: the throw was not launched."""
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(THROW_COLUMNS)
+            w.writerows(self.throw_rows)
+
+    def throw_summary(self) -> dict:
+        """How the lost balls ended (share of all throws with an outcome) and the catch rate with and without a push
+        during the flight."""
+        rows = [dict(zip(THROW_COLUMNS, x)) for x in self.throw_rows]
+        n = max(1, len(rows))
+        lost = [x for x in rows if x["outcome"] in LOSSES]
+        stages = ("never_touched", "touched", "palm", "held", "confirmed")
+        out = {"ball_lost_pct": {s: round(100 * sum(loss_stage(x) == s for x in lost) / n, 2) for s in stages}}
+        launched = [x for x in rows if x["launched"]]
+        pushed = [x for x in launched if x["pushes_flight"] > 0]
+        calm = [x for x in launched if x["pushes_flight"] == 0]
+
+        def caught(xs):
+            return round(100 * sum(x["outcome"] == "ball_caught" for x in xs) / len(xs), 2) if xs else None
+
+        out["pushes_during_flight"] = {"pct_throws_pushed": round(100 * len(pushed) / max(1, len(launched)), 1),
+                                       "caught_pct_pushed": caught(pushed), "caught_pct_not_pushed": caught(calm)}
+        return out
 
     def report(self, scenario: str) -> dict:
         acc, cnt, L = self.acc, self.cnt, self.lists
@@ -621,6 +771,7 @@ class Stats:
              "pct_held_over_80pct": round(100 * float(hh[i]), 1)}
             for i in torch.argsort(hi, descending=True)[:8].tolist()
         ]
+        R.update(self.throw_summary())
         return R
 
 
@@ -664,6 +815,8 @@ def summary(R: dict) -> str:
                      f"{R['hold_after_confirm_s_median']} s after the confirmation (median)")
     if "after_confirmed_catch_pct" in R:
         lines.append(f"[eval] after a confirmed catch: {R['after_confirmed_catch_pct']}")
+    lines.append(f"[eval] balls lost, by how far they got (% of the throws): {R['ball_lost_pct']}; pushes during the "
+                 f"flight: {R['pushes_during_flight']}")
     return "\n".join(lines)
 
 
@@ -679,6 +832,8 @@ def main():
               f"{curriculum}", flush=True)
     if args_cli.no_push:
         env_cfg.events.push_robot = None
+    if getattr(env_cfg.events, "push_robot", None) is not None:
+        env_cfg.events.push_robot.func = record_pushes(env_cfg.events.push_robot.func)
     if args_cli.video:
         # the reference markers of the motion command would hide the robot
         for term in vars(env_cfg.commands).values():
@@ -724,6 +879,7 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(args_cli.out)), exist_ok=True)
         with open(args_cli.out + ".json", "w") as f:
             json.dump(R, f, indent=1)
+        stats.write_throws(args_cli.out + "_throws.csv")
         # flush before closing: closing the app ends the process without flushing a redirected stdout
         print(summary(R), flush=True)
     finally:
