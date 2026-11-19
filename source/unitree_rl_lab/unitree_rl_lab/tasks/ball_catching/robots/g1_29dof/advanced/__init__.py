@@ -74,3 +74,15 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{AGENTS}:AdvancedArmAnchorPPORunnerCfg",
     },
 )
+
+# S: E plus losing a ball safely (no episode end at a lost ball, fall penalty, unreachable throws), from E's checkpoint
+gym.register(
+    id="Unitree-G1-29dof-BallCatch-Advanced-S",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.ball_catch_env_cfg:AdvancedSEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.ball_catch_env_cfg:AdvancedSPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{AGENTS}:AdvancedArmAnchorPPORunnerCfg",
+    },
+)

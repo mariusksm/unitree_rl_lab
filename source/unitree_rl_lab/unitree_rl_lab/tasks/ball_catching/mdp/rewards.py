@@ -164,6 +164,7 @@ def ball_interception_exp(
     command_name: str = "ball_throw",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     until_confirmed: bool = False,
+    posture: dict | None = None,
 ) -> torch.Tensor:
     """Reward the hands for meeting the thrown ball (interim report, eq. 9.1).
 
@@ -172,7 +173,9 @@ def ball_interception_exp(
     velocity. Returns exp(-d²/std_dist² - v²/std_vel²); without ``std_vel`` only the distance counts.
     Zero until the ball is launched, so the parked ball at the release point does not attract the hands.
     With ``until_confirmed`` also zero after the catch is confirmed: then ``hold_quality`` alone says how well it is
-    held, and hands near the ball pay nothing by themselves.
+    held, and hands near the ball pay nothing by themselves. Always zero once the ball is lost (``throw_failed``).
+    With ``posture`` times the posture factor :func:`posture_quality`: reaching for a ball out of balance (a dive)
+    pays nothing (Advanced-S; without it Advanced-E dived after balls beyond its reach and fell).
     """
     command = env.command_manager.get_term(command_name)
     ball: RigidObject = command.ball
@@ -183,7 +186,11 @@ def ball_interception_exp(
         hands_vel = robot.data.body_lin_vel_w[:, asset_cfg.body_ids].mean(dim=1)
         error += torch.sum(torch.square(ball.data.root_lin_vel_w - hands_vel), dim=-1) / std_vel**2
     active = command.launched & ~command.confirmed if until_confirmed else command.launched
-    return torch.exp(-error) * active.float()
+    active = active & ~command.throw_failed
+    reward = torch.exp(-error) * active.float()
+    if posture is not None:
+        reward = reward * posture_quality(env, **posture)
+    return reward
 
 
 def hold_quality(env: ManagerBasedRLEnv, command_name: str = "ball_throw", posture: dict | None = None) -> torch.Tensor:
@@ -265,8 +272,9 @@ def ball_secured(env: ManagerBasedRLEnv, command_name: str = "ball_throw") -> to
 
 
 def _should_stand_still(command) -> torch.Tensor:
-    """Before the launch (waiting for the throw) and during the hold phase after the confirmed catch."""
-    return ~command.launched | command.confirmed
+    """Before the launch (waiting for the throw), during the hold phase after the confirmed catch and after a lost
+    ball (``rethrow_after_loss``)."""
+    return ~command.launched | command.confirmed | command.throw_failed
 
 
 def stand_still_root(
@@ -307,7 +315,13 @@ def ball_height_penalty(
     env: ManagerBasedRLEnv,
     ball_name: str,
     min_height: float,
+    command_name: str | None = None,
 ) -> torch.Tensor:
-    """Penalty when the ball falls below the catch zone."""
+    """Penalty when the ball falls below the catch zone. With ``command_name`` only while the launched ball is still in
+    play: a lost ball that stays on the floor (``rethrow_after_loss``) is not penalized at every step."""
     ball: RigidObject = env.scene[ball_name]
-    return (ball.data.root_pos_w[:, 2] < min_height).float()
+    low = ball.data.root_pos_w[:, 2] < min_height
+    if command_name is not None:
+        command = env.command_manager.get_term(command_name)
+        low = low & command.launched & ~command.throw_failed
+    return low.float()
