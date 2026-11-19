@@ -311,6 +311,29 @@ def stand_still_feet(
     return torch.sum(speed * (forces > force_threshold), dim=-1) * _should_stand_still(command).float()
 
 
+def capture_point_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str = "ball_throw",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """exp(-|c - f|² / std²) while the robot should stand still (waiting, holding, after a lost ball; Advanced-S).
+
+    c is the capture point of the pelvis: its horizontal position plus its horizontal velocity / ω, with
+    ω = sqrt(g / pelvis height), the point where the robot would have to step to stop; f is the middle of the feet
+    (``asset_cfg.body_ids``). Standing balanced over the feet pays 1. After a lunge or a push the capture point leaves
+    the feet, and the term pays for stepping under it or slowing down. The recovery term of Zhang et al.'s humanoid
+    dodgeball (removing it raised the falls after a dodge); the pelvis stands in for the centre of mass."""
+    command = env.command_manager.get_term(command_name)
+    asset: Articulation = env.scene[asset_cfg.name]
+    height = (asset.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]).clamp(min=0.3)
+    omega = torch.sqrt(9.81 / height).unsqueeze(1)
+    capture = asset.data.root_pos_w[:, :2] + asset.data.root_lin_vel_w[:, :2] / omega
+    feet = asset.data.body_pos_w[:, asset_cfg.body_ids, :2].mean(dim=1)
+    reward = torch.exp(-torch.sum(torch.square(capture - feet), dim=-1) / std**2)
+    return reward * _should_stand_still(command).float()
+
+
 def ball_height_penalty(
     env: ManagerBasedRLEnv,
     ball_name: str,

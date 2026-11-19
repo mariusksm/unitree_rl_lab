@@ -28,6 +28,35 @@ def flight_time_from_apex(release_z, target_z, apex_z):
     return ((2.0 * (apex_z - release_z) / GRAVITY) ** 0.5) + ((2.0 * (apex_z - target_z) / GRAVITY) ** 0.5)
 
 
+def closest_catchable_approach(
+    pos_b: torch.Tensor,
+    vel_b: torch.Tensor,
+    center: torch.Tensor,
+    height_range: tuple[float, float],
+    drag_per_mass: float,
+    step: float = 0.01,
+    horizon: float = 2.0,
+) -> torch.Tensor:
+    """How close (m, horizontal) a ball comes to ``center`` while it is at a catchable height, predicted from its
+    measured position and velocity (n, 3; root yaw frame) under gravity and quadratic air drag (acceleration
+    -drag_per_mass |v| v) for ``horizon`` s. Only the points of the path between ``height_range`` (m above the root)
+    count; inf if the ball never is at such a height. Steps of ``step`` s (velocity with the drag at the step start,
+    position with the mean velocity: exact for gravity alone). Used by the catchability gate of ``BallCommand``;
+    ``sim2sim/ball.py`` has the numpy twin.
+    """
+    pos, vel = pos_b.clone(), vel_b.clone()
+    gravity = torch.tensor([0.0, 0.0, -GRAVITY], device=pos.device)
+    closest = torch.full_like(pos[:, 0], float("inf"))
+    for _ in range(int(round(horizon / step))):
+        new_vel = vel + (gravity - drag_per_mass * vel.norm(dim=-1, keepdim=True) * vel) * step
+        pos = pos + 0.5 * (vel + new_vel) * step
+        vel = new_vel
+        catchable = (pos[:, 2] >= height_range[0]) & (pos[:, 2] <= height_range[1])
+        distance = (pos[:, :2] - center).norm(dim=-1)
+        closest = torch.where(catchable, torch.minimum(closest, distance), closest)
+    return closest
+
+
 class BallCommand(CommandTerm):
     """Single-throw ball command: an underhand lob into a two-arm catch in front of the belly.
 
@@ -40,6 +69,9 @@ class BallCommand(CommandTerm):
     - target point: ``target_forward_range`` / ``target_lateral_range`` in front of the root,
       ``target_height_range`` m above the ground;
     - apex height from ``apex_height_range``, which fixes the flight time.
+
+    With ``aim_at_launch`` (Advanced-S) the aim point moves with the robot until the launch: same offsets in the heading
+    frame at the launch, as a thrower aims where the robot is when they throw; the release point stays.
 
     The ball is parked at the release point until the launch timer expires (``throw_delay_range``, optionally
     log-uniform so that long waits occur without making every episode long), so the policy has to stand and wait as
@@ -73,7 +105,9 @@ class BallCommand(CommandTerm):
     The measurement reaches the robot ``obs_delay_steps_range`` steps late with noise and a per-throw bias.
     Missing measurements are bridged by ballistic prediction for ``max_coast_steps``; after that the ball
     counts as lost. Result: ``perceived_pos_b`` / ``perceived_vel_b`` (zero while not visible) and
-    ``ball_visible``.
+    ``ball_visible``. Two optional rules of the live pipeline: a lost ball is no longer reported
+    (``hide_lost_ball_below`` / ``_beyond``), and a throw predicted from its first measurement to pass beyond reach is
+    never reported (``gate_max_deviation``, decided once per throw).
     """
 
     cfg: BallCommandCfg
@@ -187,6 +221,10 @@ class BallCommand(CommandTerm):
         self._spawn_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self._target_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self._flight_time = torch.ones(self.num_envs, device=self.device)
+        self._apex_flight_time = torch.ones(self.num_envs, device=self.device)
+        """Flight time from the apex alone, before ``max_horizontal_speed`` (``aim_at_launch`` recomputes the cap)."""
+        self._aim_b = torch.zeros(self.num_envs, 2, device=self.device)
+        """Sampled aim point in the heading frame (forward, left of the root), for ``aim_at_launch``."""
         self._drag_coeff = torch.zeros(self.num_envs, device=self.device)
         """k = 0.5 * air density * drag coefficient * cross-section [kg/m]; drag force = -k |v| v."""
         self._ball_mass: torch.Tensor | None = None  # read at the first launch (after the startup mass DR)
@@ -206,6 +244,10 @@ class BallCommand(CommandTerm):
         self.ball_lost = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         """The launched ball is lost for this throw (``hide_lost_ball_below`` / ``_beyond``); the tracker no longer
         reports it."""
+        self.ball_gated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """``gate_max_deviation``: this throw was judged uncatchable at its first measurement and is never reported."""
+        self._gate_decided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._gate_center = torch.tensor(cfg.gate_center, dtype=torch.float, device=self.device)
         self._steps_since_measurement = torch.full(
             (self.num_envs,), self._NO_CONTACT, dtype=torch.long, device=self.device
         )
@@ -245,6 +287,8 @@ class BallCommand(CommandTerm):
             self.metrics["throws_completed"] = torch.zeros(self.num_envs, device=self.device)
         if cfg.rethrow_after_loss:
             self.metrics["throws_lost"] = torch.zeros(self.num_envs, device=self.device)
+        if cfg.gate_max_deviation is not None:
+            self.metrics["throws_gated"] = torch.zeros(self.num_envs, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
@@ -312,6 +356,7 @@ class BallCommand(CommandTerm):
             far = torch.rand(n, device=device) < cfg.unreachable_share
             side = torch.where(torch.rand(n, device=device) < 0.5, -1.0, 1.0)
             aim[:, 1] = torch.where(far, side * sample_uniform(*cfg.unreachable_lateral_range, (n,), device), aim[:, 1])
+        self._aim_b[env_ids] = aim[:, :2]
         target = root_pos + quat_apply(heading, aim)
         target[:, 2] = ground_z + staged(cfg.target_height_range, cfg.target_height_range_hard)
         self._target_pos[env_ids] = target
@@ -320,13 +365,31 @@ class BallCommand(CommandTerm):
         apex = ground_z + staged(cfg.apex_height_range, cfg.apex_height_range_hard)
         apex = torch.maximum(apex, torch.maximum(spawn[:, 2], target[:, 2]) + 0.05)
         flight_time = flight_time_from_apex(spawn[:, 2], target[:, 2], apex)
-        if cfg.max_horizontal_speed is not None:
-            # a flat lob over a long distance would be faster than an underhand throw: lengthen its flight (higher arc)
-            horizontal = torch.norm(target[:, :2] - spawn[:, :2], dim=1)
-            flight_time = torch.maximum(flight_time, horizontal / cfg.max_horizontal_speed)
-        self._flight_time[env_ids] = flight_time
+        self._apex_flight_time[env_ids] = flight_time
+        self._flight_time[env_ids] = self._cap_flight_time(spawn, target, flight_time)
         drag_coefficient = sample_uniform(*cfg.drag_coefficient_range, (n,), device)
         self._drag_coeff[env_ids] = 0.5 * cfg.air_density * drag_coefficient * self._ball_area
+
+    def _cap_flight_time(self, spawn: torch.Tensor, target: torch.Tensor, flight_time: torch.Tensor) -> torch.Tensor:
+        """``max_horizontal_speed``: a flat lob over a long distance would be faster than an underhand throw, so its
+        flight is lengthened (a higher arc)."""
+        if self.cfg.max_horizontal_speed is None:
+            return flight_time
+        horizontal = torch.norm(target[:, :2] - spawn[:, :2], dim=1)
+        return torch.maximum(flight_time, horizontal / self.cfg.max_horizontal_speed)
+
+    def _aim_at_robot(self, env_ids: torch.Tensor):
+        """``aim_at_launch``: move the aim point to the robot as it stands now (sampled offsets in its current heading
+        frame, same height above the ground) and recompute the speed cap of the flight time. The release point stays."""
+        heading = yaw_quat(self.robot.data.root_quat_w[env_ids])
+        aim = torch.zeros(len(env_ids), 3, device=self.device)
+        aim[:, :2] = self._aim_b[env_ids]
+        target = self.robot.data.root_pos_w[env_ids] + quat_apply(heading, aim)
+        target[:, 2] = self._target_pos[env_ids, 2]
+        self._target_pos[env_ids] = target
+        self._flight_time[env_ids] = self._cap_flight_time(
+            self._spawn_pos[env_ids], target, self._apex_flight_time[env_ids]
+        )
 
     def _resample_command(self, env_ids: Sequence[int]):
         """Sample a new throw, park the ball at its release point and arm the launch timer."""
@@ -378,6 +441,8 @@ class BallCommand(CommandTerm):
         self._obs_bias[env_ids] = sample_uniform(-cfg.obs_pos_bias, cfg.obs_pos_bias, (n, 3), self.device)
         self._hide_in_zone[env_ids] = torch.rand(n, device=self.device) < cfg.hide_in_catch_zone_prob
         self.ball_lost[env_ids] = False
+        self.ball_gated[env_ids] = False
+        self._gate_decided[env_ids] = False
 
     def _write_parked_state(self, env_ids: Sequence[int]):
         """Hold the ball at its release point with zero velocity."""
@@ -398,6 +463,8 @@ class BallCommand(CommandTerm):
         if self._ball_mass is None:
             # ball mass randomization is a startup event, so the per-env masses are final here
             self._ball_mass = self.ball.root_physx_view.get_masses()[:, 0].to(self.device)
+        if self.cfg.aim_at_launch:
+            self._aim_at_robot(env_ids)
 
         throw_vel = self._solve_launch_velocity(
             self._spawn_pos[env_ids],
@@ -700,6 +767,25 @@ class BallCommand(CommandTerm):
         meas_pos = self._meas_pos_b[env_ids, read] + self._obs_bias + torch.randn(n, 3, device=self.device) * cfg.obs_pos_noise_std
         meas_vel = self._meas_vel_b[env_ids, read] + torch.randn(n, 3, device=self.device) * cfg.obs_vel_noise_std
 
+        # catchability gate: decided once, on the first measurement of the throw that reaches the robot; a gated throw
+        # is never reported (nothing to coast on either, since no measurement got through)
+        if cfg.gate_max_deviation is not None:
+            first = valid & ~self._gate_decided
+            if first.any():
+                ids = first.nonzero(as_tuple=False).flatten()
+                # the pipeline knows the ball's nominal drag, not the per-throw drag and mass of the randomization
+                drag_per_mass = 0.5 * cfg.air_density * cfg.gate_drag_coefficient * self._ball_area / float(
+                    self._ball_mass.mean()
+                )
+                miss = closest_catchable_approach(
+                    meas_pos[ids], meas_vel[ids], self._gate_center, cfg.gate_height_range, drag_per_mass
+                )
+                gated_now = miss > cfg.gate_max_deviation
+                self.ball_gated[ids] = gated_now
+                self._gate_decided[ids] = True
+                self.metrics["throws_gated"][ids] += gated_now.float()
+            valid = valid & ~self.ball_gated
+
         # missing measurement: coast on the last estimate with the ballistic model
         self._steps_since_measurement = torch.where(
             valid, torch.zeros_like(self._steps_since_measurement), self._steps_since_measurement + 1
@@ -960,6 +1046,13 @@ class BallCommandCfg(CommandTermCfg):
     unreachable_lateral_range: tuple[float, float] = (0.6, 1.0)
     """Lateral distance (m) of the aim point of an unreachable throw from the root, to the left or right."""
 
+    aim_at_launch: bool = False
+    """Aim each throw at the robot as it stands at the launch (Advanced-S), as a thrower aims where the robot is when
+    they throw. The aim point keeps its sampled offsets in the heading frame and its height above the ground, the
+    release point stays. Off: the throw is aimed where the robot stood when the wait began (up to 8 s earlier), so
+    pushes and drift during the wait shift where it arrives relative to the robot (Advanced-D: 37 % of the throws
+    outside the trained ranges)."""
+
     # ── perception: how the robot gets the ball from the VICON pipeline (actor observations only).
     #    Dropout and noise values are calibrated on the same 12 VICON throws ──
     detection_delay_range: tuple[float, float] = (0.04, 0.12)
@@ -1003,3 +1096,22 @@ class BallCommandCfg(CommandTermCfg):
     hide_lost_ball_beyond: float | None = None
     """The same once the ball is farther than this (m, horizontal) from the robot root after its planned arrival time
     (flown past). None: off."""
+
+    gate_max_deviation: float | None = None
+    """Catchability gate (a rule for the live pipeline, evaluated in simulation): decided once per throw, at its first
+    measurement that reaches the robot. The ball's path is predicted from that measurement (gravity and drag with
+    ``gate_drag_coefficient``); if it comes no closer than this (m, horizontal) to ``gate_center`` while it is within
+    ``gate_height_range``, the throw counts as uncatchable (``ball_gated``) and is never reported, so the robot keeps
+    standing as while it waits. The height matters: a ball from the side can cross right in front of the robot at head
+    height and come down beyond reach, and its line of flight alone would pass. None: off."""
+
+    gate_center: tuple[float, float] = (0.3, 0.0)
+    """Catch point of the gate (m, root yaw frame: forward, left), the middle of the trained aim points."""
+
+    gate_height_range: tuple[float, float] = (-0.05, 0.6)
+    """Catchable heights of the gate (m above the root): with the pelvis at 0.78 m about 0.75-1.4 m above the ground,
+    the trained aim heights of Advanced-E."""
+
+    gate_drag_coefficient: float = 0.375
+    """Drag coefficient the gate's prediction assumes (the middle of ``drag_coefficient_range``), with the mean ball
+    mass: the live pipeline knows the ball, not each throw's randomized drag and mass."""

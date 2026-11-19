@@ -18,8 +18,9 @@ every stage is measured (evaluation suite, Sim2Sim) against the stage before and
 - **D:** pushes in the ball phase ramped from 20 % up to full strength by a success-gated curriculum.
 - **E:** wider, realistic throws: aim and arc (flatter and higher lobs) widened by the same curriculum, half the throws
   from the front.
-- **S:** losing a ball safely: a lost ball ends its throw, not the episode, a fall costs a large penalty, throws beyond
-  the arms' reach and the lost ball hidden from the perception (E dived after unreachable balls and fell).
+- **S:** losing a ball safely: a lost ball ends its throw, not the episode, a fall costs a large penalty, standing
+  balanced over the feet pays, throws beyond the arms' reach, every throw aimed at the robot at the launch, and the lost
+  ball hidden from the perception (E dived after unreachable balls and fell).
 - Planned (sketch): F, lunges for throws beyond the arms' reach (on top of S).
 
 Analysis and sources: H-ReACT/analysis/2026-11-03_phase2_analyse/ (outside the repository).
@@ -776,22 +777,28 @@ class AdvancedEPlayEnvCfg(AdvancedEEnvCfg):
 #    nothing after it was ever trained or measured, and a fall cost the policy no more than the lost ball itself. With
 #    the episode kept running after the loss (eval_catch.py --after_loss_s), E fell after every lost ball when throws
 #    went beyond its reach: it dived after them. S keeps the episode running after a lost ball (the robot has to stand
-#    and leave the ball alone, then the next throw comes), punishes a fall once with -100 (ten catch bonuses), makes the
-#    approach rewards depend on the posture factor (reaching out of balance pays nothing), mixes in throws beyond the
-#    arms' reach and hides a lost ball from the perception, as the live pipeline will. The throws and pushes stay at
-#    E's final level. ──
+#    and leave the ball alone, then the next throw comes), punishes a fall once with -200 (twenty catch bonuses: one
+#    fall accepted per about ten extra catches at most, research of 2026-11-19), makes the approach rewards depend on
+#    the posture factor (reaching out of balance pays nothing), pays for standing balanced over the feet (capture
+#    point) while it should stand still, mixes in throws beyond the arms' reach, aims every throw at the robot as it
+#    stands at the launch and hides a lost ball from the perception, as the live pipeline will. The throws and pushes
+#    stay at E's final level. Trained without the catchability gate (BallCommandCfg.gate_max_deviation): the policy has
+#    to be safe on its own, the gate is a second layer in the live pipeline. ──
 UNREACHABLE_SHARE = 0.15
-UNREACHABLE_LATERAL_RANGE = (0.6, 1.0)
+UNREACHABLE_LATERAL_RANGE = (0.45, 1.0)  # from the edge of E's range (E catches 50-70 % at 0.45-0.55 m, but falls
+#   after a fifth to a third of them) to clearly beyond reach (E: 2 % caught beyond 0.8 m)
 LOSS_SETTLE_RANGE = (1.0, 3.0)
 HIDE_LOST_BALL_BELOW = 0.4  # m: the ball cannot count as held below 0.5 m
 HIDE_LOST_BALL_BEYOND = 3.0  # m from the robot after the planned arrival: flown past
-FALL_PENALTY_WEIGHT = -5000.0  # once per fall: -100 after the reward manager's dt (0.02 s), ten catch bonuses
+FALL_PENALTY_WEIGHT = -10000.0  # once per fall: -200 after the reward manager's dt (0.02 s), twenty catch bonuses
+CAPTURE_POINT_WEIGHT = 2.0  # per second while standing balanced, against 5 for `stand`
+CAPTURE_POINT_STD = 0.12  # m, Zhang et al.: a push of 0.5 m/s moves the capture point 0.14 m (reward 0.25)
 
 
 @configclass
 class SRewardsCfg(A2RewardsCfg):
     """A2's rewards with the approach terms times the posture factor, the ball-height penalty only while the ball is in
-    play, and a one-time penalty for a fall."""
+    play, a one-time penalty for a fall and the capture point over the feet while the robot should stand still."""
 
     ball_reach = RewTerm(
         func=mdp.ball_interception_exp,
@@ -826,13 +833,22 @@ class SRewardsCfg(A2RewardsCfg):
         weight=FALL_PENALTY_WEIGHT,
         params={"term_keys": ["bad_orientation", "base_height"]},
     )
+    capture_point = RewTerm(
+        func=mdp.capture_point_exp,
+        weight=CAPTURE_POINT_WEIGHT,
+        params={
+            "std": CAPTURE_POINT_STD,
+            "command_name": "ball_throw",
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET_BODY_NAMES, preserve_order=True),
+        },
+    )
 
 
 @configclass
 class AdvancedSEnvCfg(AdvancedEEnvCfg):
     """Advanced-S: Advanced-E plus losing a ball safely (a lost ball ends its throw, not the episode; fall penalty;
-    approach rewards times P; unreachable throws; the lost ball hidden). Fine-tuned from Advanced-E's final
-    checkpoint."""
+    approach rewards times P; capture point over the feet; unreachable throws; throws aimed at the robot at the launch;
+    the lost ball hidden). Fine-tuned from Advanced-E's final checkpoint."""
 
     rewards: SRewardsCfg = SRewardsCfg()
 
@@ -848,6 +864,7 @@ class AdvancedSEnvCfg(AdvancedEEnvCfg):
         cmd.unreachable_lateral_range = UNREACHABLE_LATERAL_RANGE
         cmd.hide_lost_ball_below = HIDE_LOST_BALL_BELOW
         cmd.hide_lost_ball_beyond = HIDE_LOST_BALL_BEYOND
+        cmd.aim_at_launch = True
         # a lost ball ends its throw in the command (rethrow_after_loss); only a fall or the time-out ends the episode
         self.terminations.ball_dropped = None
         self.terminations.ball_missed = None

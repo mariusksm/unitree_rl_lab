@@ -36,6 +36,9 @@ in that window: falls (and when), the lowest pelvis and hand, the largest torso 
 close the ball on the floor comes to a foot, and the posture factor at the end. The throw still counts as dropped or
 missed. ``--hide_lost_ball`` makes the tracker stop reporting a ball that fell below 0.4 m or is more than 3 m away
 after its planned arrival (``BallCommandCfg.hide_lost_ball_below`` / ``_beyond``), as a live pipeline could.
+``--gate_deviation D`` adds the catchability gate (``BallCommandCfg.gate_max_deviation``): a throw predicted from its
+first measurement to come no closer than D m to the catch point while at a catchable height (0.75-1.4 m above the
+ground) is never reported, so the robot keeps standing; the per-throw records mark it (``gated``).
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
 
@@ -98,6 +101,9 @@ parser.add_argument("--after_loss_s", type=float, default=None,
                     help="Keep the episode running this long after the ball is lost and measure what the robot does.")
 parser.add_argument("--hide_lost_ball", action="store_true", default=False,
                     help="The tracker stops reporting a lost ball (below 0.4 m, or 3 m away after the planned arrival).")
+parser.add_argument("--gate_deviation", type=float, default=None,
+                    help="Catchability gate: a throw predicted from its first measurement to come no closer than this "
+                         "(m) to the catch point at a catchable height is never reported to the robot.")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -231,7 +237,7 @@ POST_LOSS_COLUMNS = ("lost_as", "post_loss_s", "post_loss_fell", "post_loss_min_
                      "post_loss_end_P")
 THROW_COLUMNS = ("outcome", "launched") + THROW_FIELDS + (
     "touched", "palm", "max_secured_s", "confirmed", "pushes_flight", "push_max_flight_mps", "pushes_catch",
-    "pushes_hold") + POST_LOSS_COLUMNS
+    "pushes_hold", "gated") + POST_LOSS_COLUMNS
 F = {name: k for k, name in enumerate(THROW_FIELDS)}
 LOSSES = ("ball_dropped", "ball_missed")  # the ball is lost (a time-out is no loss: in `hold` it ends a held catch)
 FALLS = ("bad_orientation", "base_height")
@@ -373,6 +379,7 @@ class Stats:
         self.th = torch.full((N, len(THROW_FIELDS)), float("nan"), device=dev)
         self.th_touch = torch.zeros(N, dtype=torch.bool, device=dev)
         self.th_palm = torch.zeros(N, dtype=torch.bool, device=dev)
+        self.th_gated = torch.zeros(N, dtype=torch.bool, device=dev)  # --gate_deviation: never reported to the robot
         # pushes during the flight (launch to the planned arrival: a window of the same length for caught and lost
         # balls), from the arrival to the confirmation (ends early when the ball is lost), after the confirmation
         self.th_push_flight = torch.zeros(N, dtype=torch.long, device=dev)
@@ -455,6 +462,7 @@ class Stats:
         touching = forces.norm(dim=-1).amax(dim=1).amax(dim=1) > 1.0  # (N, filter bodies)
         self.th_touch |= live & touching.any(dim=-1)
         self.th_palm |= live & cmd.arm_contact.any(dim=-1)
+        self.th_gated |= live & cmd.ball_gated
         push = getattr(ue, "_eval_push", None)
         if push is not None:
             hit = live & (push > 0.01)
@@ -664,7 +672,7 @@ class Stats:
             [why, int(bool(self.was_launched[i]))] + params
             + [int(bool(self.th_touch[i])), int(bool(self.th_palm[i])), round(int(self.max_sec[i]) * self.dt, 2),
                int(bool(self.ep_confirmed[i])), int(self.th_push_flight[i]), round(float(self.th_push_max[i]), 3),
-               int(self.th_push_catch[i]), int(self.th_push_hold[i])] + post
+               int(self.th_push_catch[i]), int(self.th_push_hold[i]), int(bool(self.th_gated[i]))] + post
         )
 
     def _record_launch(self, ids: torch.Tensor):
@@ -708,6 +716,7 @@ class Stats:
         self.th[ids] = float("nan")
         self.th_touch[ids] = False
         self.th_palm[ids] = False
+        self.th_gated[ids] = False
         self.th_push_flight[ids] = 0
         self.th_push_max[ids] = 0.0
         self.th_push_catch[ids] = 0
@@ -747,6 +756,12 @@ class Stats:
 
         out["pushes_during_flight"] = {"pct_throws_pushed": round(100 * len(pushed) / max(1, len(launched)), 1),
                                        "caught_pct_pushed": caught(pushed), "caught_pct_not_pushed": caught(calm)}
+        if self.cmd.cfg.gate_max_deviation is not None:
+            gated = [x for x in launched if x["gated"]]
+            shown = [x for x in launched if not x["gated"]]
+            out["gate"] = {"max_deviation_m": self.cmd.cfg.gate_max_deviation,
+                           "pct_throws_gated": round(100 * len(gated) / max(1, len(launched)), 1),
+                           "caught_pct_gated": caught(gated), "caught_pct_not_gated": caught(shown)}
         post = [x for x in rows if x["lost_as"] != ""]
         if self.after_loss_s is not None and post:
             n = len(post)
@@ -968,6 +983,8 @@ def main():
     if args_cli.hide_lost_ball:
         env_cfg.commands.ball_throw.hide_lost_ball_below = 0.4
         env_cfg.commands.ball_throw.hide_lost_ball_beyond = 3.0
+    if args_cli.gate_deviation is not None:
+        env_cfg.commands.ball_throw.gate_max_deviation = args_cli.gate_deviation
     if getattr(env_cfg.events, "push_robot", None) is not None:
         env_cfg.events.push_robot.func = record_pushes(env_cfg.events.push_robot.func)
     if args_cli.video:

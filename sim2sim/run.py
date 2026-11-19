@@ -57,6 +57,9 @@ parser.add_argument("--drop_test", action="store_true", help="Only drop the ball
 parser.add_argument("--debug_ball", action="store_true", help="Print every step of the first throw's flight.")
 parser.add_argument("--easy", action="store_true", help="Throws and perception of the curriculum's easy stage.")
 parser.add_argument("--ghost_ball", action="store_true", help="Debug: the ball collides with nothing (only seen).")
+parser.add_argument("--gate_deviation", type=float, default=None,
+                    help="Catchability gate: a throw predicted from its first measurement to come no closer than "
+                         "this (m) to the catch point at a catchable height is never reported (gate_max_deviation).")
 parser.add_argument("--after_loss_s", type=float, default=None,
                     help="Keep the episode running this long after the ball is lost and count falls in that window.")
 args = parser.parse_args()
@@ -401,11 +404,17 @@ def stand(sim: Sim):
 def throws(sim: Sim):
     """``--throws`` episodes with the Advanced lifecycle (see the module docstring)."""
     d, rng = sim.d, np.random.default_rng(args.seed)
+    if args.gate_deviation is not None:
+        cfg = sim.cmd_cfg
+        cfg["gate_max_deviation"] = args.gate_deviation
+        drag = cfg.get("gate_drag_coefficient") or float(np.mean(cfg["drag_coefficient_range"]))
+        cfg["gate_drag_per_mass"] = 0.5 * cfg["air_density"] * drag * np.pi * sim.ball["radius"] ** 2 / sim.ball["mass"]
     perception, catch = Perception(sim.cmd_cfg, STEP_DT, rng), CatchState(sim.cmd_cfg, STEP_DT)
     wait = tuple(float(x) for x in args.wait.split(","))
     area = np.pi * sim.ball["radius"] ** 2
     outcomes, confirm_delays, held_torso = [], [], []
     lost_balls, fell_after_loss = 0, []  # --after_loss_s: falls within the window after the loss (s after it)
+    gated = []  # --gate_deviation: per throw (gated, outcome, fell after the loss)
     for episode in range(args.throws):
         sim.reset_robot()
         throw = Throw(sim.cmd_cfg, d.qpos[:3].copy(), yaw_of(d.qpos[3:7]), area, rng, wait, not args.uniform_wait)
@@ -416,7 +425,7 @@ def throws(sim: Sim):
         obs = sim.observation(NO_BALL)
         time_until_throw, time_since_throw, outcome, confirm_t = throw.delay, 0.0, "time_out", None
         arrival_miss = None
-        lost_as, lost_step = None, None
+        lost_as, lost_step, fell_after = None, None, False
         recording = sim.writer if episode < args.video_throws else None
         steps = int(EPISODE_S / STEP_DT)
         for k in range(steps):
@@ -442,6 +451,7 @@ def throws(sim: Sim):
             if lost_as is not None and args.after_loss_s is not None:
                 if fallen:
                     fell_after_loss.append((k - lost_step) * STEP_DT)
+                    fell_after = True
                     outcome = lost_as
                 elif (k - lost_step) * STEP_DT >= args.after_loss_s or k == steps - 1:
                     outcome = lost_as
@@ -451,6 +461,8 @@ def throws(sim: Sim):
             pre_throw = time_until_throw > 0.0
             time_until_throw -= STEP_DT
             if pre_throw and time_until_throw <= 0.0:
+                if sim.cmd_cfg.get("aim_at_launch"):
+                    throw.aim_at(d.qpos[:3].copy(), yaw_of(d.qpos[3:7]))
                 sim.set_ball(throw.release, throw.launch_velocity(sim.ball["mass"]))
                 time_since_throw = 0.0
             elif time_until_throw > 0.0:
@@ -483,12 +495,13 @@ def throws(sim: Sim):
         d.xfrc_applied[sim.ball_body] = 0.0
         outcomes.append(outcome)
         lost_balls += int(lost_as is not None)
+        gated.append((perception.gated, outcome, outcome == "fell" or fell_after))
         if confirm_t is not None:
             confirm_delays.append(confirm_t)
         print(f"[sim2sim] throw {episode + 1:3d}: wait {throw.delay:4.1f} s, release "
               f"{np.linalg.norm(throw.release[:2] - d.qpos[:2]):.1f} m, aim y {throw.target[1]:+.2f} m z "
               f"{throw.target[2]:.2f} m, ball {100 * (arrival_miss or 0):.0f} cm from the aim at the arrival time"
-              f" -> {outcome}", flush=True)
+              f"{', gated' if perception.gated else ''} -> {outcome}", flush=True)
     n = len(outcomes)
     summary = ", ".join(f"{o} {100.0 * outcomes.count(o) / n:.0f} %" for o in OUTCOMES)
     delay = np.median(confirm_delays) if confirm_delays else float("nan")
@@ -499,6 +512,13 @@ def throws(sim: Sim):
         after = f", {np.median(fell_after_loss):.2f} s after the loss (median)" if fell_after_loss else ""
         print(f"[sim2sim] after a lost ball ({args.after_loss_s:g} s window): fell after {len(fell_after_loss)} of "
               f"{lost_balls} lost balls{after}")
+    if args.gate_deviation is not None:
+        for name, flag in (("gated", True), ("reported", False)):
+            sel = [g for g in gated if g[0] == flag]
+            caught = sum(o == "caught" for _, o, _ in sel)
+            falls = sum(f for _, _, f in sel)
+            print(f"[sim2sim] gate {args.gate_deviation:g} m: {name} {len(sel)} throws, caught {caught}, "
+                  f"falls (before or after the loss) {falls}")
 
 
 def main():

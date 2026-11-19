@@ -38,6 +38,21 @@ def ballistic_intercept(pos_b: np.ndarray, vel_b: np.ndarray, catch_height: floa
     return np.array([pos_b[0] + vel_b[0] * t_go, pos_b[1] + vel_b[1] * t_go, t_go])
 
 
+def closest_catchable_approach(pos_b: np.ndarray, vel_b: np.ndarray, center, height_range, drag_per_mass: float,
+                                step: float = 0.01, horizon: float = 2.0) -> float:
+    """How close (m, horizontal) the ball comes to ``center`` while within ``height_range`` (m above the root),
+    predicted under gravity and drag as ``ball_command.closest_catchable_approach``; inf if never."""
+    pos, vel = np.array(pos_b, dtype=float), np.array(vel_b, dtype=float)
+    center, closest = np.asarray(center, dtype=float), np.inf
+    for _ in range(int(round(horizon / step))):
+        new_vel = vel + (GRAVITY - drag_per_mass * np.linalg.norm(vel) * vel) * step
+        pos = pos + 0.5 * (vel + new_vel) * step
+        vel = new_vel
+        if height_range[0] <= pos[2] <= height_range[1]:
+            closest = min(closest, float(np.linalg.norm(pos[:2] - center)))
+    return closest
+
+
 class Perception:
     """Perceived ball of one robot; ``reset()`` at every new throw, ``update()`` every control step."""
 
@@ -59,6 +74,7 @@ class Perception:
         self.dropout_left = 0
         self.pos_b, self.vel_b, self.visible = np.zeros(3), np.zeros(3), False
         self.lost = False  # hide_lost_ball_below / _beyond: no longer reported for this throw
+        self.gated, self.gate_decided = False, False  # gate_max_deviation: judged uncatchable, never reported
         lo, hi = cfg["obs_delay_steps_range"]
         self.delay = min(int(self.rng.integers(lo, hi + 1)), len(self.meas_valid) - 1)
         self.detection_delay = float(self.rng.uniform(*cfg["detection_delay_range"]))
@@ -103,6 +119,17 @@ class Perception:
         valid = bool(self.meas_valid[read])
         meas_pos = self.meas_pos[read] + self.bias + self.rng.normal(0.0, 1.0, 3) * cfg["obs_pos_noise_std"]
         meas_vel = self.meas_vel[read] + self.rng.normal(0.0, 1.0, 3) * cfg["obs_vel_noise_std"]
+
+        # catchability gate (BallCommandCfg.gate_max_deviation): decided once, on the first measurement that arrives;
+        # gate_drag_per_mass is set by run.py from the nominal drag coefficient, the air density and the ball
+        if cfg.get("gate_max_deviation") is not None:
+            if valid and not self.gate_decided:
+                self.gate_decided = True
+                center = cfg.get("gate_center") or (0.3, 0.0)
+                heights = cfg.get("gate_height_range") or (-0.05, 0.6)
+                miss = closest_catchable_approach(meas_pos, meas_vel, center, heights, cfg["gate_drag_per_mass"])
+                self.gated = miss > cfg["gate_max_deviation"]
+            valid = valid and not self.gated
 
         # missing measurement: coast on the last estimate with the ballistic model
         self.steps_since_measurement = 0 if valid else self.steps_since_measurement + 1
@@ -163,6 +190,7 @@ class Throw:
         self.release = root_pos + heading @ np.array([distance * np.cos(azimuth), distance * np.sin(azimuth), 0.0])
         self.release[2] = u(cfg["release_height_range"])
         aim = np.array([u(cfg["target_forward_range"]), u(cfg["target_lateral_range"]), 0.0])
+        self.aim = aim
         self.target = root_pos + heading @ aim
         self.target[2] = u(cfg["target_height_range"])
         apex = max(u(cfg["apex_height_range"]), max(self.release[2], self.target[2]) + 0.05)
@@ -171,6 +199,14 @@ class Throw:
         self.delay = wait[0] * (wait[1] / wait[0]) ** rng.random() if log_wait else u(wait)
         self.velocity_noise = rng.normal(0.0, 1.0, 3) * cfg["velocity_noise"]
         self.iterations, self.nodes = int(cfg["drag_solver_iterations"]), int(cfg["drag_solver_nodes"])
+
+    def aim_at(self, root_pos: np.ndarray, root_yaw: float):
+        """``aim_at_launch``: move the aim point to the robot as it stands at the launch (same offsets in its heading
+        frame, same height); the release point stays."""
+        c, s = np.cos(root_yaw), np.sin(root_yaw)
+        height = self.target[2]
+        self.target = root_pos + np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]) @ self.aim
+        self.target[2] = height
 
     def launch_velocity(self, ball_mass: float) -> np.ndarray:
         """Velocity that reaches the target after the flight time with gravity and drag, plus the velocity noise."""
