@@ -58,6 +58,7 @@ class Perception:
         self.steps_since_measurement = NOT_SEEN
         self.dropout_left = 0
         self.pos_b, self.vel_b, self.visible = np.zeros(3), np.zeros(3), False
+        self.lost = False  # hide_lost_ball_below / _beyond: no longer reported for this throw
         lo, hi = cfg["obs_delay_steps_range"]
         self.delay = min(int(self.rng.integers(lo, hi + 1)), len(self.meas_valid) - 1)
         self.detection_delay = float(self.rng.uniform(*cfg["detection_delay_range"]))
@@ -70,7 +71,7 @@ class Perception:
         return bool(np.all((ball_b >= self.zone_lo) & (ball_b <= self.zone_hi)))
 
     def update(self, launched: bool, time_since_throw: float, ball_pos_w, ball_vel_w, root_pos_w, root_quat_w,
-               in_zone: bool | None = None):
+               in_zone: bool | None = None, flight_time: float | None = None):
         cfg = self.cfg
         yaw = yaw_of(root_quat_w)
         pos_b = to_yaw_frame(np.asarray(ball_pos_w) - root_pos_w, yaw)
@@ -78,8 +79,15 @@ class Perception:
         if in_zone is None:
             in_zone = self.in_zone(ball_pos_w, root_pos_w, root_quat_w)
 
+        # a lost ball is no longer reported (BallCommandCfg.hide_lost_ball_below / _beyond; ground at z = 0)
+        below, beyond = cfg.get("hide_lost_ball_below"), cfg.get("hide_lost_ball_beyond")
+        if launched and below is not None and ball_pos_w[2] < below:
+            self.lost = True
+        if launched and beyond is not None and flight_time is not None and time_since_throw > flight_time:
+            self.lost |= bool(np.linalg.norm(pos_b[:2]) > beyond)
+
         # what the tracker measures now; dropouts come in bursts of 1..obs_dropout_max_steps steps
-        detected = launched and time_since_throw >= self.detection_delay
+        detected = launched and time_since_throw >= self.detection_delay and not self.lost
         burst_start = self.dropout_left == 0 and self.rng.random() < cfg["obs_dropout_prob"]
         burst_length = int(self.rng.integers(1, cfg["obs_dropout_max_steps"] + 1))
         if burst_start:

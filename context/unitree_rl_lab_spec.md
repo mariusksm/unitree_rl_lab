@@ -64,10 +64,12 @@ scripts/
                                        play.py adapted to Isaac Lab 2.3 / rsl-rl 5 (exports policy.pt/.onnx
                                        to <run>/exported/)
   rsl_rl/eval_catch.py                 Evaluation suite: one checkpoint, one stress-test scenario (Unified, Advanced;
-                                       base, fric_high, fric_low, hold, wait, push, lateral, delay, arcs),
-                                       metrics as JSON (outcomes per throw, feet, posture, hold geometry, joint
-                                       limits, torques) and one row per throw in <out>_throws.csv (the throw
-                                       relative to the robot at its launch, how it ended, pushes in the ball phase)
+                                       base, fric_high, fric_low, hold, wait, push, lateral, delay, arcs,
+                                       unreachable), metrics as JSON (outcomes per throw, feet, posture, hold
+                                       geometry, joint limits, torques) and one row per throw in <out>_throws.csv
+                                       (the throw relative to the robot at its launch, how it ended, pushes in the
+                                       ball phase); --after_loss_s keeps the episode running after a lost ball and
+                                       records what the robot does then (pitfall 39)
   rsl_rl/eval_catch_throws.py          Catch rate per throw type from those rows, as Markdown tables
   rsl_rl/eval_catch_all.sh             All scenarios of a checkpoint + comparison table (eval_catch_report.py)
   list_envs.py
@@ -145,6 +147,10 @@ python scripts/rsl_rl/eval_catch_report.py eval/<run_a> eval/<run_b>     # compa
 # Catch rate per throw type (every eval_catch.py run also writes <out>_throws.csv); --detail: how the throws ended.
 # For two checkpoints that differ by a point or two, run longer (--steps 9000, pitfall 37).
 python scripts/rsl_rl/eval_catch_throws.py E=eval/<run_e>/base_throws.csv D=eval/<run_d>/base_throws.csv
+# What the robot does after a lost ball (a loss normally ends the episode): 5 s more, throws up to 1 m sideways;
+# --hide_lost_ball: the tracker stops reporting a lost ball. MuJoCo: sim2sim/run.py --throws N --after_loss_s 5
+python scripts/rsl_rl/eval_catch.py --headless --task Unitree-G1-29dof-BallCatch-Advanced-E --checkpoint /abs/model.pt \
+  --scenario unreachable --after_loss_s 5 --no_push --steps 9000 --out eval/unreach_after_loss
 # Checkpoints of one run at the same difficulty (throws and hold rules of the curriculum at progress 0.1):
 python scripts/rsl_rl/eval_catch.py --headless --task Unitree-G1-29dof-BallCatch-Unified \
   --checkpoint /abs/path/model_<N>.pt --curriculum_progress 0.1 --steps 1000 --out eval/model_<N>_p010
@@ -382,7 +388,10 @@ show how long the ball has been held. Checkpoints from before 2026-11-01 have a 
      is not measured yet; 80–120 ms cost the 2026-10-27 baseline (trained on 1–3) 6 points of catch rate. Gaps are bridged by ballistic prediction for 3 steps;
      after that the ball counts as not visible (perceived state 0, `ball_visible` 0). Probe (2026-10-16): in flight
      88.8 % fresh measurements, 8.6 % coasted, 2.6 % not visible; zero noise and fixed delay reproduce the true
-     state of 2 steps earlier exactly.
+     state of 2 steps earlier exactly. With `hide_lost_ball_below` / `_beyond` (off by default; Advanced-S: 0.4 m and
+     3 m) a lost ball, lower than 0.4 m above the ground or more than 3 m from the robot after its planned arrival,
+     is no longer reported for the rest of the throw (`ball_lost`): the robot sees no ball, as while it waits,
+     instead of a ball on the floor that it never saw in training. The live pipeline must apply the same rule.
 - Rewards (A): Unified's reward without the tracking terms (Section 7.3), plus standing still while waiting and holding. Ball terms are zero before the launch.
 
   | Reward | Weight | Meaning |
@@ -551,6 +560,7 @@ predicts the 15 cm ball up to ~0.3 m too far; the error shrinks with `t_go`. The
 36. **Pushed and unpushed throws compare only over a window of the same length.** A lost ball ends its throw at once, a caught one is held for 3 s more, so the caught throws collect more pushes. In smoke tests in the `push` scenario, 97 % of the throws counted as pushed over the whole ball phase, and counted up to the confirmation, the pushed throws were caught more often than the unpushed ones (96.6 against 84.8 %). `eval_catch.py` therefore splits the pushes of a throw into the flight (launch to the planned arrival, the same window for every throw; `pushes_flight`, `push_max_flight_mps`, the largest change of the pelvis' horizontal velocity), the catch (arrival to confirmation) and the hold. Only the flight compares pushed with unpushed throws; pushes while holding only tell whether confirmed catches survive them. Even in the flight, a longer flight is likelier to be pushed and is easier, which favours weakly pushed throws slightly; compare within flight times (`eval_catch_throws.py` has both splits).
 37. **A 60-s suite run can be off by 2 points.** E in E (`base`): 86.6 % in the suite, 88.8 % over 180 s (three times the throws); in eight other pairs the 180-s run lay between 2.1 points below the suite (C's actor in D, `push`: 79.1 against 77.0 %) and 0.4 above. The run-to-run spread is larger than the standard error from the throw count (0.6 points at 3000 throws). Decide between two checkpoints that differ by 1–2 points with 180-s runs (`--steps 9000`, ≈ 9000 throws in the Advanced tasks).
 38. **A throw is sampled when its wait starts, relative to the robot at that moment** (`BallCommand._sample_throw`, then frozen in the world). By the launch, 0.5–8 s later, the robot has drifted (C to E with pushes while waiting: median 6 cm, 10 % of the throws more than 26 cm; without pushes 2 cm) and turned (≈ 10°; in C to E on average 7° to the left, whatever side the ball comes from). Relative to the robot at the launch the throws therefore spread wider than the configured ranges. In D, whose throws are all sampled inside the ranges of A to D, 37 % lie outside them at the launch and are caught 81.5 % against 94.6 %. In E 18 % aim closer than 0.15 m to the pelvis (7 % by the ranges), and twice as many arrive more than 0.3 m to the right as to the left. A catch rate split by the wait time mixes the wait with this drift; `eval_catch.py` records the throw relative to the robot at the launch.
+39. **A lost ball that ends the episode hides what follows, and makes a fall free.** In Unified and Advanced-A to E a ball below 0.1 m or 6 m away ends the episode: the policy never sees the seconds after a loss, and a fall costs it no more than the lost ball. `eval_catch.py --after_loss_s 5` keeps the episode running. Smoke test (64 robots × 30 s, throws up to 1 m sideways, scenario `unreachable`): E fell after every one of 85 lost balls, median 0.4 s after the loss, mostly a dive already under way when the ball hit the floor, and before the loss in another 15 % of the throws. Lost balls within its training range (up to 0.45 m) were followed by a fall too. Hiding the lost ball from the perception (`--hide_lost_ball`) lowered the falls after a loss to 57 %. The suite's fall rates (E: 1.1 % of the throws) therefore count only falls before the ball reaches the floor. Advanced-S trains the time after a loss (Section 7.2).
 
 ## 10. Training History & Artifacts
 
@@ -656,6 +666,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    mounted on the real robot (Inspire FTP hand ≈ 0.88 kg per hand per the `unitree_ros` URDF, or the 3D-printed
    mount from the proposal) and model its mass and collision geometry.
    - Forearm colliders (pitfall 26) and open palms (pitfall 28): on since 2026-10-29 (`FOREARM_COLLIDERS`, `CONCAVE_PALMS`), from the fourth Unified run on.
+   - Sarah's rubber-hand colliders in mj-lab-pipeline (palm cut from the hand mesh plus 14 finger capsules, `f58534d`) compared on 2026-11-19 with ours and Unitree's single hull, against the visual hand mesh: hers follows the fingers more closely (25 % of the collider surface more than 2 mm outside the real hand, ours 43 %, Unitree's 57 %). For a ∅15 cm ball both rest about equally close to the real hand (3.8 / 3.2 mm farther out in the palm core, Unitree's hull 13 mm), and her capsules leave 3.3 % of the real finger surface uncovered. Not adopted; a mix of our palm and thumb with her finger capsules is the option if the fingers matter on the real robot. Analysis `analysis/2026-11-19_handmodell_sarah/` (outside the repository).
 8. Sim2real hardening:
    - ball contacts: in the probe of 2026-10-29 (stiff arms, 200 Hz physics) the ball sinks 1–2 mm into the real surface at gentle contacts but 15–23 mm into the hand at 4.7–6.5 m/s impacts, the speed range of real throws (changelog). Check contact offsets, CCD for the ball or a shorter physics step if Sim2Sim shows catches that rely on it
    - actuator delay as DR
@@ -1321,3 +1332,12 @@ In case of conflicts: **code > this spec > other context documents.**
 - Per-throw evaluation: two thirds of the lost balls had reached a palm. The costliest throws are those that the robot's drift and turn while waiting move off-centre, because a throw is sampled when its wait starts (new pitfall 38). Front or side release makes no difference of its own. Candidates for the next stage in Section 11, item 16; Marius decides after a few days.
 - Pitfall 37 extended by the pairs in D (C's actor in D, `push`: the 60-s value was 2.1 points too high).
 - Spec sections 2, 7.2, 9 (pitfalls 37, 38), 10 and 11 (items 13, 15, 16) updated.
+
+### 2026-11-19: What follows a lost ball: evaluation and hiding the ball; Sarah's hand colliders compared
+- Why: the project group asked that the robot must not hurt itself, above all that it must not fall while trying to catch a ball it cannot reach or after dropping one. A lost ball ended the episode in every task, so that time was never measured.
+- `eval_catch.py`: `--after_loss_s T` keeps the episode running T seconds after a lost ball (a termination that fires T s after the loss replaces `ball_dropped` and `ball_missed`). The throw stays dropped or missed, and new columns of `<out>_throws.csv` record the time after it: fall and when, lowest pelvis and hand, largest torso tilt, lift-offs, displacement, how close the ball on the floor came to a foot, posture factor at the end. The JSON gets an `after_loss` block. New scenario `unreachable` (aims up to ±1.0 m sideways); `--hide_lost_ball` switches on the new hiding rule. `eval_catch_throws.py` reads the new text column.
+- `BallCommandCfg.hide_lost_ball_below` / `_beyond` (default off): a lost ball is no longer reported by the perception model (`ball_lost`), as the live pipeline should do.
+- `sim2sim/run.py --after_loss_s`: the same window in MuJoCo; `ball.Perception` applies the hiding rule from the run's `env.yaml`.
+- Smoke test: E falls after every lost ball when throws go beyond its reach (pitfall 39); hiding the ball halves this at most. Advanced-S follows.
+- Sarah's hand colliders compared with ours (Section 11, item 7): not better for the ball, not adopted.
+- Files: `scripts/rsl_rl/{eval_catch,eval_catch_throws}.py`, `BC/mdp/commands/ball_command.py`, `sim2sim/{run,ball}.py`. Spec sections 3, 4, 7.2, 9 (pitfall 39) and 11 (item 7) updated.

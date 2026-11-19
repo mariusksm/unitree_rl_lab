@@ -28,11 +28,12 @@ AD_RANGES = {"aim_fwd_m": (0.15, 0.40), "aim_lat_m": (-0.10, 0.17), "aim_h_m": (
 AD_TOL = {"aim_fwd_m": 0.03, "aim_lat_m": 0.03, "aim_h_m": 0.01, "apex_h_m": 0.01}
 LOSSES = ("ball_dropped", "ball_missed")
 FALLS = ("bad_orientation", "base_height")
+TEXT_COLUMNS = ("outcome", "lost_as")
 
 
 def load(path: str) -> list[dict]:
     with open(path) as f:
-        return [{k: (v if k == "outcome" else (float(v) if v != "" else None)) for k, v in row.items()}
+        return [{k: (v if k in TEXT_COLUMNS else (float(v) if v != "" else None)) for k, v in row.items()}
                 for row in csv.DictReader(f)]
 
 

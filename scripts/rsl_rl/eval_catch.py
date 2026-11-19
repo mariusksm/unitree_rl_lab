@@ -27,6 +27,15 @@ before the env is built:
   delay      perception latency 4-6 control steps (training until 2026-10-27: 1-3, since then 1-5; kept for comparison)
   arcs       flat and high lobs: apex 1.55-2.6 m above the ground (A-D train 1.75-2.1 m, Advanced-E widens to this),
              mean horizontal speed capped at 8.5 m/s (Advanced only)
+  unreachable throws aimed up to ±1.0 m sideways, most of them beyond the arms' reach (E trains up to ±0.45 m): does the
+             robot stay upright when it cannot catch? (Advanced only; best with --after_loss_s)
+
+A lost ball (dropped below 0.1 m or 6 m away) ends the episode in every task, so nothing after it is trained or
+measured. ``--after_loss_s T`` keeps the episode running for T seconds after the loss and records what the robot does
+in that window: falls (and when), the lowest pelvis and hand, the largest torso tilt, lift-offs, how far it moves, how
+close the ball on the floor comes to a foot, and the posture factor at the end. The throw still counts as dropped or
+missed. ``--hide_lost_ball`` makes the tracker stop reporting a ball that fell below 0.4 m or is more than 3 m away
+after its planned arrival (``BallCommandCfg.hide_lost_ball_below`` / ``_beyond``), as a live pipeline could.
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
 
@@ -67,7 +76,7 @@ from isaaclab.app import AppLauncher
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cli_args  # isort: skip
 
-SCENARIOS = ("base", "fric_high", "fric_low", "hold", "wait", "push", "lateral", "delay", "arcs")
+SCENARIOS = ("base", "fric_high", "fric_low", "hold", "wait", "push", "lateral", "delay", "arcs", "unreachable")
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--task", type=str, default="Unitree-G1-29dof-BallCatch-Advanced-A")
@@ -85,13 +94,17 @@ parser.add_argument("--curriculum_progress", type=float, default=None,
                     help="Throws and hold rules of the ball_throws curriculum at this progress (0 easy .. 1 final).")
 parser.add_argument("--hold_rules_progress", type=float, default=None,
                     help="Hold rules alone (secure_steps, hold_radius) at this curriculum progress.")
+parser.add_argument("--after_loss_s", type=float, default=None,
+                    help="Keep the episode running this long after the ball is lost and measure what the robot does.")
+parser.add_argument("--hide_lost_ball", action="store_true", default=False,
+                    help="The tracker stops reporting a lost ball (below 0.4 m, or 3 m away after the planned arrival).")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 if args_cli.video:
     args_cli.enable_cameras = True
 # checked before Isaac Sim starts: once it runs, closing it ends the process without printing an error
-if "Unified" in args_cli.task and args_cli.scenario in ("lateral", "arcs"):
+if "Unified" in args_cli.task and args_cli.scenario in ("lateral", "arcs", "unreachable"):
     print(f"[eval] scenario '{args_cli.scenario}' does not apply to {args_cli.task}: its throws follow the reference "
           "clip (launch time and aim from the recording)", flush=True)
     sys.exit(2)
@@ -108,6 +121,7 @@ from importlib.metadata import version
 from rsl_rl.runners import OnPolicyRunner
 
 import isaaclab_tasks  # noqa: F401
+from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_apply_inverse, yaw_quat
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
@@ -129,7 +143,7 @@ BALL_CONTACT_LINKS = [
 
 def apply_scenario(env_cfg, name: str):
     synced = type(env_cfg.commands.ball_throw).__name__ == "SyncedBallCommandCfg"
-    if synced and name in ("lateral", "arcs"):
+    if synced and name in ("lateral", "arcs", "unreachable"):
         raise ValueError(f"scenario '{name}' does not apply to a task whose throws follow the reference clip")
     if name == "base":
         return
@@ -160,6 +174,9 @@ def apply_scenario(env_cfg, name: str):
         env_cfg.commands.ball_throw.apex_height_range = (1.55, 2.6)
         env_cfg.commands.ball_throw.apex_height_range_hard = None
         env_cfg.commands.ball_throw.max_horizontal_speed = 8.5
+    elif name == "unreachable":
+        env_cfg.commands.ball_throw.target_lateral_range = (-1.0, 1.0)
+        env_cfg.commands.ball_throw.target_lateral_range_hard = None
 
 
 def record_pushes(func):
@@ -181,15 +198,43 @@ def record_pushes(func):
     return pushed
 
 
+LOST_HEIGHT, LOST_DISTANCE = 0.1, 6.0  # thresholds of the tasks' ball_dropped / ball_missed terminations
+
+
+def ball_lost_now(env, cmd) -> torch.Tensor:
+    """The ball is lost: below LOST_HEIGHT (as ``ball_dropped``) or farther than LOST_DISTANCE from the robot (as
+    ``ball_missed``)."""
+    ball, root = cmd.ball.data.root_pos_w, env.scene["robot"].data.root_pos_w
+    return (ball[:, 2] < LOST_HEIGHT) | ((ball[:, :2] - root[:, :2]).norm(dim=-1) > LOST_DISTANCE)
+
+
+def ball_lost_for(env, wait_s: float) -> torch.Tensor:
+    """Termination of ``--after_loss_s``: True once the launched ball has been lost for ``wait_s`` seconds (the
+    counter keeps running when a lost ball bounces back up)."""
+    cmd = env.command_manager.get_term("ball_throw")
+    steps = getattr(env, "_eval_lost_steps", None)
+    if steps is None:
+        steps = env._eval_lost_steps = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    steps[env.episode_length_buf <= 1] = 0  # a new episode (the step counter was reset to 0 and has run once)
+    lost = cmd.launched & ball_lost_now(env, cmd)
+    steps[:] = torch.where(lost | (steps > 0), steps + 1, steps)
+    return steps.float() * env.step_dt >= wait_s
+
+
 GRAVITY = 9.81
 # per-throw records (<out>_throws.csv): parameters taken at the launch, then how the throw ended
 THROW_FIELDS = ("wait_s", "turn_wait_deg", "aim_fwd_m", "aim_lat_m", "aim_h_m", "release_dist_m", "release_az_deg",
                 "release_h_m", "apex_h_m", "flight_s", "speed_h_mps", "obs_delay_steps", "hidden_in_zone")
+# with --after_loss_s: what the robot did between the loss and the episode end (empty otherwise)
+POST_LOSS_COLUMNS = ("lost_as", "post_loss_s", "post_loss_fell", "post_loss_min_pelvis_m", "post_loss_max_tilt_deg",
+                     "post_loss_min_hand_m", "post_loss_liftoffs", "post_loss_disp_m", "post_loss_ball_foot_m",
+                     "post_loss_end_P")
 THROW_COLUMNS = ("outcome", "launched") + THROW_FIELDS + (
     "touched", "palm", "max_secured_s", "confirmed", "pushes_flight", "push_max_flight_mps", "pushes_catch",
-    "pushes_hold")
+    "pushes_hold") + POST_LOSS_COLUMNS
 F = {name: k for k, name in enumerate(THROW_FIELDS)}
 LOSSES = ("ball_dropped", "ball_missed")  # the ball is lost (a time-out is no loss: in `hold` it ends a held catch)
+FALLS = ("bad_orientation", "base_height")
 
 
 def loss_stage(row: dict) -> str:
@@ -256,7 +301,7 @@ def lean_fwd_deg(q):
 class Stats:
     """Accumulates the metrics over all envs and steps; ``report`` turns them into a dict."""
 
-    def __init__(self, ue):
+    def __init__(self, ue, after_loss_s: float | None = None):
         self.ue = ue
         self.r = r = ue.scene["robot"]
         self.cmd = ue.command_manager.get_term("ball_throw")
@@ -335,6 +380,19 @@ class Stats:
         self.th_push_catch = torch.zeros(N, dtype=torch.long, device=dev)
         self.th_push_hold = torch.zeros(N, dtype=torch.long, device=dev)
         self.throw_rows = []
+        # after a lost ball (--after_loss_s): the window from the loss to the episode end
+        self.after_loss_s = after_loss_s
+        self.pl_step = torch.full((N,), -1, dtype=torch.long, device=dev)  # episode step of the loss, -1: not lost
+        self.pl_dropped = torch.zeros(N, dtype=torch.bool, device=dev)  # lost below LOST_HEIGHT (else: too far)
+        self.pl_xy = torch.zeros(N, 2, device=dev)
+        self.pl_steps = torch.zeros(N, dtype=torch.long, device=dev)
+        self.pl_min_pelvis = torch.full((N,), float("inf"), device=dev)
+        self.pl_max_tilt = torch.zeros(N, device=dev)
+        self.pl_min_hand = torch.full((N,), float("inf"), device=dev)
+        self.pl_liftoffs = torch.zeros(N, dtype=torch.long, device=dev)
+        self.pl_disp = torch.zeros(N, device=dev)
+        self.pl_ball_foot = torch.full((N,), float("inf"), device=dev)
+        self.pl_end_P = torch.zeros(N, device=dev)
 
     def step(self):
         ue, r, cmd, acc, cnt, L = self.ue, self.r, self.cmd, self.acc, self.cnt, self.lists
@@ -361,7 +419,7 @@ class Stats:
                 self.episode_ends += 1
                 # with several throws per episode the time-out only cuts the current throw off (waiting, in flight or
                 # held): no outcome, so the catch rate compares with the single-throw tasks
-                if self.multi and why == "time_out":
+                if self.multi and why == "time_out" and int(self.pl_step[i]) < 0:
                     self.unfinished += int(bool(self.was_launched[i]))
                     continue
                 self._end_throw(i, why)
@@ -485,6 +543,28 @@ class Stats:
             acc[f"action_change_{tag}"] += float(da[m].sum())
             acc[f"root_speed_{tag}"] += float(r.data.root_lin_vel_w[m, :2].norm(dim=-1).sum())
 
+        # ---- after a lost ball (--after_loss_s): what the robot does until the episode ends
+        if self.after_loss_s is not None:
+            root, ball = r.data.root_pos_w, cmd.ball.data.root_pos_w
+            new = launched & valid & ball_lost_now(ue, cmd) & (self.pl_step < 0)
+            if new.any():
+                self.pl_step[new] = ue.episode_length_buf[new]
+                self.pl_dropped[new] = ball[new, 2] < LOST_HEIGHT
+                self.pl_xy[new] = root[new, :2]
+            w = valid & (self.pl_step >= 0)
+            if w.any():
+                self.pl_steps += w.long()
+                keep = lambda new_value, old, better: torch.where(w, better(old, new_value), old)  # noqa: E731
+                self.pl_min_pelvis = keep(root[:, 2] - ground, self.pl_min_pelvis, torch.minimum)
+                self.pl_max_tilt = keep(tilt_deg(r.data.body_quat_w[:, self.torso_b[0]]), self.pl_max_tilt, torch.maximum)
+                hand_z = r.data.body_pos_w[:, self.hand_b, 2].amin(dim=1) - ground
+                self.pl_min_hand = keep(hand_z, self.pl_min_hand, torch.minimum)
+                self.pl_liftoffs += (end.sum(dim=1) * w).long()
+                self.pl_disp = keep((root[:, :2] - self.pl_xy).norm(dim=-1), self.pl_disp, torch.maximum)
+                ball_foot = (r.data.body_pos_w[:, self.feet_b] - ball[:, None]).norm(dim=-1).amin(dim=1)
+                self.pl_ball_foot = keep(ball_foot, self.pl_ball_foot, torch.minimum)
+                self.pl_end_P = torch.where(w, posture, self.pl_end_P)
+
         # ---- where the ball sits while it is held
         if sec.any():
             cnt["sec"] += int(sec.sum())
@@ -560,8 +640,17 @@ class Stats:
             self.valid_steps += int(valid.sum())
 
     def _end_throw(self, i: int, why: str):
-        """Record the outcome of env ``i``'s current throw: ``why`` is the termination term or ``ball_caught``."""
+        """Record the outcome of env ``i``'s current throw: ``why`` is the termination term or ``ball_caught``. With
+        ``--after_loss_s`` a lost ball stays the outcome; a fall after it is recorded in the post-loss columns."""
         L = self.lists
+        post = [""] * len(POST_LOSS_COLUMNS)
+        if self.after_loss_s is not None and int(self.pl_step[i]) >= 0:
+            lost_as = "ball_dropped" if bool(self.pl_dropped[i]) else "ball_missed"
+            post = [lost_as, round(int(self.pl_steps[i]) * self.dt, 2), int(why in FALLS),
+                    round(float(self.pl_min_pelvis[i]), 3), round(float(self.pl_max_tilt[i]), 1),
+                    round(float(self.pl_min_hand[i]), 3), int(self.pl_liftoffs[i]), round(float(self.pl_disp[i]), 3),
+                    round(float(self.pl_ball_foot[i]), 3), round(float(self.pl_end_P[i]), 3)]
+            why = lost_as
         self.terms[why] += 1
         L["ep_max_sec"].append(int(self.max_sec[i]))
         L["ep_reason"].append(why)
@@ -575,7 +664,7 @@ class Stats:
             [why, int(bool(self.was_launched[i]))] + params
             + [int(bool(self.th_touch[i])), int(bool(self.th_palm[i])), round(int(self.max_sec[i]) * self.dt, 2),
                int(bool(self.ep_confirmed[i])), int(self.th_push_flight[i]), round(float(self.th_push_max[i]), 3),
-               int(self.th_push_catch[i]), int(self.th_push_hold[i])]
+               int(self.th_push_catch[i]), int(self.th_push_hold[i])] + post
         )
 
     def _record_launch(self, ids: torch.Tensor):
@@ -623,6 +712,16 @@ class Stats:
         self.th_push_max[ids] = 0.0
         self.th_push_catch[ids] = 0
         self.th_push_hold[ids] = 0
+        self.pl_step[ids] = -1
+        self.pl_dropped[ids] = False
+        self.pl_steps[ids] = 0
+        self.pl_min_pelvis[ids] = float("inf")
+        self.pl_max_tilt[ids] = 0.0
+        self.pl_min_hand[ids] = float("inf")
+        self.pl_liftoffs[ids] = 0
+        self.pl_disp[ids] = 0.0
+        self.pl_ball_foot[ids] = float("inf")
+        self.pl_end_P[ids] = 0.0
 
     def write_throws(self, path: str):
         """One row per throw with an outcome (THROW_COLUMNS); empty parameters: the throw was not launched."""
@@ -648,6 +747,34 @@ class Stats:
 
         out["pushes_during_flight"] = {"pct_throws_pushed": round(100 * len(pushed) / max(1, len(launched)), 1),
                                        "caught_pct_pushed": caught(pushed), "caught_pct_not_pushed": caught(calm)}
+        post = [x for x in rows if x["lost_as"] != ""]
+        if self.after_loss_s is not None and post:
+            n = len(post)
+
+            def pct(cond):
+                return round(100 * sum(1 for x in post if cond(x)) / n, 1)
+
+            def quantile(key, q, xs):
+                v = sorted(x[key] for x in xs)
+                return round(v[min(len(v) - 1, int(q * len(v)))], 3) if v else None
+
+            fell = [x for x in post if x["post_loss_fell"]]
+            stood = [x for x in post if not x["post_loss_fell"]]
+            out["after_loss"] = {
+                "window_s": self.after_loss_s,
+                "lost_balls": n,
+                "pct_window_cut_by_time_out": pct(lambda x: not x["post_loss_fell"] and x["post_loss_s"] < self.after_loss_s - 0.1),
+                "pct_fell": pct(lambda x: x["post_loss_fell"]),
+                "fall_after_s_median": quantile("post_loss_s", 0.5, fell),
+                "pct_hand_below_0.5m": pct(lambda x: x["post_loss_min_hand_m"] < 0.5),
+                "pct_pelvis_below_0.65m": pct(lambda x: x["post_loss_min_pelvis_m"] < 0.65),
+                "pct_torso_tilt_over_30deg": pct(lambda x: x["post_loss_max_tilt_deg"] > 30.0),
+                "liftoffs_mean": round(sum(x["post_loss_liftoffs"] for x in post) / n, 2),
+                "displacement_m_median": quantile("post_loss_disp_m", 0.5, post),
+                "displacement_m_p90": quantile("post_loss_disp_m", 0.9, post),
+                "pct_ball_within_0.15m_of_a_foot": pct(lambda x: x["post_loss_ball_foot_m"] < 0.15),
+                "posture_P_at_end_mean_if_standing": round(sum(x["post_loss_end_P"] for x in stood) / max(1, len(stood)), 3),
+            }
         return out
 
     def report(self, scenario: str) -> dict:
@@ -817,6 +944,8 @@ def summary(R: dict) -> str:
         lines.append(f"[eval] after a confirmed catch: {R['after_confirmed_catch_pct']}")
     lines.append(f"[eval] balls lost, by how far they got (% of the throws): {R['ball_lost_pct']}; pushes during the "
                  f"flight: {R['pushes_during_flight']}")
+    if "after_loss" in R:
+        lines.append(f"[eval] after a lost ball: {R['after_loss']}")
     return "\n".join(lines)
 
 
@@ -832,6 +961,13 @@ def main():
               f"{curriculum}", flush=True)
     if args_cli.no_push:
         env_cfg.events.push_robot = None
+    if args_cli.after_loss_s is not None:
+        # a lost ball no longer ends the episode at once: it runs on for after_loss_s and then ends as the loss
+        env_cfg.terminations.ball_dropped = DoneTerm(func=ball_lost_for, params={"wait_s": args_cli.after_loss_s})
+        env_cfg.terminations.ball_missed = None
+    if args_cli.hide_lost_ball:
+        env_cfg.commands.ball_throw.hide_lost_ball_below = 0.4
+        env_cfg.commands.ball_throw.hide_lost_ball_beyond = 3.0
     if getattr(env_cfg.events, "push_robot", None) is not None:
         env_cfg.events.push_robot.func = record_pushes(env_cfg.events.push_robot.func)
     if args_cli.video:
@@ -868,7 +1004,7 @@ def main():
 
         with torch.inference_mode():
             obs = env.get_observations()
-            stats = Stats(env.unwrapped)
+            stats = Stats(env.unwrapped, args_cli.after_loss_s)
             for _ in range(steps):
                 obs, _, _, _ = env.step(policy(obs))
                 stats.step()

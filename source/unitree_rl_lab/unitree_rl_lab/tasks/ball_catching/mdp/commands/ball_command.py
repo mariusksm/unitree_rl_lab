@@ -194,6 +194,9 @@ class BallCommand(CommandTerm):
         self._detection_delay = torch.zeros(self.num_envs, device=self.device)
         self._obs_bias = torch.zeros(self.num_envs, 3, device=self.device)
         self._hide_in_zone = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.ball_lost = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """The launched ball is lost for this throw (``hide_lost_ball_below`` / ``_beyond``); the tracker no longer
+        reports it."""
         self._steps_since_measurement = torch.full(
             (self.num_envs,), self._NO_CONTACT, dtype=torch.long, device=self.device
         )
@@ -357,6 +360,7 @@ class BallCommand(CommandTerm):
         self._detection_delay[env_ids] = sample_uniform(*cfg.detection_delay_range, (n,), self.device)
         self._obs_bias[env_ids] = sample_uniform(-cfg.obs_pos_bias, cfg.obs_pos_bias, (n, 3), self.device)
         self._hide_in_zone[env_ids] = torch.rand(n, device=self.device) < cfg.hide_in_catch_zone_prob
+        self.ball_lost[env_ids] = False
 
     def _write_parked_state(self, env_ids: Sequence[int]):
         """Hold the ball at its release point with zero velocity."""
@@ -627,8 +631,20 @@ class BallCommand(CommandTerm):
         pos_b = quat_apply_inverse(heading, self.ball.data.root_pos_w - self.robot.data.root_pos_w)
         vel_b = quat_apply_inverse(heading, self.ball.data.root_lin_vel_w)
 
+        # a lost ball (fallen below a height or flown beyond a distance) is no longer reported for this throw, as the
+        # live pipeline would stop at that point; the robot then sees no ball, as while it waits
+        if cfg.hide_lost_ball_below is not None or cfg.hide_lost_ball_beyond is not None:
+            lost = torch.zeros_like(self.ball_lost)
+            if cfg.hide_lost_ball_below is not None:
+                ground_z = self._env.scene.env_origins[:, 2]
+                lost |= self.ball.data.root_pos_w[:, 2] - ground_z < cfg.hide_lost_ball_below
+            if cfg.hide_lost_ball_beyond is not None:  # only after the planned arrival: releases lie up to 5 m away
+                past = self.time_since_throw > self._flight_time
+                lost |= past & (torch.norm(pos_b[:, :2], dim=-1) > cfg.hide_lost_ball_beyond)
+            self.ball_lost |= self.launched & lost
+
         # what the tracker measures now; dropouts come in bursts of 1..obs_dropout_max_steps control steps
-        detected = self.launched & (self.time_since_throw >= self._detection_delay)
+        detected = self.launched & (self.time_since_throw >= self._detection_delay) & ~self.ball_lost
         burst_start = (self._dropout_left == 0) & (torch.rand(n, device=self.device) < cfg.obs_dropout_prob)
         burst_length = torch.randint(1, cfg.obs_dropout_max_steps + 1, (n,), device=self.device)
         self._dropout_left = torch.where(burst_start, burst_length, self._dropout_left)
@@ -919,3 +935,12 @@ class BallCommandCfg(CommandTermCfg):
     max_coast_steps: int = 3
     """Missing measurements bridged by ballistic prediction (the tracker gives up after 8 frames ≈ 67 ms);
     after that the ball counts as not visible."""
+
+    hide_lost_ball_below: float | None = None
+    """Once the launched ball is lower than this (m above the ground), it counts as lost for the rest of the throw and
+    the tracker no longer reports it (``ball_lost``): the robot sees no ball, as while it waits, instead of a ball on
+    the floor it never saw in training. The live pipeline must apply the same rule. None: off."""
+
+    hide_lost_ball_beyond: float | None = None
+    """The same once the ball is farther than this (m, horizontal) from the robot root after its planned arrival time
+    (flown past). None: off."""

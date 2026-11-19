@@ -9,7 +9,9 @@ model (``ball.Perception``); the catch is checked as in Isaac (``ball.CatchState
 both palms from below, catch box, slow, torso force at most 50 N; since 2026-11-01 with ``contact_map`` within
 ``hold_radius`` of the hold point and the contact rules of the phase instead of box and 50 N; 1 s secured, then the hold
 phase); an episode ends as with the Advanced terminations (catch completed, ball below 10 cm, ball 6 m away, pelvis
-below 0.2 m or tilted more than 0.8 rad, 20 s).
+below 0.2 m or tilted more than 0.8 rad, 20 s). With ``--after_loss_s T`` a lost ball ends the episode only T seconds
+later, and a fall in that window is counted (as ``eval_catch.py --after_loss_s``); the lost ball is hidden from the
+perception if the run's ``env.yaml`` sets ``hide_lost_ball_below`` / ``_beyond``.
 
 - Robot: ``model.py`` (``g1.xml`` with the collision shapes of the Isaac asset from the dump), the armature of the
   Isaac asset per joint, no passive damping or friction, position actuators with the Isaac drive gains and effort
@@ -55,6 +57,8 @@ parser.add_argument("--drop_test", action="store_true", help="Only drop the ball
 parser.add_argument("--debug_ball", action="store_true", help="Print every step of the first throw's flight.")
 parser.add_argument("--easy", action="store_true", help="Throws and perception of the curriculum's easy stage.")
 parser.add_argument("--ghost_ball", action="store_true", help="Debug: the ball collides with nothing (only seen).")
+parser.add_argument("--after_loss_s", type=float, default=None,
+                    help="Keep the episode running this long after the ball is lost and count falls in that window.")
 args = parser.parse_args()
 if args.video and "DISPLAY" not in os.environ:
     os.environ.setdefault("MUJOCO_GL", "egl")
@@ -401,6 +405,7 @@ def throws(sim: Sim):
     wait = tuple(float(x) for x in args.wait.split(","))
     area = np.pi * sim.ball["radius"] ** 2
     outcomes, confirm_delays, held_torso = [], [], []
+    lost_balls, fell_after_loss = 0, []  # --after_loss_s: falls within the window after the loss (s after it)
     for episode in range(args.throws):
         sim.reset_robot()
         throw = Throw(sim.cmd_cfg, d.qpos[:3].copy(), yaw_of(d.qpos[3:7]), area, rng, wait, not args.uniform_wait)
@@ -411,20 +416,35 @@ def throws(sim: Sim):
         obs = sim.observation(NO_BALL)
         time_until_throw, time_since_throw, outcome, confirm_t = throw.delay, 0.0, "time_out", None
         arrival_miss = None
+        lost_as, lost_step = None, None
         recording = sim.writer if episode < args.video_throws else None
-        for k in range(int(EPISODE_S / STEP_DT)):
+        steps = int(EPISODE_S / STEP_DT)
+        for k in range(steps):
             arm_force, hand_force, torso_force, _, _, _ = sim.control_step(obs)
             if recording is not None:
                 sim.frame(k)
             # terminations: state after the physics steps, catch state of the previous update
-            if catch.catch_complete:
-                outcome = "caught"
-            elif sim.ball_pos[2] < 0.1:
-                outcome = "dropped"
-            elif np.linalg.norm(sim.ball_pos[:2] - d.qpos[:2]) > 6.0:
-                outcome = "missed"
-            elif d.qpos[2] < 0.2 or sim.pelvis_tilt() > 0.8:
-                outcome = "fell"
+            fallen = d.qpos[2] < 0.2 or sim.pelvis_tilt() > 0.8
+            if lost_as is None:
+                if catch.catch_complete:
+                    outcome = "caught"
+                elif sim.ball_pos[2] < 0.1:
+                    lost_as = "dropped"
+                elif np.linalg.norm(sim.ball_pos[:2] - d.qpos[:2]) > 6.0:
+                    lost_as = "missed"
+                elif fallen:
+                    outcome = "fell"
+                if lost_as is not None:
+                    lost_step = k
+                    if args.after_loss_s is None:
+                        outcome = lost_as
+            # --after_loss_s: the episode runs on after the loss; a fall in the window counts, the throw stays lost
+            if lost_as is not None and args.after_loss_s is not None:
+                if fallen:
+                    fell_after_loss.append((k - lost_step) * STEP_DT)
+                    outcome = lost_as
+                elif (k - lost_step) * STEP_DT >= args.after_loss_s or k == steps - 1:
+                    outcome = lost_as
             if outcome != "time_out":
                 break
             # command update: launch timer, park or launch, drag, catch state, perception
@@ -452,7 +472,8 @@ def throws(sim: Sim):
                 confirm_t = time_since_throw
             if catch.secured_steps > 0:
                 held_torso.append(torso_force)
-            perception.update(in_flight, time_since_throw, ball_pos, ball_vel, d.qpos[:3], d.qpos[3:7], catch.in_zone)
+            perception.update(in_flight, time_since_throw, ball_pos, ball_vel, d.qpos[:3], d.qpos[3:7], catch.in_zone,
+                              throw.flight_time)
             obs = sim.observation(perception.actor_terms())
             if args.debug_ball and episode == 0 and in_flight:
                 rel, tilt = np.round(ball_pos - d.qpos[:3], 2), np.degrees(sim.pelvis_tilt())
@@ -461,6 +482,7 @@ def throws(sim: Sim):
                       f"max |action| {np.abs(sim.last_action).max():.1f}")
         d.xfrc_applied[sim.ball_body] = 0.0
         outcomes.append(outcome)
+        lost_balls += int(lost_as is not None)
         if confirm_t is not None:
             confirm_delays.append(confirm_t)
         print(f"[sim2sim] throw {episode + 1:3d}: wait {throw.delay:4.1f} s, release "
@@ -473,6 +495,10 @@ def throws(sim: Sim):
     force = np.mean(held_torso) if held_torso else 0.0
     print(f"[sim2sim] {summary} of {n} throws; confirmations {len(confirm_delays)}, {delay:.2f} s after the launch "
           f"(median); torso force while secured {force:.0f} N (mean)")
+    if args.after_loss_s is not None:
+        after = f", {np.median(fell_after_loss):.2f} s after the loss (median)" if fell_after_loss else ""
+        print(f"[sim2sim] after a lost ball ({args.after_loss_s:g} s window): fell after {len(fell_after_loss)} of "
+              f"{lost_balls} lost balls{after}")
 
 
 def main():
