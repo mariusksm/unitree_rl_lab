@@ -853,6 +853,22 @@ class SRewardsCfg(A2RewardsCfg):
 
 
 @configclass
+class SObservationsCfg(ObservationsCfg):
+    """Observations of A to E plus the group ``anchor_mask`` for AnchoredPPO's masked anchor (not an input of actor or
+    critic): 1 while the actor sees a ball that is not in play (before the launch or after the loss)."""
+
+    @configclass
+    class AnchorMaskCfg(ObsGroup):
+        ball_not_in_play = ObsTerm(func=mdp.ball_shown_not_in_play, params={"command_name": "ball_throw"})
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    anchor_mask: AnchorMaskCfg = AnchorMaskCfg()
+
+
+@configclass
 class SCurriculumCfg:
     ball_visibility = CurrTerm(
         func=mdp.ramp_ball_visibility,
@@ -872,6 +888,7 @@ class AdvancedSEnvCfg(AdvancedEEnvCfg):
     the lost ball hidden). Fine-tuned from Advanced-E's final checkpoint."""
 
     rewards: SRewardsCfg = SRewardsCfg()
+    observations: SObservationsCfg = SObservationsCfg()
 
     def __post_init__(self):
         super().__post_init__()

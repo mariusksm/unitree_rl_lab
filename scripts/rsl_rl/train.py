@@ -194,6 +194,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         am = env.unwrapped.action_manager
         agent_cfg.algorithm.anchor_joint_names = [n for t in am.active_terms for n in am.get_term(t)._joint_names]
 
+    # AnchoredPPO's masked anchor needs the positions of the ball terms (names ball_*) in the actor's observation group
+    if getattr(agent_cfg.algorithm, "masked_anchor_coef", 0.0) > 0.0:
+        om = env.unwrapped.observation_manager
+        group = agent_cfg.algorithm.masked_anchor_obs_group
+        indices, start = [], 0
+        for name, dims in zip(om.active_terms[group], om.group_obs_term_dim[group]):
+            size = int(torch.tensor(dims).prod())
+            if name.startswith("ball_"):
+                indices += list(range(start, start + size))
+            start += size
+        agent_cfg.algorithm.masked_anchor_indices = indices
+        print(f"[INFO] masked anchor: {len(indices)} of {start} entries of '{group}' are ball terms", flush=True)
+
     # create runner from rsl-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     # write git state to logs

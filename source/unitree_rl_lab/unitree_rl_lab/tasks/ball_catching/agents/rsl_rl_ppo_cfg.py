@@ -58,6 +58,13 @@ class AnchoredPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     """Weight of KL(anchor || actor), the anchor being the actor at the first update (the loaded one)."""
     anchor_kl_final_coef: float = 0.0
     anchor_kl_decay_iterations: int = 0
+    masked_anchor_coef: float = 0.0
+    """Weight of the masked anchor (Advanced-S): in the samples flagged by the observation group
+    ``masked_anchor_flag_group``, KL(anchor(observation with the ball masked) || actor) instead of the plain anchor."""
+    masked_anchor_flag_group: str | None = None
+    masked_anchor_obs_group: str = "policy"
+    masked_anchor_indices: list[int] | None = None
+    """Indices of the ball terms within ``masked_anchor_obs_group``; filled in by train.py."""
     """Iterations after the critic warm-up over which the anchor weight falls linearly to its final value."""
     anchor_joint_weights: dict[str, float] | None = None
     """Per-joint weights of the anchor KL (joint-name regex -> weight, first match wins, other joints 1). None: plain
@@ -130,7 +137,11 @@ class AdvancedSPPORunnerCfg(AdvancedArmAnchorPPORunnerCfg):
     stages before also gained mostly in their last 1000 iterations, once the anchor was low."""
 
     algorithm = AnchoredPpoAlgorithmCfg(
-        **{**ADVANCED_PPO, "anchor_kl_decay_iterations": 500}, anchor_joint_weights=dict(ARM_ANCHOR_WEIGHTS)
+        **{**ADVANCED_PPO, "anchor_kl_decay_iterations": 500},
+        anchor_joint_weights=dict(ARM_ANCHOR_WEIGHTS),
+        # third run (2026-11-20): a ball in view that is not in play is answered like no ball (spec pitfall 41)
+        masked_anchor_coef=1.0,
+        masked_anchor_flag_group="anchor_mask",
     )
 
 

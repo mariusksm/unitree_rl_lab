@@ -190,6 +190,16 @@ def ball_visible(env: ManagerBasedEnv, command_name: str = "ball_throw") -> torc
     return command.ball_visible.float().unsqueeze(1)
 
 
+def ball_shown_not_in_play(env: ManagerBasedEnv, command_name: str = "ball_throw") -> torch.Tensor:
+    """1 while the actor sees a ball that is not in play: before the launch (held by the thrower,
+    ``show_parked_ball_prob``) or after the throw was lost (on the floor, ``hide_lost_ball_prob``), else 0.
+    Returns (num_envs, 1). Not an actor or critic input: the observation group ``anchor_mask`` of Advanced-S, read by
+    ``AnchoredPPO``'s masked anchor (the robot must act as if it saw no ball)."""
+    command = env.command_manager.get_term(command_name)
+    not_in_play = ~command.launched | command.throw_failed
+    return (command.ball_visible & not_in_play).float().unsqueeze(1)
+
+
 def ball_perceived_intercept_b(
     env: ManagerBasedEnv, command_name: str = "ball_throw", catch_height: float = 0.15, max_time: float = 3.0
 ) -> torch.Tensor:

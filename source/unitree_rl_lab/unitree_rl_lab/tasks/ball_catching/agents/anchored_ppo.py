@@ -37,6 +37,13 @@ class AnchoredPPO(PPO):
       action dimension (``anchor_joint_names``: the joints of the action dimensions in order, filled in by train.py).
       Since 2026-11-03 the arm joints are weighted 0.1: one action unit of a wrist is only 0.075 rad, so a visible
       change of an arm pose is a large KL and the full anchor held Advanced-A's pressed hands.
+    - **Masked anchor** (Advanced-S, since 2026-11-20): in the samples flagged by the observation group
+      ``masked_anchor_flag_group`` (a ball the actor sees but that is not in play: in the thrower's hand, on the floor
+      after a loss) the anchor KL compares the actor with the anchor's output for the same observation with the ball
+      terms zeroed (``masked_anchor_indices`` of ``masked_anchor_obs_group``), i.e. with what the anchor does when it
+      sees no ball, weighted ``masked_anchor_coef`` over all joints and not decayed. The plain anchor and the KL guard
+      use only the other samples. The anchor actor answers such a ball with a run toward it and a fall; the plain anchor
+      held that reflex, and PPO alone did not unlearn it in 2500 iterations (spec pitfall 41).
     - **Std cap:** ``max_std`` clamps the action std after every update (with unbounded std Andy's runs diverged).
 
     Supports the non-recurrent MLP actor and critic used here; RND, symmetry and multi-GPU training are not supported.
@@ -53,6 +60,10 @@ class AnchoredPPO(PPO):
         anchor_kl_decay_iterations: int = 0,
         anchor_joint_weights: dict[str, float] | None = None,
         anchor_joint_names: list[str] | None = None,
+        masked_anchor_coef: float = 0.0,
+        masked_anchor_flag_group: str | None = None,
+        masked_anchor_obs_group: str = "policy",
+        masked_anchor_indices: list[int] | None = None,
         max_std: float | None = None,
         **kwargs,
     ) -> None:
@@ -69,6 +80,14 @@ class AnchoredPPO(PPO):
         self.anchor_kl_final_coef = anchor_kl_final_coef
         self.anchor_kl_decay_iterations = anchor_kl_decay_iterations
         self.max_std = max_std
+        self.masked_anchor_coef = masked_anchor_coef
+        self.masked_anchor_flag_group = masked_anchor_flag_group
+        self.masked_anchor_obs_group = masked_anchor_obs_group
+        self.masked_anchor_indices = None
+        if masked_anchor_coef > 0.0:
+            if not masked_anchor_flag_group or not masked_anchor_indices:
+                raise ValueError("AnchoredPPO: the masked anchor needs a flag group and the ball indices (train.py)")
+            self.masked_anchor_indices = torch.tensor(masked_anchor_indices, dtype=torch.long, device=self.device)
         # per-dimension weights of the anchor KL, built at the first update (inference runners never need them, and
         # only train.py fills in the joint names)
         self.anchor_joint_weights = anchor_joint_weights
@@ -126,7 +145,8 @@ class AnchoredPPO(PPO):
             self._build_anchor_dim_weights()
         warmup, actor_lr, anchor_coef = self._schedule()
         self.optimizer.param_groups[1]["lr"] = self.critic_learning_rate
-        sums = dict.fromkeys(("value", "surrogate", "entropy", "anchor_kl", "kl"), 0.0)
+        keys = ("value", "surrogate", "entropy", "anchor_kl", "kl", "masked_anchor_kl", "masked_share")
+        sums = dict.fromkeys(keys, 0.0)
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for batch in generator:
             self.optimizer.param_groups[0]["lr"] = actor_lr
@@ -141,8 +161,15 @@ class AnchoredPPO(PPO):
             distribution_params = self.actor.output_distribution_params
             entropy = self.actor.output_entropy
 
+            # samples with a ball that is not in play (masked anchor): the plain anchor and the KL guard skip them
+            flagged = None
+            if self.masked_anchor_indices is not None:
+                flagged = batch.observations[self.masked_anchor_flag_group].reshape(-1) > 0.5
+                if bool(flagged.all()):
+                    flagged = None  # no sample left for the guard and the plain anchor: treat all alike
             with torch.inference_mode():
-                kl_mean = torch.mean(self.actor.get_kl_divergence(batch.old_distribution_params, distribution_params))
+                kl_all = self.actor.get_kl_divergence(batch.old_distribution_params, distribution_params)
+                kl_mean = torch.mean(kl_all if flagged is None else kl_all[~flagged])
             # KL guard on the actor rate only, and not while the actor is frozen
             if not warmup and self.schedule == "adaptive" and self.desired_kl is not None:
                 if kl_mean > self.desired_kl * 2.0:
@@ -163,21 +190,35 @@ class AnchoredPPO(PPO):
                 value_loss = (batch.returns - values).pow(2).mean()
 
             anchor_kl = torch.zeros((), device=self.device)
+            masked_kl = torch.zeros((), device=self.device)
             if self.anchor is not None:
                 with torch.no_grad():
                     self.anchor(batch.observations, stochastic_output=True)
                     anchor_params = tuple(p.detach() for p in self.anchor.output_distribution_params)
                 if self.anchor_dim_weights is None:
-                    anchor_kl = torch.mean(self.actor.get_kl_divergence(anchor_params, distribution_params))
+                    per_sample = self.actor.get_kl_divergence(anchor_params, distribution_params)
                 else:
                     if self.anchor_dim_weights.shape[0] != distribution_params[0].shape[-1]:
                         raise ValueError("AnchoredPPO: anchor_joint_names do not match the action dimensions")
                     per_dim = kl_divergence(Normal(*anchor_params), Normal(*distribution_params))
-                    anchor_kl = torch.mean(torch.sum(per_dim * self.anchor_dim_weights, dim=-1))
+                    per_sample = torch.sum(per_dim * self.anchor_dim_weights, dim=-1)
+                anchor_kl = torch.mean(per_sample if flagged is None else per_sample[~flagged])
+                if flagged is not None and bool(flagged.any()):
+                    # the anchor's answer to the same observation without the ball, over all joints
+                    masked_obs = batch.observations[flagged].clone()
+                    group = masked_obs[self.masked_anchor_obs_group].clone()
+                    group[:, self.masked_anchor_indices] = 0.0
+                    masked_obs[self.masked_anchor_obs_group] = group
+                    with torch.no_grad():
+                        self.anchor(masked_obs, stochastic_output=True)
+                        masked_params = tuple(p.detach() for p in self.anchor.output_distribution_params)
+                    current = tuple(p[flagged] for p in distribution_params)
+                    masked_kl = torch.mean(torch.sum(kl_divergence(Normal(*masked_params), Normal(*current)), dim=-1))
 
             loss = self.value_loss_coef * value_loss
             if not warmup:  # during the warm-up the actor is not part of the loss and keeps its weights
                 loss = loss + surrogate_loss - self.entropy_coef * entropy.mean() + anchor_coef * anchor_kl
+                loss = loss + self.masked_anchor_coef * masked_kl
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -190,6 +231,8 @@ class AnchoredPPO(PPO):
             sums["entropy"] += entropy.mean().item()
             sums["anchor_kl"] += anchor_kl.item()
             sums["kl"] += kl_mean.item()
+            sums["masked_anchor_kl"] += masked_kl.item()
+            sums["masked_share"] += 0.0 if flagged is None else flagged.float().mean().item()
 
         self._cap_std()
         self.updates_done += 1
