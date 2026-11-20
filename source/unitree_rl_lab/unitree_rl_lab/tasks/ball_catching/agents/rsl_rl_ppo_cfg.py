@@ -123,6 +123,18 @@ class AdvancedArmAnchorPPORunnerCfg(AdvancedPPORunnerCfg):
 
 
 @configclass
+class AdvancedSPPORunnerCfg(AdvancedArmAnchorPPORunnerCfg):
+    """Advanced-S: the anchor falls to 0.1 within 500 iterations after the warm-up instead of 3000. S has to change the
+    legs' behaviour where E falls (a ball visible before the throw or on the floor), and with the slow decay the full
+    leg anchor held E's behaviour: no fewer falls in 500 iterations after the warm-up (first run, 2026-11-20). The
+    stages before also gained mostly in their last 1000 iterations, once the anchor was low."""
+
+    algorithm = AnchoredPpoAlgorithmCfg(
+        **{**ADVANCED_PPO, "anchor_kl_decay_iterations": 500}, anchor_joint_weights=dict(ARM_ANCHOR_WEIGHTS)
+    )
+
+
+@configclass
 class AdvancedA2PPORunnerCfg(AdvancedArmAnchorPPORunnerCfg):
     """Advanced-A2: 2000 iterations (a narrow fix of the arm load; the weak arm anchor lets it act from the start)."""
 

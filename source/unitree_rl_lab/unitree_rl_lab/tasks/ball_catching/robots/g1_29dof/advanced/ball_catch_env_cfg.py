@@ -794,6 +794,10 @@ HIDE_LOST_BALL_BELOW = 0.4  # m: the ball cannot count as held below 0.5 m
 HIDE_LOST_BALL_BEYOND = 3.0  # m from the robot after the planned arrival: flown past
 HIDE_LOST_BALL_PROB = 0.5  # the other half: the ball stays visible on the floor, as raw VICON reports it
 SHOW_PARKED_BALL_PROB = 0.5  # the ball reported before the throw, held and swaying in the thrower's hand
+# both shares are ramped in (curriculum ball_visibility): with them at full strength from the start nearly every episode
+# ended with E falling after a visible ball, and S did not learn in 500 iterations (first run, 2026-11-20)
+VISIBILITY_RAMP_ITERATIONS = (300, 1500)  # after the critic warm-up (100) and the actor rate ramp (100)
+STEPS_PER_ITERATION = 24  # num_steps_per_env of the PPO runner
 FALL_PENALTY_WEIGHT = -10000.0  # once per fall: -200 after the reward manager's dt (0.02 s), twenty catch bonuses
 CAPTURE_POINT_WEIGHT = 2.0  # per second while standing balanced, against 5 for `stand`
 CAPTURE_POINT_STD = 0.12  # m, Zhang et al.: a push of 0.5 m/s moves the capture point 0.14 m (reward 0.25)
@@ -849,6 +853,19 @@ class SRewardsCfg(A2RewardsCfg):
 
 
 @configclass
+class SCurriculumCfg:
+    ball_visibility = CurrTerm(
+        func=mdp.ramp_ball_visibility,
+        params={
+            "start_step": VISIBILITY_RAMP_ITERATIONS[0] * STEPS_PER_ITERATION,
+            "end_step": VISIBILITY_RAMP_ITERATIONS[1] * STEPS_PER_ITERATION,
+            "show_parked_final": SHOW_PARKED_BALL_PROB,
+            "hide_lost_final": HIDE_LOST_BALL_PROB,
+        },
+    )
+
+
+@configclass
 class AdvancedSEnvCfg(AdvancedEEnvCfg):
     """Advanced-S: Advanced-E plus losing a ball safely (a lost ball ends its throw, not the episode; fall penalty;
     approach rewards times P; capture point over the feet; unreachable throws; throws aimed at the robot at the launch;
@@ -858,7 +875,7 @@ class AdvancedSEnvCfg(AdvancedEEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.curriculum = None  # throws and pushes at E's final level
+        self.curriculum = SCurriculumCfg()  # throws and pushes stay at E's final level; ramps the ball visibility
         self.events.push_robot.params["difficulty"] = 1.0
         cmd = self.commands.ball_throw
         cmd.difficulty = 1.0
@@ -868,8 +885,8 @@ class AdvancedSEnvCfg(AdvancedEEnvCfg):
         cmd.unreachable_lateral_range = UNREACHABLE_LATERAL_RANGE
         cmd.hide_lost_ball_below = HIDE_LOST_BALL_BELOW
         cmd.hide_lost_ball_beyond = HIDE_LOST_BALL_BEYOND
-        cmd.hide_lost_ball_prob = HIDE_LOST_BALL_PROB
-        cmd.show_parked_ball_prob = SHOW_PARKED_BALL_PROB
+        cmd.hide_lost_ball_prob = 1.0  # ramped to HIDE_LOST_BALL_PROB by the curriculum
+        cmd.show_parked_ball_prob = 0.0  # ramped to SHOW_PARKED_BALL_PROB by the curriculum
         cmd.aim_at_launch = True
         # a lost ball ends its throw in the command (rethrow_after_loss); only a fall or the time-out ends the episode
         self.terminations.ball_dropped = None
@@ -886,6 +903,7 @@ class AdvancedSPlayEnvCfg(AdvancedSEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
+        self.curriculum = None
         cmd = self.commands.ball_throw
         cmd.rethrow_after_loss = False
         cmd.unreachable_share = 0.0

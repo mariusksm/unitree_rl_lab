@@ -83,6 +83,6 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ball_catch_env_cfg:AdvancedSEnvCfg",
         "play_env_cfg_entry_point": f"{__name__}.ball_catch_env_cfg:AdvancedSPlayEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{AGENTS}:AdvancedArmAnchorPPORunnerCfg",
+        "rsl_rl_cfg_entry_point": f"{AGENTS}:AdvancedSPPORunnerCfg",
     },
 )
