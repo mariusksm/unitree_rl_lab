@@ -15,6 +15,7 @@
 # written leaves a truncated file: only checkpoints of full size that load are used, else the next older one.
 #
 #   autoresume.sh enable <task> <experiment> <run folder> [total iterations, 30000] [tmux session, unified]
+#       (GPU_IGNORE_PIDS="<pid> ..." before `enable`: GPU processes that do not count as "GPU busy")
 #   autoresume.sh disable     # BEFORE stopping a training on purpose, otherwise `watch` starts it again within 20 min
 #   autoresume.sh status
 #   autoresume.sh dry-run     # what `boot` would start now, without starting it
@@ -90,8 +91,16 @@ training_pids() {  # the python process of the armed training; not the tmux serv
     pgrep -f "^[^ ]*python[0-9.]* [^ ]*train\.py --task $TASK( |\$)"
 }
 
-gpu_free() {
-    [ -z "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2> /dev/null)" ]
+gpu_free() {  # no compute process on the GPU, except those in GPU_IGNORE_PIDS (set when arming, e.g. an idle viewer
+    # that someone left running; a reboot ends it anyway)
+    local pid
+    for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2> /dev/null | tr -d ' '); do
+        case " ${GPU_IGNORE_PIDS:-} " in
+            *" $pid "*) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
 }
 
 writes_to_chain() {  # process $1 has a file of the newest chain folder open (its TensorBoard event file): only such a
@@ -138,8 +147,8 @@ case "${1:-}" in
         [ $# -ge 4 ] || { echo "usage: $0 enable <task> <experiment> <run folder> [total] [session]"; exit 1; }
         [ -d "$REPO/logs/rsl_rl/$3/$4" ] || { echo "no run folder $REPO/logs/rsl_rl/$3/$4"; exit 1; }
         mkdir -p "$(dirname "$CONF")"
-        printf 'TASK=%s\nEXPERIMENT=%s\nCHAIN="%s"\nTOTAL=%s\nSESSION=%s\n' \
-            "$2" "$3" "$4" "${5:-30000}" "${6:-unified}" > "$CONF"
+        printf 'TASK=%s\nEXPERIMENT=%s\nCHAIN="%s"\nTOTAL=%s\nSESSION=%s\nGPU_IGNORE_PIDS="%s"\n' \
+            "$2" "$3" "$4" "${5:-30000}" "${6:-unified}" "${GPU_IGNORE_PIDS:-}" > "$CONF"
         rm -f "$MISS" "$LAST"
         log "armed: $2, $3/$4, $((${5:-30000})) iterations in total, tmux ${6:-unified}"
         ;;
