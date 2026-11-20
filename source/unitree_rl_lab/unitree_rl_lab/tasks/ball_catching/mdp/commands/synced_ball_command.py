@@ -239,6 +239,8 @@ class SyncedBallCommand(BallCommand):
         self._apply_drag(self._launched)
         self._update_catch_state(in_flight=self._launched)
         self._update_perception()
+        if self.cfg.track_loss:
+            self._detect_loss()
 
 
 @configclass

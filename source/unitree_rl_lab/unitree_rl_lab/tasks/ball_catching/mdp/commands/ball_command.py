@@ -202,6 +202,8 @@ class BallCommand(CommandTerm):
         self.failed_now = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         """``rethrow_after_loss``: the ball was lost in the last update (true on one step per lost throw)."""
         self._settle_left = torch.zeros(self.num_envs, device=self.device)
+        self.time_since_loss = torch.zeros(self.num_envs, device=self.device)
+        """Seconds since the throw was lost (``rethrow_after_loss`` or ``track_loss``); 0 while it is not."""
         self.arm_contact = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
         """Ball touches the [left, right] arm in the current control step (with ``palm_hold``: that hand's palm)."""
         self.torso_force = torch.zeros(self.num_envs, device=self.device)
@@ -297,7 +299,7 @@ class BallCommand(CommandTerm):
         if cfg.rethrow_after_catch:
             # completed throws of the episode (logged at the episode end, then zeroed by CommandTerm.reset)
             self.metrics["throws_completed"] = torch.zeros(self.num_envs, device=self.device)
-        if cfg.rethrow_after_loss:
+        if cfg.rethrow_after_loss or cfg.track_loss:
             self.metrics["throws_lost"] = torch.zeros(self.num_envs, device=self.device)
         if cfg.gate_max_deviation is not None:
             self.metrics["throws_gated"] = torch.zeros(self.num_envs, device=self.device)
@@ -426,6 +428,7 @@ class BallCommand(CommandTerm):
     def _reset_catch_state(self, env_ids: Sequence[int]):
         self.secured_steps[env_ids] = 0
         self.throw_failed[env_ids] = False
+        self.time_since_loss[env_ids] = 0.0
         self.confirmed[env_ids] = False
         self.confirmed_now[env_ids] = False
         self.steps_since_confirm[env_ids] = 0
@@ -586,6 +589,8 @@ class BallCommand(CommandTerm):
             self._rethrow_completed()
         if self.cfg.rethrow_after_loss:
             self._rethrow_lost()
+        elif self.cfg.track_loss:
+            self._detect_loss()
 
     def _rethrow_completed(self):
         """Several throws per episode (``rethrow_after_catch``): the ball of a completed catch is taken out of the
@@ -603,6 +608,20 @@ class BallCommand(CommandTerm):
         (the robot has to stand and leave it alone; with ``hide_lost_ball_below`` it no longer sees it), then it is
         moved to the release point of the next throw and the next wait starts, as after a completed catch."""
         cfg = self.cfg
+        self._detect_loss()
+        if self.failed_now.any():
+            ids = self.failed_now.nonzero(as_tuple=False).flatten()
+            self._settle_left[ids] = sample_uniform(*cfg.loss_settle_range, (len(ids),), self.device)
+        self._settle_left -= self.throw_failed.float() * self._env.step_dt
+        env_ids = (self.throw_failed & (self._settle_left <= 0.0)).nonzero(as_tuple=False).flatten()
+        if len(env_ids) > 0:
+            self._arm_throw(env_ids, cfg.rethrow_delay_range or cfg.throw_delay_range)
+
+    def _detect_loss(self):
+        """Mark the launched ball as lost once it is below ``loss_height`` or farther than ``loss_distance`` from the
+        robot (``throw_failed``, ``failed_now`` on that step, metric ``throws_lost``); ``time_since_loss`` counts the
+        seconds from there."""
+        cfg = self.cfg
         ball = self.ball.data.root_pos_w
         ground_z = self._env.scene.env_origins[:, 2]
         away = torch.norm(ball[:, :2] - self.robot.data.root_pos_w[:, :2], dim=-1) > cfg.loss_distance
@@ -610,12 +629,8 @@ class BallCommand(CommandTerm):
         if self.failed_now.any():
             ids = self.failed_now.nonzero(as_tuple=False).flatten()
             self.throw_failed[ids] = True
-            self._settle_left[ids] = sample_uniform(*cfg.loss_settle_range, (len(ids),), self.device)
             self.metrics["throws_lost"][ids] += 1.0
-        self._settle_left -= self.throw_failed.float() * self._env.step_dt
-        env_ids = (self.throw_failed & (self._settle_left <= 0.0)).nonzero(as_tuple=False).flatten()
-        if len(env_ids) > 0:
-            self._arm_throw(env_ids, cfg.rethrow_delay_range or cfg.throw_delay_range)
+        self.time_since_loss += self.throw_failed.float() * self._env.step_dt
 
     def _palm_geometry(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Per hand whether the ball centre lies on its palm side (``min_palm_alignment``, ``max_palm_distance``),
@@ -1068,6 +1083,11 @@ class BallCommandCfg(CommandTermCfg):
     """A lost ball ends its throw, not the episode (Advanced-S): it stays where it lies for ``loss_settle_range``,
     then the next throw is armed with ``rethrow_delay_range``. Use with the ``ball_dropped`` and ``ball_missed``
     terminations off; then only a fall or the time-out ends the episode."""
+
+    track_loss: bool = False
+    """Mark a lost ball (``throw_failed``, ``failed_now``, ``time_since_loss``) without arming the next throw (the
+    seventh Unified run: the next motion cycle brings it). With the termination ``mdp.ball_lost_since`` the episode ends
+    a while after the loss instead of at once, so the robot first has to stand next to the lost ball."""
 
     loss_height: float = 0.1
     """``rethrow_after_loss``: the ball is lost below this height (m above the ground), as ``ball_dropped``."""

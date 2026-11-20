@@ -1,8 +1,8 @@
 # Review guide: robot safety and chain v2 (2026-11-20)
 
 This guide is the entry point for reviewing two pieces of work:
-- **On `main` (2026-11-19/20, commits `3df7c99` to `b2498d6`):** the robot-safety work. Measuring what the robot does after a lost ball, the stage Advanced-S, the catchability gate, and the ball visibility options.
-- **On branch `chain-v2` (2026-11-20):** a seventh Unified run plus the Advanced stages reordered on it (V2-A, V2-C, V2-D, V2-E). Built and smoke-tested, not trained.
+- **On `main` (2026-11-19/20, commits `3df7c99` to `a7365ea`):** the robot-safety work. Measuring what the robot does after a lost ball, the stage Advanced-S (third run with a masked anchor in training), the catchability gate, and the ball visibility options.
+- **On branch `chain-v2` (2026-11-20):** a seventh Unified run that also learns to leave a visible ball alone, plus the Advanced stages reordered on it (V2-A, V2-C, V2-D, V2-E). Built and smoke-tested, not trained.
 
 It lists what changed and why, where it is in the code, which measurements stand behind it, and which decisions are open for discussion. The specification (`context/unitree_rl_lab_spec.md`) stays the reference for details; section numbers below point into it.
 
@@ -19,7 +19,7 @@ It lists what changed and why, where it is in the code, which measurements stand
   - With the episode kept running, E fell after 96 % of its lost balls: it goes after the ball on the floor (pitfall 39).
   - When the ball is reported before the throw, still in the thrower's hand, E chases it and falls in 99.9 % of the episodes (pitfall 40).
 - **Responses:**
-  - stage S on `main`, now in training;
+  - stage S on `main`: second run trained and evaluated, third run (masked anchor) in training;
   - the catchability gate, a rule for the live pipeline that is evaluated in simulation;
   - ball visibility randomization, because VICON hides nothing by itself;
   - chain v2 on the branch, which puts all lessons into a clean order.
@@ -62,17 +62,26 @@ It lists what changed and why, where it is in the code, which measurements stand
   - The first run (02:41) did not improve in 600 iterations and was stopped.
   - The second run (03:13) has the ramp and the faster anchor.
   - S is trained without the gate, so that the policy is safe on its own.
+- **Third run: masked anchor** (`BC/agents/anchored_ppo.py`, since 2026-11-20 14:20). The second run did not unlearn E's reflex to a visible ball that is not in play (pitfall 41).
+  - The observation group `anchor_mask` (`SObservationsCfg`, term `mdp.ball_shown_not_in_play`: a ball in view before the launch or after the loss) flags samples; it is no input of actor or critic.
+  - In flagged samples the anchor term is KL(anchor(observation with the 50 ball entries of `policy` zeroed) ‖ actor): it points at what E does when it sees no ball. Over all joints, weight 1.0, not decayed.
+  - The plain anchor and the KL guard use only the other samples. `train.py` fills in the ball indices (`masked_anchor_indices`, terms `ball_*`) from the observation manager.
 
 ### 2.5 Chain v2 (branch `chain-v2`; Section 7.2 "Chain v2", 7.3 "Seventh run", Section 11 item 18)
-- **Unified, seventh run:** A2's penalties (in the config since 2026-11-03) plus the ball before the throw in half of the cycles.
+- **Unified, seventh run:** A2's penalties (in the config since 2026-11-03), the ball before the throw in half of the cycles, and a lost ball that no longer ends the episode at once:
+  - `BallCommandCfg.track_loss` marks the loss (below 0.1 m or 6 m away, as the old terminations), and `ball_dropped` = `mdp.ball_lost_since` ends the episode 3 s later, or on the clip's last step if that comes first (the next cycle would clear the loss). `ball_missed` is part of it.
+  - The reference holds its catch pose meanwhile, so the robot learns from scratch to stand next to the lost ball. It stays visible on the floor in half of the cycles and is hidden in the other half.
+  - The approach rewards are zero after the loss, `ball_height_penalty` counts only while the ball is in play; the play config evaluates as before.
+  - The critic sees the loss and the time since it: `catch_phase` has two more entries in all three tasks (1565 instead of 1555), as it already had the held share for the hold phase.
 - **V2-A** (from Unified 7): A's definition with A2's penalties and B's bounce threshold, plus:
   - approach rewards times P;
   - `aim_at_launch`;
   - ball before the throw in half of the throws, constant;
   - `arm_rest_pose_exp`: arm joints toward the human catchers' pose at the start of the 108 clips while the robot waits.
-- **V2-C:** C's real lifecycle plus S's loss lifecycle: fall −200, capture point, and the lost ball hidden in a share that falls from 1 to 0.5.
+- **V2-C:** C's real lifecycle plus S's loss lifecycle: fall −200, capture point, and the lost ball visible in half of the throws from the start (no ramp: Unified 7 learned it).
 - **V2-D:** D's pushes in the ball phase plus `push_during_flight` (D2): one push in the flight of 30 % of the throws, with strength from D's curriculum.
 - **V2-E:** E's wider and frontal throws plus S's 15 % throws at 0.45–1.0 m.
+- **All V2 stages:** S's runner (`V2PPORunnerCfg(AdvancedSPPORunnerCfg)`: anchor down to 0.1 within 500 iterations, the arm joints at 10 %, masked anchor); V2-A on carry S's group `anchor_mask`.
 - **Refactor:** the stage features of the first chain are now shared functions (`apply_real_lifecycle`, `apply_ball_phase_push_ramp`, `apply_wide_throws`, `apply_loss_lifecycle`, `apply_unreachable_throws`, `apply_loss_evaluation` in `ball_catch_env_cfg.py`). A dump of all task configs before and after shows the first chain unchanged.
 
 ## 3. Measurements behind the decisions
@@ -93,6 +102,7 @@ All in Isaac with 512 robots × 180 s unless noted. Sources are under `analysis/
 | S's first run (full visibility shares, slow anchor) | 93 % of episodes ended with a fall, flat for 500 iterations after the warm-up | Section 7.2 |
 | S's second run (ramp, fast anchor), evaluated like E | catches as E (88.6 / 94.3 % with / without pushes); falls before a loss on wide throws 8.5 → 4.3 %; with the gate and the lost ball hidden 6.1 → 3.5 % falls; **with a visible lost ball or a ball before the throw as many falls as E** (96 %, 99.9 %); training falls rose with the visibility to 92 % and stayed there for 2500 iterations | Section 10, pitfall 41, `analysis/2026-11-20_advanced_s_final/` |
 | Throws aimed at the launch | E in S's play config 92.2 % against 89.5 % in its own: about 3 points | Section 10 |
+| Unified 6's actor in Unified 7's training config (256 robots × 60 s; the post-loss window) | two runs: 54 and 58 losses; about half of the windows ended by `ball_dropped` after 3 s (one at the clip end), the other half by a tracking termination; none cleared by a new cycle; ball reported in 29 and 36 % of the post-loss steps; critic loss entries as intended; split by visibility (512 robots, 104 windows): with the ball in view 90 % of the windows end with a tracking termination after 1.3 s on average, with it hidden 96 % reach the end after 3 s. Unified 6 already has E's reflex | Section 7.3 |
 | Arm pose while waiting | human clips: upper arms hanging slightly out, elbows ≈ 62°; the Advanced stages since A raise the forearms in front of the chest | Section 7.2 "Chain v2" |
 
 ## 4. Decisions open for discussion
@@ -101,7 +111,11 @@ Each item gives our choice, the alternatives, and what would change it.
 
 1. **Fall price −200 (weight −10000).** Chosen so that the policy accepts at most one fall per about ten extra catches (research of 2026-11-19, `analysis/2026-11-19_stufe_f/`). Too high a price makes a robot timid in the literature, too low makes falls free. Alternative: a Lagrangian on the fall rate. Check: S's catch rate on E's throws should stay within a point of E.
 2. **Visibility randomization of 0.5 each** (ball before the throw, lost ball hidden). VICON tracks the ball everywhere, and the bridge's filters may miss cases, for example a bounce that looks ballistic. Alternative: rely on the bridge only. That is fragile, given E's 99.9 % falls with a parked ball.
-3. **Where the robustness to a visible ball is learned.** S's second run answered this: anchored fine-tuning did not unlearn E's reflex (pitfall 41). Chain v2 already moves the ball before the throw into Unified 7. Open: V2-C still ramps in the visible lost ball by fine-tuning and would most likely fail the same way. Proposal: Unified 7 also trains losses that do not end the cycle, with the lost ball visible in half of them, so the policy learns from scratch while the reference keeps it upright. Alternative: an anchor that, in such states, points at the anchor actor's output with the ball masked.
+3. **Where the robustness to a visible ball is learned.** S's second run answered this: anchored fine-tuning did not unlearn E's reflex (pitfall 41). **Decided by Marius on 2026-11-20:**
+   - Unified 7 learns both visible balls from scratch: the ball before the throw and the lost ball on the floor for 3 s.
+   - V2-C keeps the lost ball visible in half of the throws, without a ramp.
+   - All V2 stages use S's masked anchor, so the fine-tuning keeps what Unified 7 learned.
+   - S's third run tests the masked anchor alone, by fine-tuning E. Nothing of chain v2 is trained before it is evaluated.
 4. **Fast anchor decay (500 instead of 3000 iterations).** The earlier stages gained mostly in their last 1000 iterations. A faster decay risks forgetting catching skills. Check: the catch rate in S's suite and S evaluated in E's environment.
 5. **Gate design.**
    - Decided once, on the first measurement, rather than re-deciding (table tennis: decide once).
@@ -120,7 +134,10 @@ Each item gives our choice, the alternatives, and what would change it.
     - The arm rest term in A, at weight 1 and std 0.5 rad; low priority for Marius.
     - Alternatives: keep S as the last stage, or one combined stage.
 11. **When to start Unified 7.** Now, or after the real ball and the latency are measured. With those measurements no stage B would be needed later.
-12. **Deployment layers** (Section 11, item 17):
+12. **Post-loss window of 3 s in Unified 7, cut at the clip end.** E's reflex shows within a second (with the ball before the throw it fell 0.6 s after the start), so 3 s cover the reflex and some standing. The reference holds the catch pose for 5 s after the catch, so the window always fits after a miss, but a ball dropped late in the hold phase reaches the clip end first; there the loss now ends the episode, otherwise the next cycle would clear it. Alternative: an end hold longer by 3 s, which changes the start sampling over the extended cycle.
+13. **The loss phase in the critic of all tasks.** Without it the critic cannot predict the end of the window 3 s after the loss (5 frames of history show no time). The entries go into all three tasks because the critic layout is shared (pitfall 31); checkpoints from before cannot continue with a plain `--resume`, but `--finetune`, `eval_catch.py` and `play.py` load only the actor. Alternative: a window without a fixed end, which leaves the drop without a cost.
+14. **Masked anchor: weight 1.0, constant, all joints.** The reflex is in the legs, and the flagged states are where E falls. Alternatives: decay it like the plain anchor, or apply it only to the legs.
+15. **Deployment layers** (Section 11, item 17):
     - catch policy only around a throw;
     - tilt check to Passive, which is not protective;
     - gantry for the first tests;
@@ -129,7 +146,9 @@ Each item gives our choice, the alternatives, and what would change it.
 ## 5. Risks and known limitations
 
 - **S** is the fallback for the first robot tests only if the live pipeline hides the ball before the throw and the lost ball (pitfall 41).
-- **Chain v2 is untrained.** The arm rest weight, the D2 share and the visibility ramps are first guesses.
+- **Chain v2 is untrained.** The arm rest weight, the D2 share, the window of 3 s and the masked anchor's weight are first guesses.
+- **Unified 7 learns to stand next to a lost ball while it tracks a static reference.** The V2 stages have no reference; the masked anchor and V2-C's rewards have to keep that behaviour without it.
+- **The masked anchor also moves the actor elsewhere.** In S's third run the plain anchor KL stayed around 1 in the first 300 iterations, before the visibility ramp started (the second run ended at 0.07). Its catch rate is the check.
 - **Simulation details:**
   - The parked ball sways sinusoidally; a real thrower's wind-up (fast and non-ballistic) is not modelled.
   - In the simulation the lost ball lies still or rolls. In reality a person picks it up while VICON reports it.
@@ -142,21 +161,25 @@ Each item gives our choice, the alternatives, and what would change it.
 
 | File | What |
 |---|---|
-| `BC/mdp/commands/ball_command.py` | perception options, gate (`closest_catchable_approach`), `aim_at_launch`, loss lifecycle, parked ball |
+| `BC/mdp/commands/ball_command.py` | perception options, gate (`closest_catchable_approach`), `aim_at_launch`, loss lifecycle, `track_loss`, parked ball |
+| `BC/mdp/commands/synced_ball_command.py` | Unified's command: `track_loss` after the perception update; a new cycle clears a loss |
+| `BC/mdp/terminations.py` | `ball_lost_since` (Unified 7's post-loss window) |
+| `BC/mdp/observations.py` | `ball_shown_not_in_play` (flag of the masked anchor), `catch_phase` with the loss phase |
+| `BC/agents/anchored_ppo.py`, `scripts/rsl_rl/train.py` | masked anchor; train.py fills in the ball indices |
 | `BC/mdp/rewards.py` | `ball_interception_exp(posture=...)`, `ball_height_penalty(command_name=...)`, `capture_point_exp`, `arm_rest_pose_exp` |
 | `BC/mdp/events.py` | `push_during_flight` (D2) |
-| `BC/mdp/curriculums.py` | `ramp_ball_visibility` |
+| `BC/mdp/curriculums.py` | `ramp_ball_visibility` (S only) |
 | `BC/agents/rsl_rl_ppo_cfg.py` | `AdvancedSPPORunnerCfg`, `V2PPORunnerCfg` |
 | `BC/robots/g1_29dof/advanced/ball_catch_env_cfg.py` | first chain A … S, stage features as `apply_*` functions |
 | `BC/robots/g1_29dof/advanced/v2_env_cfg.py` | chain v2 (V2-A, -C, -D, -E) |
-| `BC/robots/g1_29dof/unified/ball_catch_env_cfg.py` | Unified (seventh run: `SHOW_PARKED_BALL_PROB`) |
+| `BC/robots/g1_29dof/unified/ball_catch_env_cfg.py` | Unified (seventh run: `SHOW_PARKED_BALL_PROB`, `POST_LOSS_S`, `HIDE_LOST_BALL_*`) |
 | `scripts/rsl_rl/eval_catch.py`, `sim2sim/{run,ball}.py` | evaluation options |
 | `scripts/rsl_rl/dump_task_cfgs.py` | dump and compare the configs of all ball tasks (refactor check) |
-| `context/unitree_rl_lab_spec.md` | Sections 2, 7.2, 7.3, 9 (pitfalls 38–40), 11 (items 16–18), 14 (changelog) |
+| `context/unitree_rl_lab_spec.md` | Sections 2, 6.1, 7.2, 7.3, 8, 9 (pitfalls 31, 38–41), 11 (items 16–18), 14 (changelog) |
 
 ## 7. How to verify
 
-- **Configs of all tasks:** `python scripts/rsl_rl/dump_task_cfgs.py <out.json>` once with `main` and once with the branch on the `PYTHONPATH`, then `python scripts/rsl_rl/dump_task_cfgs.py --compare main.json branch.json`. On 2026-11-20 the first chain was identical, and Unified differed only in `show_parked_ball_prob`.
+- **Configs of all tasks:** `python scripts/rsl_rl/dump_task_cfgs.py <out.json>` once with `main` and once with the branch on the `PYTHONPATH`, then `python scripts/rsl_rl/dump_task_cfgs.py --compare main.json branch.json`. On 2026-11-20 (afternoon) the first chain's configs were identical apart from the new field `track_loss` (off), and Unified differed only in the intended fields (spec Section 11, item 18). The dump shows configs, not code: the critic's `catch_phase` returns 5 entries in every task.
 - **Smoke test of a stage:**
 
   ```
@@ -164,6 +187,7 @@ Each item gives our choice, the alternatives, and what would change it.
   ```
 
   E's checkpoint has the same actor contract, so it can stand in for a V2 checkpoint.
+- **Unified 7's post-loss window:** step Unified's training config with a Unified 6 actor and count the losses, the `ball_dropped` ends (3 s after the loss or at the clip end), other terminations inside the window, losses cleared by a new cycle without an episode end (must be 0) and the share of post-loss steps with the ball visible.
 - **Safety evaluation of a checkpoint:**
 
   ```
@@ -177,7 +201,8 @@ Each item gives our choice, the alternatives, and what would change it.
   - catch rate within a point of E;
   - MuJoCo agrees.
 
-## 8. Status and next steps (2026-11-20, 04:00)
+## 8. Status and next steps (2026-11-20, 15:00)
 
-- S is trained and evaluated (2026-11-20, `analysis/2026-11-20_advanced_s_final/`): same catches as E, half the dives on wide throws, no robustness to a visible ball.
-- Chain v2 waits for this review, the decision on V2-C's visible lost ball (decision 3) and on the ball and latency measurements before Unified 7 starts.
+- S's second run is trained and evaluated (`analysis/2026-11-20_advanced_s_final/`): same catches as E, half the dives on wide throws, no robustness to a visible ball.
+- S's third run (masked anchor) is in training until about 17:15 and is then evaluated like the second.
+- Chain v2 has decision 3 built in. It waits for this review, S's third run and the decision on the ball and latency measurements (decision 11) before Unified 7 starts.

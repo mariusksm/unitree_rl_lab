@@ -3,20 +3,23 @@
 The first chain (Advanced-A -> A2 -> B -> C -> D -> E -> S, ``ball_catch_env_cfg.py``) fine-tuned the sixth Unified
 run and added each lesson as one more stage. Chain v2 starts from a Unified run that already has the fixes that belong
 to it (A2's penalties against pressed hands and arm torques near the limit, the ball reported before the throw in half
-of the throws), and puts every later lesson into the stage where it belongs:
+of the cycles, a lost ball that ends the episode only 3 s later and stays visible on the floor in half of the cycles),
+and puts every later lesson into the stage where it belongs:
 
 - **V2-A:** the reference dropped, holding and posture as defined in A, plus A2's penalties, the approach rewards
   times the posture factor (S), every throw aimed at the robot at the launch (S), the ball before the throw reported
   in half of the throws (constant: the seventh Unified run learned it) and the arms resting in the pose of the human
   recordings while waiting (new, ``mdp.arm_rest_pose_exp``).
 - **V2-C:** the real lifecycle (C) together with what follows a lost ball (S): a loss ends only its throw, the lost ball
-  is hidden in half of the throws (ramped in), a fall costs -200, the capture point over the feet pays while standing.
+  stays visible in half of the throws (as the seventh Unified run learned it), a fall costs -200, the capture point over
+  the feet pays while standing.
 - **V2-D:** pushes in the ball phase ramped up (D), plus pushes timed into the flight for 30 % of the throws (D2,
   ``mdp.push_during_flight``).
 - **V2-E:** wider throws and frontal throws (E), plus 15 % of the throws aimed 0.45-1.0 m to the side (S).
 
 Every stage is fine-tuned from the previous one's final checkpoint (V2-A from the seventh Unified run) with
-``V2PPORunnerCfg`` (anchor 1.0 -> 0.1 within 500 iterations). B (ball rebound) stays a placeholder until the real ball
+``V2PPORunnerCfg`` (anchor 1.0 -> 0.1 within 500 iterations, masked anchor as Advanced-S: the observation group
+``anchor_mask`` of ``SObservationsCfg``). B (ball rebound) stays a placeholder until the real ball
 is measured; its bounce threshold is inherited as in C to S. F (lunges) comes later, if real throws need it.
 """
 
@@ -38,13 +41,12 @@ from .ball_catch_env_cfg import (
     POSTURE,
     PUSH_VELOCITY_RANGE,
     SHOW_PARKED_BALL_PROB,
-    STEPS_PER_ITERATION,
     SUCCESS_GATE,
-    VISIBILITY_RAMP_ITERATIONS,
     A2RewardsCfg,
     AdvancedBEnvCfg,
     AdvancedECurriculumCfg,
     EventCfg,
+    SObservationsCfg,
     apply_ball_phase_push_ramp,
     apply_loss_evaluation,
     apply_loss_lifecycle,
@@ -125,6 +127,7 @@ class V2AEnvCfg(AdvancedBEnvCfg):
     resting while waiting. Fine-tuned from the seventh Unified run."""
 
     rewards: V2ARewardsCfg = V2ARewardsCfg()
+    observations: SObservationsCfg = SObservationsCfg()  # with the group anchor_mask of the masked anchor
 
     def __post_init__(self):
         super().__post_init__()
@@ -161,24 +164,9 @@ class V2CRewardsCfg(V2ARewardsCfg):
 
 
 @configclass
-class V2CCurriculumCfg:
-    # the lost ball visible in a growing share of the throws; the share of the ball before the throw stays at V2-A's
-    lost_ball_visibility = CurrTerm(
-        func=mdp.ramp_ball_visibility,
-        params={
-            "start_step": VISIBILITY_RAMP_ITERATIONS[0] * STEPS_PER_ITERATION,
-            "end_step": VISIBILITY_RAMP_ITERATIONS[1] * STEPS_PER_ITERATION,
-            "show_parked_start": SHOW_PARKED_BALL_PROB,
-            "show_parked_final": SHOW_PARKED_BALL_PROB,
-            "hide_lost_final": HIDE_LOST_BALL_PROB,
-        },
-    )
-
-
-@configclass
 class V2CEnvCfg(V2AEnvCfg):
     """V2-C: V2-A plus the real lifecycle (C) and what follows a lost ball (S): a loss ends only its throw, the lost
-    ball hidden in a share of the throws that falls from all to half, a fall costs -200, the capture point pays.
+    ball visible in half of the throws (as in the seventh Unified run), a fall costs -200, the capture point pays.
     Fine-tuned from V2-A's final checkpoint."""
 
     rewards: V2CRewardsCfg = V2CRewardsCfg()
@@ -187,8 +175,7 @@ class V2CEnvCfg(V2AEnvCfg):
         super().__post_init__()
         apply_real_lifecycle(self)
         apply_loss_lifecycle(self)
-        self.curriculum = V2CCurriculumCfg()
-        self.commands.ball_throw.hide_lost_ball_prob = 1.0  # ramped to HIDE_LOST_BALL_PROB
+        self.commands.ball_throw.hide_lost_ball_prob = HIDE_LOST_BALL_PROB
 
 
 class V2CPlayEnvCfg(V2CEnvCfg):
@@ -226,7 +213,6 @@ class V2DEnvCfg(V2CEnvCfg):
         super().__post_init__()
         apply_ball_phase_push_ramp(self)
         self.curriculum = V2DCurriculumCfg()
-        self.commands.ball_throw.hide_lost_ball_prob = HIDE_LOST_BALL_PROB  # V2-C's final share
 
 
 class V2DPlayEnvCfg(V2DEnvCfg):

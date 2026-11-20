@@ -223,14 +223,21 @@ def hand_pos_b(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     return quat_apply_inverse(heading, rel).reshape(env.num_envs, -1)
 
 
-def catch_phase(env: ManagerBasedEnv, command_name: str = "ball_throw") -> torch.Tensor:
+def catch_phase(env: ManagerBasedEnv, command_name: str = "ball_throw", loss_window_s: float = 3.0) -> torch.Tensor:
     """Phase of the throw for the critic (since 2026-11-01): [launched, confirmed, time since the confirmation as a
-    share of the hold phase]. The reward depends on it (contact rules, approach terms only until the confirmation),
-    and a critic with 5 frames of history cannot tell how long the ball has been held. Returns (num_envs, 3)."""
+    share of the hold phase, lost, time since the loss as a share of ``loss_window_s``]. The reward depends on it
+    (contact rules, approach terms only until the confirmation), and a critic with 5 frames of history cannot tell how
+    long the ball has been held or lost; since chain v2 (2026-11-20) a lost ball ends Unified's episode
+    ``loss_window_s`` later at the latest (``mdp.ball_lost_since``). The loss entries are zero without
+    ``rethrow_after_loss`` or ``track_loss``.
+    Returns (num_envs, 5)."""
     command = env.command_manager.get_term(command_name)
     hold_s = max(float(command.cfg.hold_after_catch_s), 1e-6)
     held = (command.steps_since_confirm.float() * env.step_dt / hold_s).clamp(0.0, 1.0)
-    return torch.stack([command.launched.float(), command.confirmed.float(), held], dim=-1)
+    lost_for = (command.time_since_loss / max(loss_window_s, 1e-6)).clamp(0.0, 1.0)
+    return torch.stack(
+        [command.launched.float(), command.confirmed.float(), held, command.throw_failed.float(), lost_for], dim=-1
+    )
 
 
 def dummy_zeros(env: ManagerBasedEnv, dim: int) -> torch.Tensor:

@@ -99,8 +99,18 @@ START_HOLD_PROB = 0.35
 HOLD_FROM_S = [d["catch_time"] + CATCH_SETTLE_S if d["valid"] else None for d in CATCH_DATA]
 # after the confirmed catch the robot keeps the ball this long before the throw counts as completed
 HOLD_AFTER_CATCH_S = 3.0
-# share of the cycles whose ball is reported already in the thrower's hand during the lead-in (seventh run on)
+# ── seventh run on (chain v2): the robot has to leave a ball alone that it sees but that is not in play. Advanced-E
+#    chased such a ball and fell (spec pitfalls 39, 40), and fine-tuning did not unlearn it (pitfall 41), so Unified
+#    learns it from scratch, with the reference keeping the robot upright meanwhile:
+#    - the ball reported already during the lead-in in half of the cycles, held and swaying in the thrower's hand;
+#    - a lost ball (below 0.1 m or 6 m away) ends the episode only POST_LOSS_S later, or at the clip end if that comes
+#      first (the reference holds its catch pose for END_HOLD_S after the catch), and in half of the cycles it stays
+#      visible on the floor meanwhile. ──
 SHOW_PARKED_BALL_PROB = 0.5
+POST_LOSS_S = 3.0
+HIDE_LOST_BALL_BELOW = 0.4
+HIDE_LOST_BALL_BEYOND = 3.0
+HIDE_LOST_BALL_PROB = 0.5
 # the held pose must outlast the confirmation (secure_steps, up to ~1.5 s after the arrival) plus the hold phase,
 # otherwise the clip ends first: the robot is reset onto the next cycle and the catch never completes
 END_HOLD_S = HOLD_AFTER_CATCH_S + 2.0
@@ -374,8 +384,9 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         actions = ObsTerm(func=mdp.last_action)
-        # -- phase of the throw (since 2026-11-01): the reward depends on it, the history cannot show it
-        catch_phase = ObsTerm(func=mdp.catch_phase, params={"command_name": "ball_throw"})
+        # -- phase of the throw (since 2026-11-01): the reward depends on it, the history cannot show it; with the time
+        #    since a loss (seventh run on): the episode ends POST_LOSS_S after it
+        catch_phase = ObsTerm(func=mdp.catch_phase, params={"command_name": "ball_throw", "loss_window_s": POST_LOSS_S})
 
         def __post_init__(self):
             self.history_length = 5
@@ -747,15 +758,42 @@ class RobotEnvCfgUnified(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
 
         self.scene.contact_forces.update_period = self.sim.dt
-        # seventh run on (chain v2): the ball reported already during the lead-in in half of the cycles, held and
-        # swaying in the thrower's hand, as VICON sees it; E chased such a ball and fell (spec pitfall 40)
-        self.commands.ball_throw.show_parked_ball_prob = SHOW_PARKED_BALL_PROB
+        # seventh run on (chain v2): balls in view that are not in play (see SHOW_PARKED_BALL_PROB)
+        cmd = self.commands.ball_throw
+        cmd.show_parked_ball_prob = SHOW_PARKED_BALL_PROB
+        cmd.track_loss = True
+        cmd.hide_lost_ball_below = HIDE_LOST_BALL_BELOW
+        cmd.hide_lost_ball_beyond = HIDE_LOST_BALL_BEYOND
+        cmd.hide_lost_ball_prob = HIDE_LOST_BALL_PROB
+        # the drop still counts as the cycle's failure for the adaptive sampling (start_bin_failure_terms), POST_LOSS_S
+        # after the loss or at the clip end, whichever comes first (a ball dropped late in the hold phase); the miss is
+        # part of it
+        self.terminations.ball_dropped = DoneTerm(
+            func=mdp.ball_lost_since,
+            params={"command_name": "ball_throw", "wait_s": POST_LOSS_S, "motion_command_name": "motion"},
+        )
+        self.terminations.ball_missed = None
+        # a ball on the floor is no longer in play: no penalty for it during the window (else a fall would end it)
+        self.rewards.ball_height_penalty.params["command_name"] = "ball_throw"
 
 
 class RobotPlayEnvCfgUnified(RobotEnvCfgUnified):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
-        self.commands.ball_throw.show_parked_ball_prob = 0.0  # eval_catch.py --show_ball_before_throw reports it
+        # evaluated as before: a lost ball ends the episode at once (eval_catch.py --after_loss_s keeps it running),
+        # nothing reported before the launch (--show_ball_before_throw) and the lost ball visible (--hide_lost_ball)
+        cmd = self.commands.ball_throw
+        cmd.show_parked_ball_prob = 0.0
+        cmd.track_loss = False
+        cmd.hide_lost_ball_below = None
+        cmd.hide_lost_ball_beyond = None
+        cmd.hide_lost_ball_prob = 1.0
+        self.terminations.ball_dropped = DoneTerm(
+            func=mdp.ball_below_height, params={"ball_name": "ball", "min_height": 0.1}
+        )
+        self.terminations.ball_missed = DoneTerm(
+            func=mdp.ball_far_from_robot, params={"ball_name": "ball", "max_distance": 6.0}
+        )
         # evaluate on the final throw distribution and reward weights
         self.curriculum = None

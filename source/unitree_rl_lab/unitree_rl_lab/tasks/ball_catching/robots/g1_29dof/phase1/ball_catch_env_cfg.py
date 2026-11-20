@@ -201,7 +201,7 @@ class ObservationsCfg:
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         actions = ObsTerm(func=mdp.last_action)
         # -- phase of the throw (zeros: no ball in Phase 1; real in Unified and Advanced)
-        catch_phase = ObsTerm(func=mdp.dummy_zeros, params={"dim": 3})
+        catch_phase = ObsTerm(func=mdp.dummy_zeros, params={"dim": 5})
 
         def __post_init__(self):
             self.history_length = 5         # same as Unified / Advanced
