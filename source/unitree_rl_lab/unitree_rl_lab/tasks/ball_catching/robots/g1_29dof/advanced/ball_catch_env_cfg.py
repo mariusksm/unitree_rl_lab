@@ -654,6 +654,23 @@ RETHROW_DELAY_RANGE = (2.0, 8.0)
 EPISODE_LENGTH_C_S = 30.0
 
 
+def apply_real_lifecycle(cfg):
+    """Stage C (chain v2: also C): start in the deploy FixStand pose plus noise, several throws per episode, the ball
+    taken out of the hands after the hold."""
+    cfg.episode_length_s = EPISODE_LENGTH_C_S
+    cfg.commands.ball_throw.rethrow_after_catch = True
+    cfg.commands.ball_throw.rethrow_delay_range = RETHROW_DELAY_RANGE
+    # the completed catch arms the next throw; time-outs (truncations) and failures end the episode
+    cfg.terminations.ball_caught = None
+    cfg.events.reset_robot_joints = EventTerm(
+        func=mdp.reset_joints_to_pose,
+        mode="reset",
+        params={"joint_pos": DEPLOY_STAND_POSE, "position_noise": START_POSE_NOISE},
+    )
+    lift = DEPLOY_STAND_PELVIS_HEIGHT - ROBOT_CFG.init_state.pos[2]
+    cfg.events.reset_base.params["pose_range"]["z"] = (lift, lift)
+
+
 @configclass
 class AdvancedCEnvCfg(AdvancedBEnvCfg):
     """Advanced-C: Advanced-B plus the real lifecycle: start in the deploy FixStand pose, several throws per episode,
@@ -663,18 +680,7 @@ class AdvancedCEnvCfg(AdvancedBEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.episode_length_s = EPISODE_LENGTH_C_S
-        self.commands.ball_throw.rethrow_after_catch = True
-        self.commands.ball_throw.rethrow_delay_range = RETHROW_DELAY_RANGE
-        # the completed catch arms the next throw; time-outs (truncations) and failures end the episode
-        self.terminations.ball_caught = None
-        self.events.reset_robot_joints = EventTerm(
-            func=mdp.reset_joints_to_pose,
-            mode="reset",
-            params={"joint_pos": DEPLOY_STAND_POSE, "position_noise": START_POSE_NOISE},
-        )
-        lift = DEPLOY_STAND_PELVIS_HEIGHT - ROBOT_CFG.init_state.pos[2]
-        self.events.reset_base.params["pose_range"]["z"] = (lift, lift)
+        apply_real_lifecycle(self)
 
 
 class AdvancedCPlayEnvCfg(AdvancedCEnvCfg):
@@ -700,6 +706,13 @@ class AdvancedDCurriculumCfg:
     push_difficulty = CurrTerm(func=mdp.success_gated_difficulty, params={"target": "pushes", **SUCCESS_GATE})
 
 
+def apply_ball_phase_push_ramp(cfg):
+    """Stage D: pushes in the ball phase between 20 % and full strength, the level ramped by the curriculum's
+    ``difficulty`` (``AdvancedDCurriculumCfg``)."""
+    cfg.events.push_robot.params["ball_phase_scale_final"] = PUSH_BALL_PHASE_SCALE_FINAL
+    cfg.events.push_robot.params["difficulty"] = 0.0  # set by the curriculum
+
+
 @configclass
 class AdvancedDEnvCfg(AdvancedCEnvCfg):
     """Advanced-D: Advanced-C plus pushes in the ball phase ramped from 20 % up to full strength (success-gated).
@@ -709,8 +722,7 @@ class AdvancedDEnvCfg(AdvancedCEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.curriculum = AdvancedDCurriculumCfg()
-        self.events.push_robot.params["ball_phase_scale_final"] = PUSH_BALL_PHASE_SCALE_FINAL
-        self.events.push_robot.params["difficulty"] = 0.0  # set by the curriculum
+        apply_ball_phase_push_ramp(self)
 
 
 class AdvancedDPlayEnvCfg(AdvancedDEnvCfg):
@@ -739,6 +751,21 @@ FRONTAL_DISTANCE_RANGE = (2.0, 4.0)
 FRONTAL_DIRECTION_RANGE = (-math.radians(30.0), math.radians(30.0))
 
 
+def apply_wide_throws(cfg):
+    """Stage E: aim and arc staged from A's ranges to the hard ones (``difficulty`` set by ``AdvancedECurriculumCfg``),
+    speed cap, half the throws from the front."""
+    cmd = cfg.commands.ball_throw
+    cmd.target_forward_range_hard = TARGET_FORWARD_RANGE_HARD
+    cmd.target_lateral_range_hard = TARGET_LATERAL_RANGE_HARD
+    cmd.target_height_range_hard = TARGET_HEIGHT_RANGE_HARD
+    cmd.apex_height_range_hard = APEX_HEIGHT_RANGE_HARD
+    cmd.max_horizontal_speed = MAX_HORIZONTAL_SPEED
+    cmd.frontal_share = FRONTAL_SHARE
+    cmd.frontal_distance_range = FRONTAL_DISTANCE_RANGE
+    cmd.frontal_direction_range = FRONTAL_DIRECTION_RANGE
+    cmd.difficulty = 0.0  # set by the curriculum
+
+
 @configclass
 class AdvancedECurriculumCfg:
     throw_difficulty = CurrTerm(func=mdp.success_gated_difficulty, params={"target": "throws", **SUCCESS_GATE})
@@ -753,16 +780,7 @@ class AdvancedEEnvCfg(AdvancedDEnvCfg):
         super().__post_init__()
         self.curriculum = AdvancedECurriculumCfg()
         self.events.push_robot.params["difficulty"] = 1.0  # D's final level, fixed
-        cmd = self.commands.ball_throw
-        cmd.target_forward_range_hard = TARGET_FORWARD_RANGE_HARD
-        cmd.target_lateral_range_hard = TARGET_LATERAL_RANGE_HARD
-        cmd.target_height_range_hard = TARGET_HEIGHT_RANGE_HARD
-        cmd.apex_height_range_hard = APEX_HEIGHT_RANGE_HARD
-        cmd.max_horizontal_speed = MAX_HORIZONTAL_SPEED
-        cmd.frontal_share = FRONTAL_SHARE
-        cmd.frontal_distance_range = FRONTAL_DISTANCE_RANGE
-        cmd.frontal_direction_range = FRONTAL_DIRECTION_RANGE
-        cmd.difficulty = 0.0  # set by the curriculum
+        apply_wide_throws(self)
 
 
 class AdvancedEPlayEnvCfg(AdvancedEEnvCfg):
@@ -801,6 +819,47 @@ STEPS_PER_ITERATION = 24  # num_steps_per_env of the PPO runner
 FALL_PENALTY_WEIGHT = -10000.0  # once per fall: -200 after the reward manager's dt (0.02 s), twenty catch bonuses
 CAPTURE_POINT_WEIGHT = 2.0  # per second while standing balanced, against 5 for `stand`
 CAPTURE_POINT_STD = 0.12  # m, Zhang et al.: a push of 0.5 m/s moves the capture point 0.14 m (reward 0.25)
+
+
+def apply_loss_lifecycle(cfg):
+    """Stage S (chain v2: C): a lost ball ends its throw, not the episode; it lies there for ``LOSS_SETTLE_RANGE`` and
+    is hidden below 0.4 m or 3 m away after its arrival (in the share ``hide_lost_ball_prob`` of the throws); only a
+    fall or the time-out ends the episode."""
+    cmd = cfg.commands.ball_throw
+    cmd.rethrow_after_loss = True
+    cmd.loss_settle_range = LOSS_SETTLE_RANGE
+    cmd.hide_lost_ball_below = HIDE_LOST_BALL_BELOW
+    cmd.hide_lost_ball_beyond = HIDE_LOST_BALL_BEYOND
+    # a lost ball ends its throw in the command (rethrow_after_loss); only a fall or the time-out ends the episode
+    cfg.terminations.ball_dropped = None
+    cfg.terminations.ball_missed = None
+
+
+def apply_unreachable_throws(cfg):
+    """Stage S (chain v2: E): ``UNREACHABLE_SHARE`` of the throws aimed ``UNREACHABLE_LATERAL_RANGE`` to either side."""
+    cmd = cfg.commands.ball_throw
+    cmd.unreachable_share = UNREACHABLE_SHARE
+    cmd.unreachable_lateral_range = UNREACHABLE_LATERAL_RANGE
+
+
+def apply_loss_evaluation(cfg):
+    """Play configs of S and chain v2 from C on: a lost ball ends the episode again (eval_catch.py counts the outcomes
+    from the terminations; ``--after_loss_s`` keeps it running), no throws beyond reach, the lost ball visible (the
+    worst case; ``--hide_lost_ball`` hides it), the ball before the throw not reported (``--show_ball_before_throw``
+    reports it)."""
+    cfg.curriculum = None
+    cmd = cfg.commands.ball_throw
+    cmd.rethrow_after_loss = False
+    cmd.unreachable_share = 0.0
+    cmd.hide_lost_ball_below = None
+    cmd.hide_lost_ball_beyond = None
+    cmd.show_parked_ball_prob = 0.0
+    cfg.terminations.ball_dropped = DoneTerm(
+        func=mdp.ball_below_height, params={"ball_name": "ball", "min_height": 0.1}
+    )
+    cfg.terminations.ball_missed = DoneTerm(
+        func=mdp.ball_far_from_robot, params={"ball_name": "ball", "max_distance": 6.0}
+    )
 
 
 @configclass
@@ -896,18 +955,11 @@ class AdvancedSEnvCfg(AdvancedEEnvCfg):
         self.events.push_robot.params["difficulty"] = 1.0
         cmd = self.commands.ball_throw
         cmd.difficulty = 1.0
-        cmd.rethrow_after_loss = True
-        cmd.loss_settle_range = LOSS_SETTLE_RANGE
-        cmd.unreachable_share = UNREACHABLE_SHARE
-        cmd.unreachable_lateral_range = UNREACHABLE_LATERAL_RANGE
-        cmd.hide_lost_ball_below = HIDE_LOST_BALL_BELOW
-        cmd.hide_lost_ball_beyond = HIDE_LOST_BALL_BEYOND
+        apply_loss_lifecycle(self)
+        apply_unreachable_throws(self)
         cmd.hide_lost_ball_prob = 1.0  # ramped to HIDE_LOST_BALL_PROB by the curriculum
         cmd.show_parked_ball_prob = 0.0  # ramped to SHOW_PARKED_BALL_PROB by the curriculum
         cmd.aim_at_launch = True
-        # a lost ball ends its throw in the command (rethrow_after_loss); only a fall or the time-out ends the episode
-        self.terminations.ball_dropped = None
-        self.terminations.ball_missed = None
 
 
 class AdvancedSPlayEnvCfg(AdvancedSEnvCfg):
@@ -920,16 +972,4 @@ class AdvancedSPlayEnvCfg(AdvancedSEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
-        self.curriculum = None
-        cmd = self.commands.ball_throw
-        cmd.rethrow_after_loss = False
-        cmd.unreachable_share = 0.0
-        cmd.hide_lost_ball_below = None
-        cmd.hide_lost_ball_beyond = None
-        cmd.show_parked_ball_prob = 0.0
-        self.terminations.ball_dropped = DoneTerm(
-            func=mdp.ball_below_height, params={"ball_name": "ball", "min_height": 0.1}
-        )
-        self.terminations.ball_missed = DoneTerm(
-            func=mdp.ball_far_from_robot, params={"ball_name": "ball", "max_distance": 6.0}
-        )
+        apply_loss_evaluation(self)

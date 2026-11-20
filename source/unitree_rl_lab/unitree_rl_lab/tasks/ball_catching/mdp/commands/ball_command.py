@@ -252,6 +252,7 @@ class BallCommand(CommandTerm):
         self._sway_amp = torch.zeros(self.num_envs, 3, device=self.device)
         self._sway_omega = torch.zeros(self.num_envs, 1, device=self.device)
         self._sway_phase = torch.zeros(self.num_envs, 3, device=self.device)
+        self._sway_clock = torch.zeros(self.num_envs, 1, device=self.device)
         self.ball_lost = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         """The launched ball is lost for this throw (``hide_lost_ball_below`` / ``_beyond``); the tracker no longer
         reports it."""
@@ -781,9 +782,11 @@ class BallCommand(CommandTerm):
         if cfg.show_parked_ball_prob > 0.0:
             # the ball before the throw (show_parked_ball_prob): held in the thrower's hand, swaying slowly
             parked = (~self.launched & self._show_parked).unsqueeze(1)
-            angle = self._sway_omega * self.time_until_throw.unsqueeze(1) + self._sway_phase
+            # its own clock: the synced command of Unified does not count time_until_throw down
+            self._sway_clock += self._env.step_dt
+            angle = self._sway_omega * self._sway_clock + self._sway_phase
             pos_b = torch.where(parked, pos_b + self._sway_amp * torch.sin(angle), pos_b)
-            vel_b = torch.where(parked, vel_b - self._sway_amp * self._sway_omega * torch.cos(angle), vel_b)
+            vel_b = torch.where(parked, vel_b + self._sway_amp * self._sway_omega * torch.cos(angle), vel_b)
             detected = flying | parked.squeeze(1)
         burst_start = (self._dropout_left == 0) & (torch.rand(n, device=self.device) < cfg.obs_dropout_prob)
         burst_length = torch.randint(1, cfg.obs_dropout_max_steps + 1, (n,), device=self.device)

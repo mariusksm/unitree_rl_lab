@@ -86,3 +86,22 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{AGENTS}:AdvancedSPPORunnerCfg",
     },
 )
+
+# ── chain v2 (v2_env_cfg.py): the stages reordered on the seventh Unified run, each from the previous one's checkpoint
+_V2_STAGES = {
+    "A": "the reference dropped, A2's penalties, approach x P, throws aimed at the launch, arms resting while waiting",
+    "C": "real lifecycle plus what follows a lost ball (no episode end, fall penalty, capture point)",
+    "D": "pushes in the ball phase ramped up, plus pushes timed into the flight (D2)",
+    "E": "wider and frontal throws, plus 15 % of the throws 0.45-1.0 m to the side",
+}
+for _stage in _V2_STAGES:
+    gym.register(
+        id=f"Unitree-G1-29dof-BallCatch-V2-{_stage}",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.v2_env_cfg:V2{_stage}EnvCfg",
+            "play_env_cfg_entry_point": f"{__name__}.v2_env_cfg:V2{_stage}PlayEnvCfg",
+            "rsl_rl_cfg_entry_point": f"{AGENTS}:V2PPORunnerCfg",
+        },
+    )

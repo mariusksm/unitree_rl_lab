@@ -311,6 +311,38 @@ def stand_still_feet(
     return torch.sum(speed * (forces > force_threshold), dim=-1) * _should_stand_still(command).float()
 
 
+def arm_rest_pose_exp(
+    env: ManagerBasedRLEnv,
+    target: dict[str, float],
+    std: float,
+    command_name: str = "ball_throw",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """exp(-mean (q - q_target)² / std²) over the joints named in ``target`` (regex -> angle), while the robot waits
+    for a throw or after a lost ball, not while it catches or holds (chain v2, stage A).
+
+    Without the reference motion the Advanced stages wait with the forearms raised in front of the chest, the hands
+    near the catch point; the target is the arm pose of the human catchers at the start of the 108 clips (mean of the
+    first frames, mirrored to be symmetric), so the arms rest as in the recordings until a ball comes."""
+    command = env.command_manager.get_term(command_name)
+    asset: Articulation = env.scene[asset_cfg.name]
+    if not hasattr(env, "_arm_rest_ids"):
+        import re
+
+        names = asset.joint_names
+        ids, values = [], []
+        for i, name in enumerate(names):
+            match = next((v for pattern, v in target.items() if re.fullmatch(pattern, name)), None)
+            if match is not None:
+                ids.append(i)
+                values.append(match)
+        env._arm_rest_ids = torch.tensor(ids, dtype=torch.long, device=env.device)
+        env._arm_rest_target = torch.tensor(values, dtype=torch.float, device=env.device)
+    error = torch.mean(torch.square(asset.data.joint_pos[:, env._arm_rest_ids] - env._arm_rest_target), dim=-1)
+    resting = ~command.launched | command.throw_failed
+    return torch.exp(-error / std**2) * resting.float()
+
+
 def capture_point_exp(
     env: ManagerBasedRLEnv,
     std: float,

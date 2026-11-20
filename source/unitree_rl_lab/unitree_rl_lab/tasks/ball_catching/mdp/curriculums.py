@@ -57,14 +57,15 @@ def ramp_ball_visibility(
     show_parked_final: float,
     hide_lost_final: float,
     command_name: str = "ball_throw",
+    show_parked_start: float = 0.0,
 ) -> float:
-    """Ramp the ball the robot should not react to (Advanced-S): the share of the throws whose ball is reported before
-    the launch rises from 0 to ``show_parked_final``, the share whose lost ball is hidden falls from 1 to
-    ``hide_lost_final``, linearly between the env steps ``start_step`` and ``end_step``. The command reads both shares
-    when it arms the next throw. Returns the progress for logging."""
+    """Ramp the ball the robot should not react to (Advanced-S, chain v2 stage C): the share of the throws whose ball
+    is reported before the launch goes from ``show_parked_start`` to ``show_parked_final``, the share whose lost ball is
+    hidden falls from 1 to ``hide_lost_final``, linearly between the env steps ``start_step`` and ``end_step``. The
+    command reads both shares when it arms the next throw. Returns the progress for logging."""
     p = _progress(env, start_step, end_step)
     cfg = env.command_manager.get_term(command_name).cfg
-    cfg.show_parked_ball_prob = show_parked_final * p
+    cfg.show_parked_ball_prob = show_parked_start + (show_parked_final - show_parked_start) * p
     cfg.hide_lost_ball_prob = 1.0 - (1.0 - hide_lost_final) * p
     return p
 

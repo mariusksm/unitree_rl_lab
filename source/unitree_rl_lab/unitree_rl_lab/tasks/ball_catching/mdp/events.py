@@ -52,6 +52,53 @@ def push_by_setting_velocity_phased(
     _push_scaled(env, ball_ids, velocity_range, scale, asset_cfg)
 
 
+def push_during_flight(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    velocity_range: dict[str, tuple[float, float]],
+    share: float,
+    window: tuple[float, float] = (0.2, 0.9),
+    command_name: str = "ball_throw",
+    push_term_name: str = "push_robot",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Pushes timed into the flight (D2 of the per-throw analysis; chain v2, stage D). Run as an interval event every
+    control step. At each launch a throw gets a push with probability ``share``, at a time uniform in ``window``
+    (fractions of its planned flight time); its strength is drawn as for the ball-phase pushes of ``push_term_name``
+    (its ``ball_phase_scale``, ``ball_phase_scale_final`` and ``difficulty``, so stage D's curriculum also ramps these).
+
+    Random pushes every 2-5 s land in the flight of only every fifth throw, and Advanced-D barely learned them: a push
+    in the flight cost E 2.9 points of catch rate per 0.1 m/s (per-throw evaluation of 2026-11-05)."""
+    command = env.command_manager.get_term(command_name)
+    n = env.scene.num_envs
+    plan = getattr(env, "_flight_push", None)
+    if plan is None:
+        plan = env._flight_push = {
+            "time": torch.full((n,), float("inf"), device=env.device),
+            "seen": torch.zeros(n, dtype=torch.bool, device=env.device),
+        }
+    launched = command.launched
+    new = launched & ~plan["seen"]
+    if new.any():
+        ids = new.nonzero(as_tuple=False).flatten()
+        draw = torch.rand(len(ids), device=env.device) < share
+        frac = window[0] + torch.rand(len(ids), device=env.device) * (window[1] - window[0])
+        plan["time"][ids] = torch.where(draw, frac * command._flight_time[ids], torch.full_like(frac, float("inf")))
+    plan["seen"] = launched.clone()
+    due = launched & (command.time_since_throw >= plan["time"])
+    if not due.any():
+        return
+    ids = due.nonzero(as_tuple=False).flatten()
+    plan["time"][ids] = float("inf")  # one push per throw
+    if push_term_name not in env.event_manager.active_terms.get("interval", []):
+        return  # pushes switched off (e.g. eval_catch.py --no_push): none in the flight either
+    params = env.event_manager.get_term_cfg(push_term_name).params
+    low = params.get("ball_phase_scale", 1.0)
+    high = params.get("ball_phase_scale_final") or low
+    level = torch.rand(len(ids), device=env.device) * params.get("difficulty", 0.0)
+    _push_scaled(env, ids, velocity_range, low + level * (high - low), asset_cfg)
+
+
 def _push_scaled(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,

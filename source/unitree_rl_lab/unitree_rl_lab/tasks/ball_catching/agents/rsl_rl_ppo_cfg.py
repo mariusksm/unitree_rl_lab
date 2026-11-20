@@ -146,6 +146,12 @@ class AdvancedSPPORunnerCfg(AdvancedArmAnchorPPORunnerCfg):
 
 
 @configclass
+class V2PPORunnerCfg(AdvancedSPPORunnerCfg):
+    """Chain v2 (V2-A to V2-E): as Advanced-S, the arm anchor at 10 % and the anchor down to 0.1 within 500 iterations
+    after the warm-up; 4000 iterations per stage."""
+
+
+@configclass
 class AdvancedA2PPORunnerCfg(AdvancedArmAnchorPPORunnerCfg):
     """Advanced-A2: 2000 iterations (a narrow fix of the arm load; the weak arm anchor lets it act from the start)."""
 

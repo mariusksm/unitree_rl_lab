@@ -99,6 +99,8 @@ START_HOLD_PROB = 0.35
 HOLD_FROM_S = [d["catch_time"] + CATCH_SETTLE_S if d["valid"] else None for d in CATCH_DATA]
 # after the confirmed catch the robot keeps the ball this long before the throw counts as completed
 HOLD_AFTER_CATCH_S = 3.0
+# share of the cycles whose ball is reported already in the thrower's hand during the lead-in (seventh run on)
+SHOW_PARKED_BALL_PROB = 0.5
 # the held pose must outlast the confirmation (secure_steps, up to ~1.5 s after the arrival) plus the hold phase,
 # otherwise the clip ends first: the robot is reset onto the next cycle and the catch never completes
 END_HOLD_S = HOLD_AFTER_CATCH_S + 2.0
@@ -745,11 +747,15 @@ class RobotEnvCfgUnified(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
 
         self.scene.contact_forces.update_period = self.sim.dt
+        # seventh run on (chain v2): the ball reported already during the lead-in in half of the cycles, held and
+        # swaying in the thrower's hand, as VICON sees it; E chased such a ball and fell (spec pitfall 40)
+        self.commands.ball_throw.show_parked_ball_prob = SHOW_PARKED_BALL_PROB
 
 
 class RobotPlayEnvCfgUnified(RobotEnvCfgUnified):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 32
+        self.commands.ball_throw.show_parked_ball_prob = 0.0  # eval_catch.py --show_ball_before_throw reports it
         # evaluate on the final throw distribution and reward weights
         self.curriculum = None
