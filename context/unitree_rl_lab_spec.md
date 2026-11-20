@@ -401,7 +401,10 @@ show how long the ball has been held. Checkpoints from before 2026-11-01 have a 
      instead of a ball on the floor that it never saw in training. VICON Shogun itself keeps tracking a ball on the
      floor, so the rule belongs in the live pipeline (ball bridge), and the policy must not depend on it:
      `hide_lost_ball_prob` (default 1) hides the lost ball only in that share of the throws, in the others it stays
-     visible, lying, rolling or bouncing (Advanced-S: half).
+     visible, lying, rolling or bouncing (Advanced-S: half). For the same reason `show_parked_ball_prob` (default 0)
+     reports the ball already before the launch in a share of the throws, as VICON sees it in the thrower's hand: at
+     the release point, swaying up to `parked_ball_sway` (8 cm) per axis at 0.2–1 Hz (up to 0.5 m/s), with the same
+     noise, dropouts and delay (Advanced-S: half). The gate decides only on measurements of the flying ball.
      With `gate_max_deviation` (off by default and in training; a rule for the live pipeline, evaluated with
      `eval_catch.py --gate_deviation` and `sim2sim/run.py --gate_deviation`) a throw is judged once, at its first
      measurement that reaches the robot: its path is predicted from that measurement under gravity and drag (nominal
@@ -471,8 +474,9 @@ show how long the ball has been held. Checkpoints from before 2026-11-01 have a 
   - **Throws at and beyond the edge of the reach:** 15 % of the throws (`unreachable_share`) are aimed 0.45–1.0 m to either side (`unreachable_lateral_range`; 0.6–1.0 m in the first version): from the edge of E's range, where E still catches half of the balls but falls after a fifth to a third of them, to clearly beyond reach. The policy has to learn which of them it can catch in a good posture and to let the rest go.
   - **Throws aimed at the robot at the launch** (`aim_at_launch`, Section 11 item 16): pushes and drift while waiting no longer move throws out of the ranges, and a throw beyond reach is beyond reach of where the robot stands.
   - **Trained without the catchability gate** (`gate_max_deviation` off): the policy has to be safe on its own; the gate is a second layer in the live pipeline.
+  - **The ball before the throw is reported in half of the throws** (`show_parked_ball_prob` 0.5): held in the thrower's hand at the release point and swaying (perception, item 4). The live pipeline should forward a ball only in ballistic flight, but VICON tracks it in the hand, so the policy must not react to it either way. The approach rewards stay zero until the launch.
   - **The lost ball is hidden in half of the throws** (`hide_lost_ball_below` 0.4 m, `hide_lost_ball_beyond` 3 m, `hide_lost_ball_prob` 0.5; perception, item 4) and stays visible on the floor in the other half until the next throw is armed. VICON Shogun keeps tracking the ball on the floor, so the policy has to stand still whether the pipeline hides it or not: E, which never saw a ball lying on the floor, fell after 96 % of the losses with the ball visible and 12 % with it hidden (pitfall 39). The first version always hid it.
-  - Throws and pushes stay at E's final level (no curriculum). Play config: evaluated like A to E (loss terminations back, `rethrow_after_loss` off, no unreachable share; the lost ball stays visible, the worst case, and `--hide_lost_ball` hides it), so `eval_catch.py` counts the outcomes as before and `--after_loss_s` measures the time after a loss.
+  - Throws and pushes stay at E's final level (no curriculum). Play config: evaluated like A to E (loss terminations back, `rethrow_after_loss` off, no unreachable share; the lost ball stays visible, the worst case, and `--hide_lost_ball` hides it; the ball before the throw is not reported, as in A to E, and `--show_ball_before_throw` reports it), so `eval_catch.py` counts the outcomes as before and `--after_loss_s` measures the time after a loss.
   - Pilot (512 robots, 40 iterations, actor frozen, i.e. E's behavior in S): lost throws continue as intended (0.15–0.46 per episode), and 21 % of the episodes end with a fall.
 
 ### 7.3 Unified: `Unitree-G1-29dof-BallCatch-Unified` (stage A, recommended direction)
@@ -748,7 +752,7 @@ At iteration 6900 falls were ≈ 3 %, drops ≈ 11 %, misses 0, and the ball end
    - Front or side release makes no difference of its own (item 13).
 17. **The robot must not hurt itself** (requirement of the project group, November 2026): above all no fall when it cannot catch a ball, and nothing bad after it drops one. Three layers:
    - **Training:** Advanced-S (Section 7.2) trains the time after a lost ball, makes a fall clearly more expensive than a lost ball (−200), pays for standing balanced over the feet, mixes in throws beyond reach, aims every throw at the robot at the launch and hides the lost ball.
-   - **Evaluation before the robot:** `eval_catch.py --after_loss_s 5` (scenarios `base` and `unreachable`, with and without pushes, with the lost ball visible and hidden, with and without `--gate_deviation`) and `sim2sim/run.py --after_loss_s 5`. Acceptance: no falls after a lost ball, no more falls before it than E, catch rate within a point of E; for a fall rate of at most 0.1 % about 3000 lost balls without a fall (zero in n bounds the rate at 3/n).
+   - **Evaluation before the robot:** `eval_catch.py --after_loss_s 5` (scenarios `base` and `unreachable`, with and without pushes, with the lost ball visible and hidden, with the ball visible before the throw (`--show_ball_before_throw`), with and without `--gate_deviation`) and `sim2sim/run.py --after_loss_s 5`. Acceptance: no falls after a lost ball, no more falls before it than E, catch rate within a point of E; for a fall rate of at most 0.1 % about 3000 lost balls without a fall (zero in n bounds the rate at 3/n).
    - **On the robot:**
      - first tests in a safety gantry, with a soft ball and gentle throws;
      - the catch policy only active around a throw: FixStand before it and after the catch, the miss or the drop, and the ball taken off in FixStand;
@@ -1411,3 +1415,9 @@ In case of conflicts: **code > this spec > other context documents.**
 - Why: VICON Shogun keeps tracking a ball on the floor; hiding it is a rule of the live pipeline that may be missing or fail (a bounce looks ballistic). S always hid the lost ball, so it never learned to leave a visible ball on the floor alone, and E falls after 96 % of the losses when it sees the ball (pitfall 39).
 - `BallCommandCfg.hide_lost_ball_prob` (default 1, per throw; also in `sim2sim/ball.py`, without a random draw at 1 so older runs repeat): share of the throws whose lost ball is hidden. Advanced-S: 0.5, the lost ball lies there 1–5 s instead of 1–3 s. Its play config leaves the lost ball visible (worst case); `eval_catch.py --hide_lost_ball` hides it in every throw.
 - Files: `BC/mdp/commands/ball_command.py`, `BC/robots/g1_29dof/advanced/ball_catch_env_cfg.py`, `scripts/rsl_rl/eval_catch.py`, `sim2sim/ball.py`. Spec sections 7.2 and 11 (item 17) updated.
+
+### 2026-11-20: Advanced-S sees the ball before the throw in half of the throws
+- Why: as on the floor, VICON tracks the ball in the thrower's hand; the live pipeline should forward it only in ballistic flight, but the policy must cope with seeing it before the throw (Marius).
+- `BallCommandCfg.show_parked_ball_prob` (default 0, per throw), `parked_ball_sway` (8 cm), `parked_ball_sway_freq_range` (0.2–1 Hz): in that share of the throws the parked ball is reported during the wait, swaying, with the usual noise, dropouts and delay. A flag per measurement (`_meas_flying`) keeps the gate on measurements of the flying ball. Also in `sim2sim/ball.py` (`--show_ball_before_throw` of `run.py`) and `eval_catch.py --show_ball_before_throw`. Shares at 0 or 1 draw no random numbers, so tasks without the options keep their random stream (also for `hide_lost_ball_prob`).
+- Advanced-S: 0.5; its play config does not report the ball before the throw, so that the suite compares with A to E.
+- Files: `BC/mdp/commands/ball_command.py`, `BC/robots/g1_29dof/advanced/ball_catch_env_cfg.py`, `scripts/rsl_rl/eval_catch.py`, `sim2sim/{ball,run}.py`. Spec sections 7.2 and 11 (item 17) updated.

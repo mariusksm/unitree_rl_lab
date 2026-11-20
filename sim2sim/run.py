@@ -57,6 +57,8 @@ parser.add_argument("--drop_test", action="store_true", help="Only drop the ball
 parser.add_argument("--debug_ball", action="store_true", help="Print every step of the first throw's flight.")
 parser.add_argument("--easy", action="store_true", help="Throws and perception of the curriculum's easy stage.")
 parser.add_argument("--ghost_ball", action="store_true", help="Debug: the ball collides with nothing (only seen).")
+parser.add_argument("--show_ball_before_throw", action="store_true",
+                    help="Report the ball already while it waits at the release point (thrower's hand), swaying.")
 parser.add_argument("--gate_deviation", type=float, default=None,
                     help="Catchability gate: a throw predicted from its first measurement to come no closer than "
                          "this (m) to the catch point at a catchable height is never reported (gate_max_deviation).")
@@ -404,6 +406,8 @@ def stand(sim: Sim):
 def throws(sim: Sim):
     """``--throws`` episodes with the Advanced lifecycle (see the module docstring)."""
     d, rng = sim.d, np.random.default_rng(args.seed)
+    if args.show_ball_before_throw:
+        sim.cmd_cfg["show_parked_ball_prob"] = 1.0
     if args.gate_deviation is not None:
         cfg = sim.cmd_cfg
         cfg["gate_max_deviation"] = args.gate_deviation

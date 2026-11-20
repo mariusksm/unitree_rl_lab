@@ -37,6 +37,8 @@ close the ball on the floor comes to a foot, and the posture factor at the end. 
 missed. ``--hide_lost_ball`` makes the tracker stop reporting a ball that fell below 0.4 m or is more than 3 m away
 after its planned arrival (``BallCommandCfg.hide_lost_ball_below`` / ``_beyond``), as a live pipeline could; without
 it the lost ball stays visible on the floor, as raw VICON reports it (Advanced-S's play config, too).
+``--show_ball_before_throw`` reports the ball already while it waits at the release point, held and swaying in the
+thrower's hand (``BallCommandCfg.show_parked_ball_prob``), as VICON sees it before the throw.
 ``--gate_deviation D`` adds the catchability gate (``BallCommandCfg.gate_max_deviation``): a throw predicted from its
 first measurement to come no closer than D m to the catch point while at a catchable height (0.75-1.4 m above the
 ground) is never reported, so the robot keeps standing; the per-throw records mark it (``gated``).
@@ -102,6 +104,8 @@ parser.add_argument("--after_loss_s", type=float, default=None,
                     help="Keep the episode running this long after the ball is lost and measure what the robot does.")
 parser.add_argument("--hide_lost_ball", action="store_true", default=False,
                     help="The tracker stops reporting a lost ball (below 0.4 m, or 3 m away after the planned arrival).")
+parser.add_argument("--show_ball_before_throw", action="store_true", default=False,
+                    help="Report the ball already while it waits at the release point (thrower's hand), swaying.")
 parser.add_argument("--gate_deviation", type=float, default=None,
                     help="Catchability gate: a throw predicted from its first measurement to come no closer than this "
                          "(m) to the catch point at a catchable height is never reported to the robot.")
@@ -985,6 +989,8 @@ def main():
         env_cfg.commands.ball_throw.hide_lost_ball_below = 0.4
         env_cfg.commands.ball_throw.hide_lost_ball_beyond = 3.0
         env_cfg.commands.ball_throw.hide_lost_ball_prob = 1.0
+    if args_cli.show_ball_before_throw:
+        env_cfg.commands.ball_throw.show_parked_ball_prob = 1.0
     if args_cli.gate_deviation is not None:
         env_cfg.commands.ball_throw.gate_max_deviation = args_cli.gate_deviation
     if getattr(env_cfg.events, "push_robot", None) is not None:

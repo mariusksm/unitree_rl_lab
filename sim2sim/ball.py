@@ -62,6 +62,7 @@ class Perception:
         self.zone_hi = np.array([cfg["catch_zone_x"][1], cfg["catch_zone_y"][1], cfg["catch_zone_z"][1]])
         n = int(cfg["obs_delay_steps_range"][1]) + 1  # ring buffer sized for the largest delay
         self.meas_pos, self.meas_vel, self.meas_valid = np.zeros((n, 3)), np.zeros((n, 3)), np.zeros(n, dtype=bool)
+        self.meas_flying = np.zeros(n, dtype=bool)  # measurement of the flying ball (only these count for the gate)
         self.index = 0
         self.last_pos, self.last_vel = np.zeros(3), np.zeros(3)
         self.reset()
@@ -70,6 +71,7 @@ class Perception:
         """New throw: forget the old one and sample this throw's tracker imperfections."""
         cfg = self.cfg
         self.meas_valid[:] = False
+        self.meas_flying[:] = False
         self.steps_since_measurement = NOT_SEEN
         self.dropout_left = 0
         self.pos_b, self.vel_b, self.visible = np.zeros(3), np.zeros(3), False
@@ -80,9 +82,18 @@ class Perception:
         self.detection_delay = float(self.rng.uniform(*cfg["detection_delay_range"]))
         self.bias = self.rng.uniform(-cfg["obs_pos_bias"], cfg["obs_pos_bias"], 3)
         self.hide_in_zone = bool(self.rng.random() < cfg["hide_in_catch_zone_prob"])
-        # hide_lost_ball_prob: share of the throws whose lost ball is hidden (no draw at 1: older runs repeat)
-        p = cfg.get("hide_lost_ball_prob", 1.0)
-        self.hide_lost = True if p >= 1.0 else bool(self.rng.random() < p)
+        # shares per throw (no random draw at 0 or 1, so older runs repeat exactly): the lost ball hidden
+        # (hide_lost_ball_prob), the ball reported already in the thrower's hand, swaying (show_parked_ball_prob)
+        self.hide_lost = self._flag(cfg.get("hide_lost_ball_prob", 1.0))
+        self.show_parked = self._flag(cfg.get("show_parked_ball_prob", 0.0))
+        self.sway_t = 0.0
+        if self.show_parked:
+            self.sway_amp = self.rng.uniform(0.0, cfg.get("parked_ball_sway", 0.08), 3)
+            self.sway_omega = 2.0 * np.pi * float(self.rng.uniform(*cfg.get("parked_ball_sway_freq_range", (0.2, 1.0))))
+            self.sway_phase = self.rng.uniform(0.0, 2.0 * np.pi, 3)
+
+    def _flag(self, prob: float) -> bool:
+        return True if prob >= 1.0 else False if prob <= 0.0 else bool(self.rng.random() < prob)
 
     def in_zone(self, ball_pos_w, root_pos_w, root_quat_w) -> bool:
         """Ball inside the catch box (root yaw frame), as ``BallCommand._update_catch_state``."""
@@ -107,7 +118,14 @@ class Perception:
             self.lost |= bool(np.linalg.norm(pos_b[:2]) > beyond)
 
         # what the tracker measures now; dropouts come in bursts of 1..obs_dropout_max_steps steps
-        detected = launched and time_since_throw >= self.detection_delay and not self.lost
+        flying = launched and time_since_throw >= self.detection_delay and not self.lost
+        detected = flying
+        if self.show_parked and not launched:  # the ball before the throw, held and swaying (show_parked_ball_prob)
+            self.sway_t += self.step_dt
+            angle = self.sway_omega * self.sway_t + self.sway_phase
+            pos_b = pos_b + self.sway_amp * np.sin(angle)
+            vel_b = vel_b + self.sway_amp * self.sway_omega * np.cos(angle)
+            detected = True
         burst_start = self.dropout_left == 0 and self.rng.random() < cfg["obs_dropout_prob"]
         burst_length = int(self.rng.integers(1, cfg["obs_dropout_max_steps"] + 1))
         if burst_start:
@@ -117,6 +135,7 @@ class Perception:
         self.index = (self.index + 1) % len(self.meas_valid)
         self.meas_pos[self.index], self.meas_vel[self.index] = pos_b, vel_b
         self.meas_valid[self.index] = detected and not occluded
+        self.meas_flying[self.index] = flying
 
         # what reaches the robot: the measurement of ``delay`` steps ago, noisy and biased
         read = (self.index - self.delay) % len(self.meas_valid)
@@ -124,10 +143,10 @@ class Perception:
         meas_pos = self.meas_pos[read] + self.bias + self.rng.normal(0.0, 1.0, 3) * cfg["obs_pos_noise_std"]
         meas_vel = self.meas_vel[read] + self.rng.normal(0.0, 1.0, 3) * cfg["obs_vel_noise_std"]
 
-        # catchability gate (BallCommandCfg.gate_max_deviation): decided once, on the first measurement that arrives;
-        # gate_drag_per_mass is set by run.py from the nominal drag coefficient, the air density and the ball
+        # catchability gate (BallCommandCfg.gate_max_deviation): decided once, on the first measurement of the flying
+        # ball that arrives; gate_drag_per_mass is set by run.py from the nominal drag coefficient, air density and ball
         if cfg.get("gate_max_deviation") is not None:
-            if valid and not self.gate_decided:
+            if valid and self.meas_flying[read] and not self.gate_decided:
                 self.gate_decided = True
                 center = cfg.get("gate_center") or (0.3, 0.0)
                 heights = cfg.get("gate_height_range") or (-0.05, 0.6)

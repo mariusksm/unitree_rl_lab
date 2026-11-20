@@ -106,8 +106,10 @@ class BallCommand(CommandTerm):
     Missing measurements are bridged by ballistic prediction for ``max_coast_steps``; after that the ball
     counts as lost. Result: ``perceived_pos_b`` / ``perceived_vel_b`` (zero while not visible) and
     ``ball_visible``. Two optional rules of the live pipeline: a lost ball is no longer reported
-    (``hide_lost_ball_below`` / ``_beyond``), and a throw predicted from its first measurement to pass beyond reach is
-    never reported (``gate_max_deviation``, decided once per throw).
+    (``hide_lost_ball_below`` / ``_beyond``, in the share ``hide_lost_ball_prob`` of the throws), and a throw predicted
+    from its first measurement to pass beyond reach is never reported (``gate_max_deviation``, decided once per throw).
+    With ``show_parked_ball_prob`` the ball is also reported before the launch, held by the thrower, in a share of the
+    throws: VICON sees it there, too.
     """
 
     cfg: BallCommandCfg
@@ -236,6 +238,8 @@ class BallCommand(CommandTerm):
         self._meas_pos_b = torch.zeros(self.num_envs, buffer_len, 3, device=self.device)
         self._meas_vel_b = torch.zeros(self.num_envs, buffer_len, 3, device=self.device)
         self._meas_valid = torch.zeros(self.num_envs, buffer_len, dtype=torch.bool, device=self.device)
+        self._meas_flying = torch.zeros(self.num_envs, buffer_len, dtype=torch.bool, device=self.device)
+        """The measurement is of the ball in flight (not of the parked ball): only these count for the gate."""
         self._meas_index = 0
         self._obs_delay = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._detection_delay = torch.zeros(self.num_envs, device=self.device)
@@ -243,6 +247,11 @@ class BallCommand(CommandTerm):
         self._hide_in_zone = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._hide_lost = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         """This throw's lost ball is hidden (``hide_lost_ball_prob``); otherwise it stays visible on the floor."""
+        self._show_parked = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        """This throw's ball is reported while it waits at the release point (``show_parked_ball_prob``)."""
+        self._sway_amp = torch.zeros(self.num_envs, 3, device=self.device)
+        self._sway_omega = torch.zeros(self.num_envs, 1, device=self.device)
+        self._sway_phase = torch.zeros(self.num_envs, 3, device=self.device)
         self.ball_lost = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         """The launched ball is lost for this throw (``hide_lost_ball_below`` / ``_beyond``); the tracker no longer
         reports it."""
@@ -442,10 +451,25 @@ class BallCommand(CommandTerm):
         self._detection_delay[env_ids] = sample_uniform(*cfg.detection_delay_range, (n,), self.device)
         self._obs_bias[env_ids] = sample_uniform(-cfg.obs_pos_bias, cfg.obs_pos_bias, (n, 3), self.device)
         self._hide_in_zone[env_ids] = torch.rand(n, device=self.device) < cfg.hide_in_catch_zone_prob
-        self._hide_lost[env_ids] = torch.rand(n, device=self.device) < cfg.hide_lost_ball_prob
+        self._meas_flying[env_ids] = False
+        self._hide_lost[env_ids] = self._per_throw_flag(n, cfg.hide_lost_ball_prob)
+        self._show_parked[env_ids] = self._per_throw_flag(n, cfg.show_parked_ball_prob)
+        if cfg.show_parked_ball_prob > 0.0:
+            self._sway_amp[env_ids] = sample_uniform(0.0, cfg.parked_ball_sway, (n, 3), self.device)
+            frequency = sample_uniform(*cfg.parked_ball_sway_freq_range, (n, 1), self.device)
+            self._sway_omega[env_ids] = 2.0 * math.pi * frequency
+            self._sway_phase[env_ids] = sample_uniform(0.0, 2.0 * math.pi, (n, 3), self.device)
         self.ball_lost[env_ids] = False
         self.ball_gated[env_ids] = False
         self._gate_decided[env_ids] = False
+
+    def _per_throw_flag(self, n: int, prob: float) -> torch.Tensor:
+        """True with probability ``prob`` for each of ``n`` throws; no random draw at 0 or 1."""
+        if prob >= 1.0:
+            return torch.ones(n, dtype=torch.bool, device=self.device)
+        if prob <= 0.0:
+            return torch.zeros(n, dtype=torch.bool, device=self.device)
+        return torch.rand(n, device=self.device) < prob
 
     def _write_parked_state(self, env_ids: Sequence[int]):
         """Hold the ball at its release point with zero velocity."""
@@ -752,7 +776,15 @@ class BallCommand(CommandTerm):
             self.ball_lost |= self.launched & lost & self._hide_lost
 
         # what the tracker measures now; dropouts come in bursts of 1..obs_dropout_max_steps control steps
-        detected = self.launched & (self.time_since_throw >= self._detection_delay) & ~self.ball_lost
+        flying = self.launched & (self.time_since_throw >= self._detection_delay) & ~self.ball_lost
+        detected = flying
+        if cfg.show_parked_ball_prob > 0.0:
+            # the ball before the throw (show_parked_ball_prob): held in the thrower's hand, swaying slowly
+            parked = (~self.launched & self._show_parked).unsqueeze(1)
+            angle = self._sway_omega * self.time_until_throw.unsqueeze(1) + self._sway_phase
+            pos_b = torch.where(parked, pos_b + self._sway_amp * torch.sin(angle), pos_b)
+            vel_b = torch.where(parked, vel_b - self._sway_amp * self._sway_omega * torch.cos(angle), vel_b)
+            detected = flying | parked.squeeze(1)
         burst_start = (self._dropout_left == 0) & (torch.rand(n, device=self.device) < cfg.obs_dropout_prob)
         burst_length = torch.randint(1, cfg.obs_dropout_max_steps + 1, (n,), device=self.device)
         self._dropout_left = torch.where(burst_start, burst_length, self._dropout_left)
@@ -762,6 +794,7 @@ class BallCommand(CommandTerm):
         self._meas_pos_b[:, self._meas_index] = pos_b
         self._meas_vel_b[:, self._meas_index] = vel_b
         self._meas_valid[:, self._meas_index] = detected & ~occluded
+        self._meas_flying[:, self._meas_index] = flying
 
         # what reaches the robot: the measurement of ``delay`` steps ago, noisy and biased
         env_ids = torch.arange(n, device=self.device)
@@ -770,10 +803,10 @@ class BallCommand(CommandTerm):
         meas_pos = self._meas_pos_b[env_ids, read] + self._obs_bias + torch.randn(n, 3, device=self.device) * cfg.obs_pos_noise_std
         meas_vel = self._meas_vel_b[env_ids, read] + torch.randn(n, 3, device=self.device) * cfg.obs_vel_noise_std
 
-        # catchability gate: decided once, on the first measurement of the throw that reaches the robot; a gated throw
-        # is never reported (nothing to coast on either, since no measurement got through)
+        # catchability gate: decided once, on the first measurement of the flying ball that reaches the robot; a gated
+        # throw is never reported from then on
         if cfg.gate_max_deviation is not None:
-            first = valid & ~self._gate_decided
+            first = valid & self._meas_flying[env_ids, read] & ~self._gate_decided
             if first.any():
                 ids = first.nonzero(as_tuple=False).flatten()
                 # the pipeline knows the ball's nominal drag, not the per-throw drag and mass of the randomization
@@ -1099,6 +1132,18 @@ class BallCommandCfg(CommandTermCfg):
     hide_lost_ball_beyond: float | None = None
     """The same once the ball is farther than this (m, horizontal) from the robot root after its planned arrival time
     (flown past). None: off."""
+
+    show_parked_ball_prob: float = 0.0
+    """Share of the throws whose ball is reported already while it waits at the release point, as VICON sees it in the
+    thrower's hand, swaying slowly (``parked_ball_sway``). The live pipeline should forward a ball only in ballistic
+    flight, but the policy must not react to a ball before the throw either way (Advanced-S: 0.5). 0: the ball is
+    reported from the launch on."""
+
+    parked_ball_sway: float = 0.08
+    """Amplitude (m) of the sway of a reported parked ball per axis, uniform up to this per throw."""
+
+    parked_ball_sway_freq_range: tuple[float, float] = (0.2, 1.0)
+    """Frequency (Hz) of that sway; 0.08 m at 1 Hz moves the ball at up to 0.5 m/s."""
 
     hide_lost_ball_prob: float = 1.0
     """Share of the throws whose lost ball is hidden by ``hide_lost_ball_below`` / ``_beyond``; in the others it stays
