@@ -241,6 +241,8 @@ class BallCommand(CommandTerm):
         self._detection_delay = torch.zeros(self.num_envs, device=self.device)
         self._obs_bias = torch.zeros(self.num_envs, 3, device=self.device)
         self._hide_in_zone = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._hide_lost = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        """This throw's lost ball is hidden (``hide_lost_ball_prob``); otherwise it stays visible on the floor."""
         self.ball_lost = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         """The launched ball is lost for this throw (``hide_lost_ball_below`` / ``_beyond``); the tracker no longer
         reports it."""
@@ -440,6 +442,7 @@ class BallCommand(CommandTerm):
         self._detection_delay[env_ids] = sample_uniform(*cfg.detection_delay_range, (n,), self.device)
         self._obs_bias[env_ids] = sample_uniform(-cfg.obs_pos_bias, cfg.obs_pos_bias, (n, 3), self.device)
         self._hide_in_zone[env_ids] = torch.rand(n, device=self.device) < cfg.hide_in_catch_zone_prob
+        self._hide_lost[env_ids] = torch.rand(n, device=self.device) < cfg.hide_lost_ball_prob
         self.ball_lost[env_ids] = False
         self.ball_gated[env_ids] = False
         self._gate_decided[env_ids] = False
@@ -746,7 +749,7 @@ class BallCommand(CommandTerm):
             if cfg.hide_lost_ball_beyond is not None:  # only after the planned arrival: releases lie up to 5 m away
                 past = self.time_since_throw > self._flight_time
                 lost |= past & (torch.norm(pos_b[:, :2], dim=-1) > cfg.hide_lost_ball_beyond)
-            self.ball_lost |= self.launched & lost
+            self.ball_lost |= self.launched & lost & self._hide_lost
 
         # what the tracker measures now; dropouts come in bursts of 1..obs_dropout_max_steps control steps
         detected = self.launched & (self.time_since_throw >= self._detection_delay) & ~self.ball_lost
@@ -1096,6 +1099,11 @@ class BallCommandCfg(CommandTermCfg):
     hide_lost_ball_beyond: float | None = None
     """The same once the ball is farther than this (m, horizontal) from the robot root after its planned arrival time
     (flown past). None: off."""
+
+    hide_lost_ball_prob: float = 1.0
+    """Share of the throws whose lost ball is hidden by ``hide_lost_ball_below`` / ``_beyond``; in the others it stays
+    visible on the floor (lying, rolling, bouncing), as VICON reports it when the pipeline does not hide it. VICON
+    Shogun tracks the ball wherever it is, so the policy must cope with both (Advanced-S: 0.5)."""
 
     gate_max_deviation: float | None = None
     """Catchability gate (a rule for the live pipeline, evaluated in simulation): decided once per throw, at its first

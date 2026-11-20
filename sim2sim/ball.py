@@ -80,6 +80,9 @@ class Perception:
         self.detection_delay = float(self.rng.uniform(*cfg["detection_delay_range"]))
         self.bias = self.rng.uniform(-cfg["obs_pos_bias"], cfg["obs_pos_bias"], 3)
         self.hide_in_zone = bool(self.rng.random() < cfg["hide_in_catch_zone_prob"])
+        # hide_lost_ball_prob: share of the throws whose lost ball is hidden (no draw at 1: older runs repeat)
+        p = cfg.get("hide_lost_ball_prob", 1.0)
+        self.hide_lost = True if p >= 1.0 else bool(self.rng.random() < p)
 
     def in_zone(self, ball_pos_w, root_pos_w, root_quat_w) -> bool:
         """Ball inside the catch box (root yaw frame), as ``BallCommand._update_catch_state``."""
@@ -97,9 +100,10 @@ class Perception:
 
         # a lost ball is no longer reported (BallCommandCfg.hide_lost_ball_below / _beyond; ground at z = 0)
         below, beyond = cfg.get("hide_lost_ball_below"), cfg.get("hide_lost_ball_beyond")
-        if launched and below is not None and ball_pos_w[2] < below:
+        if launched and self.hide_lost and below is not None and ball_pos_w[2] < below:
             self.lost = True
-        if launched and beyond is not None and flight_time is not None and time_since_throw > flight_time:
+        past = flight_time is not None and time_since_throw > flight_time
+        if launched and self.hide_lost and beyond is not None and past:
             self.lost |= bool(np.linalg.norm(pos_b[:2]) > beyond)
 
         # what the tracker measures now; dropouts come in bursts of 1..obs_dropout_max_steps steps

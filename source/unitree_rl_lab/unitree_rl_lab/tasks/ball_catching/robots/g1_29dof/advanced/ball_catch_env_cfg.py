@@ -781,15 +781,17 @@ class AdvancedEPlayEnvCfg(AdvancedEEnvCfg):
 #    fall accepted per about ten extra catches at most, research of 2026-11-19), makes the approach rewards depend on
 #    the posture factor (reaching out of balance pays nothing), pays for standing balanced over the feet (capture
 #    point) while it should stand still, mixes in throws beyond the arms' reach, aims every throw at the robot as it
-#    stands at the launch and hides a lost ball from the perception, as the live pipeline will. The throws and pushes
+#    stands at the launch and hides a lost ball from the perception in half of the throws: VICON Shogun keeps tracking
+#    a ball on the floor, so the policy must cope with seeing it as well as with not seeing it. The throws and pushes
 #    stay at E's final level. Trained without the catchability gate (BallCommandCfg.gate_max_deviation): the policy has
 #    to be safe on its own, the gate is a second layer in the live pipeline. ──
 UNREACHABLE_SHARE = 0.15
 UNREACHABLE_LATERAL_RANGE = (0.45, 1.0)  # from the edge of E's range (E catches 50-70 % at 0.45-0.55 m, but falls
 #   after a fifth to a third of them) to clearly beyond reach (E: 2 % caught beyond 0.8 m)
-LOSS_SETTLE_RANGE = (1.0, 3.0)
+LOSS_SETTLE_RANGE = (1.0, 5.0)  # s the lost ball lies there (visible in half of the throws) before the next one
 HIDE_LOST_BALL_BELOW = 0.4  # m: the ball cannot count as held below 0.5 m
 HIDE_LOST_BALL_BEYOND = 3.0  # m from the robot after the planned arrival: flown past
+HIDE_LOST_BALL_PROB = 0.5  # the other half: the ball stays visible on the floor, as raw VICON reports it
 FALL_PENALTY_WEIGHT = -10000.0  # once per fall: -200 after the reward manager's dt (0.02 s), twenty catch bonuses
 CAPTURE_POINT_WEIGHT = 2.0  # per second while standing balanced, against 5 for `stand`
 CAPTURE_POINT_STD = 0.12  # m, Zhang et al.: a push of 0.5 m/s moves the capture point 0.14 m (reward 0.25)
@@ -864,6 +866,7 @@ class AdvancedSEnvCfg(AdvancedEEnvCfg):
         cmd.unreachable_lateral_range = UNREACHABLE_LATERAL_RANGE
         cmd.hide_lost_ball_below = HIDE_LOST_BALL_BELOW
         cmd.hide_lost_ball_beyond = HIDE_LOST_BALL_BEYOND
+        cmd.hide_lost_ball_prob = HIDE_LOST_BALL_PROB
         cmd.aim_at_launch = True
         # a lost ball ends its throw in the command (rethrow_after_loss); only a fall or the time-out ends the episode
         self.terminations.ball_dropped = None
@@ -872,7 +875,8 @@ class AdvancedSEnvCfg(AdvancedEEnvCfg):
 
 class AdvancedSPlayEnvCfg(AdvancedSEnvCfg):
     """Evaluation as for A to E: a lost ball ends the episode again (eval_catch.py counts the outcomes from the
-    terminations; ``--after_loss_s`` keeps it running after the loss), throws as in E. The lost ball stays hidden."""
+    terminations; ``--after_loss_s`` keeps it running after the loss), throws as in E. The lost ball stays visible, the
+    worst case of a pipeline that does not hide it; ``eval_catch.py --hide_lost_ball`` hides it in every throw."""
 
     def __post_init__(self):
         super().__post_init__()
@@ -880,6 +884,8 @@ class AdvancedSPlayEnvCfg(AdvancedSEnvCfg):
         cmd = self.commands.ball_throw
         cmd.rethrow_after_loss = False
         cmd.unreachable_share = 0.0
+        cmd.hide_lost_ball_below = None
+        cmd.hide_lost_ball_beyond = None
         self.terminations.ball_dropped = DoneTerm(
             func=mdp.ball_below_height, params={"ball_name": "ball", "min_height": 0.1}
         )

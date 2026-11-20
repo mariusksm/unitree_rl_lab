@@ -35,7 +35,8 @@ measured. ``--after_loss_s T`` keeps the episode running for T seconds after the
 in that window: falls (and when), the lowest pelvis and hand, the largest torso tilt, lift-offs, how far it moves, how
 close the ball on the floor comes to a foot, and the posture factor at the end. The throw still counts as dropped or
 missed. ``--hide_lost_ball`` makes the tracker stop reporting a ball that fell below 0.4 m or is more than 3 m away
-after its planned arrival (``BallCommandCfg.hide_lost_ball_below`` / ``_beyond``), as a live pipeline could.
+after its planned arrival (``BallCommandCfg.hide_lost_ball_below`` / ``_beyond``), as a live pipeline could; without
+it the lost ball stays visible on the floor, as raw VICON reports it (Advanced-S's play config, too).
 ``--gate_deviation D`` adds the catchability gate (``BallCommandCfg.gate_max_deviation``): a throw predicted from its
 first measurement to come no closer than D m to the catch point while at a catchable height (0.75-1.4 m above the
 ground) is never reported, so the robot keeps standing; the per-throw records mark it (``gated``).
@@ -983,6 +984,7 @@ def main():
     if args_cli.hide_lost_ball:
         env_cfg.commands.ball_throw.hide_lost_ball_below = 0.4
         env_cfg.commands.ball_throw.hide_lost_ball_beyond = 3.0
+        env_cfg.commands.ball_throw.hide_lost_ball_prob = 1.0
     if args_cli.gate_deviation is not None:
         env_cfg.commands.ball_throw.gate_max_deviation = args_cli.gate_deviation
     if getattr(env_cfg.events, "push_robot", None) is not None:
