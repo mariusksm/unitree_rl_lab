@@ -6,7 +6,7 @@
 > **Maintenance rule:** For every substantial change, first update the affected sections, then append an
 > entry to the [Changelog](#14-changelog) at the end (see `CLAUDE.md`).
 >
-> Last updated: **2026-10-16**. Paths are relative to the repo root. `BC/` is shorthand for
+> Last updated: **2026-11-20**. Paths are relative to the repo root. `BC/` is shorthand for
 > `source/unitree_rl_lab/unitree_rl_lab/tasks/ball_catching/`.
 
 ---
@@ -36,10 +36,11 @@
 
   Background material (proposal, meeting minutes, plans) lives in `context/` (see [Section 12](#12-context-documents)).
 
-## 2. Status at a Glance (2026-10-27)
+## 2. Status at a Glance (2026-11-20)
 
 | Area | Status |
 |---|---|
+| **Robot safety** (group requirement, November 2026) | 🚧 E falls after 96 % of its lost balls (it goes after the ball on the floor) and at once when the ball is reported before the throw (pitfalls 39, 40). Advanced-S (losing a ball safely) is in training on `main` (second run since 2026-11-20 03:13). The catchability gate (Section 7.2, perception) cuts E's falls on throws up to 1 m sideways from 31 to 6 % in Isaac. Layers and acceptance: Section 11, item 17. |
 | Motion conversion (.pkl → .npz) | ✅ Fixed on 2026-09-28 (the right arm was filled with left-hand finger joints; all `.npz` created before that date were corrupt and have been deleted). Since 2026-10-27 the reference clips come prepared from the group's dataset (Section 5.2); `pkl_to_npz.py` remains for new takes. |
 | Reference motion | ✅ 2026-10-27: the group's **underhand-catch dataset** (GitLab `imitation-data`: 108 clips at 50 Hz, 89 of them with a VICON recording of the take) replaces the single overhand clip. Phase 1 trains on all clips, Unified since 2026-10-29 only on the 84 with a usable recording (86 before 2026-10-28), throwing at each clip's recorded catch time. Section 5.2. |
 | Phase 1 (mimic) on real mocap data | ✅ 2026-10-28: trained on the 108 underhand clips (workstation 2, 10k iterations, run `2026-10-28_14-28-00`, code before fixes 1–4). Every clip is tracked from start to end without a tracking termination, body error 5 cm, almost all of it from a height offset of the clips (Section 5.2). Since 2026-10-16 Phase 1 is a clip trackability check only (actor sees the reference), **not** a warm start for Phase 2. |
