@@ -91,6 +91,8 @@ All in Isaac with 512 robots × 180 s unless noted. Sources are under `analysis/
 | Gate cost on E's own throws (estimate) | 0.3–0.9 % gated at 0.45–0.5 m, at most 0.6 points of catches | same |
 | Ball reported in the thrower's hand | E falls in 99.9 % of the episodes, 0.6 s after the start (without: 92 % caught, 0.7 % falls) | pitfall 40 |
 | S's first run (full visibility shares, slow anchor) | 93 % of episodes ended with a fall, flat for 500 iterations after the warm-up | Section 7.2 |
+| S's second run (ramp, fast anchor), evaluated like E | catches as E (88.6 / 94.3 % with / without pushes); falls before a loss on wide throws 8.5 → 4.3 %; with the gate and the lost ball hidden 6.1 → 3.5 % falls; **with a visible lost ball or a ball before the throw as many falls as E** (96 %, 99.9 %); training falls rose with the visibility to 92 % and stayed there for 2500 iterations | Section 10, pitfall 41, `analysis/2026-11-20_advanced_s_final/` |
+| Throws aimed at the launch | E in S's play config 92.2 % against 89.5 % in its own: about 3 points | Section 10 |
 | Arm pose while waiting | human clips: upper arms hanging slightly out, elbows ≈ 62°; the Advanced stages since A raise the forearms in front of the chest | Section 7.2 "Chain v2" |
 
 ## 4. Decisions open for discussion
@@ -99,7 +101,7 @@ Each item gives our choice, the alternatives, and what would change it.
 
 1. **Fall price −200 (weight −10000).** Chosen so that the policy accepts at most one fall per about ten extra catches (research of 2026-11-19, `analysis/2026-11-19_stufe_f/`). Too high a price makes a robot timid in the literature, too low makes falls free. Alternative: a Lagrangian on the fall rate. Check: S's catch rate on E's throws should stay within a point of E.
 2. **Visibility randomization of 0.5 each** (ball before the throw, lost ball hidden). VICON tracks the ball everywhere, and the bridge's filters may miss cases, for example a bounce that looks ballistic. Alternative: rely on the bridge only. That is fragile, given E's 99.9 % falls with a parked ball.
-3. **Ramping the visibility in S versus learning it from scratch in Unified 7.** S had to unlearn E's chasing against the KL anchor (first run stuck). Chain v2 moves the parked ball into Unified 7, where there is no anchor. Open question: is S's second run enough, or is the parked ball only learnable from scratch?
+3. **Where the robustness to a visible ball is learned.** S's second run answered this: anchored fine-tuning did not unlearn E's reflex (pitfall 41). Chain v2 already moves the ball before the throw into Unified 7. Open: V2-C still ramps in the visible lost ball by fine-tuning and would most likely fail the same way. Proposal: Unified 7 also trains losses that do not end the cycle, with the lost ball visible in half of them, so the policy learns from scratch while the reference keeps it upright. Alternative: an anchor that, in such states, points at the anchor actor's output with the ball masked.
 4. **Fast anchor decay (500 instead of 3000 iterations).** The earlier stages gained mostly in their last 1000 iterations. A faster decay risks forgetting catching skills. Check: the catch rate in S's suite and S evaluated in E's environment.
 5. **Gate design.**
    - Decided once, on the first measurement, rather than re-deciding (table tennis: decide once).
@@ -126,7 +128,7 @@ Each item gives our choice, the alternatives, and what would change it.
 
 ## 5. Risks and known limitations
 
-- **S's second run** may still learn slowly. Its evaluation runs automatically after training (`~/tmp/adv_eval/s_final/` on workstation 2).
+- **S** is the fallback for the first robot tests only if the live pipeline hides the ball before the throw and the lost ball (pitfall 41).
 - **Chain v2 is untrained.** The arm rest weight, the D2 share and the visibility ramps are first guesses.
 - **Simulation details:**
   - The parked ball sways sinusoidally; a real thrower's wind-up (fast and non-ballistic) is not modelled.
@@ -177,5 +179,5 @@ Each item gives our choice, the alternatives, and what would change it.
 
 ## 8. Status and next steps (2026-11-20, 04:00)
 
-- S's second run is training on workstation 2 (ends ≈ 05:50). Its evaluation follows automatically: suite, S in E's play config with all safety scenarios, MuJoCo, videos.
-- Chain v2 waits for S's results, this review, and the decision on the ball and latency measurements before Unified 7 starts.
+- S is trained and evaluated (2026-11-20, `analysis/2026-11-20_advanced_s_final/`): same catches as E, half the dives on wide throws, no robustness to a visible ball.
+- Chain v2 waits for this review, the decision on V2-C's visible lost ball (decision 3) and on the ball and latency measurements before Unified 7 starts.
