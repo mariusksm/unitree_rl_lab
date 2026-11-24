@@ -42,6 +42,29 @@ thrower's hand (``BallCommandCfg.show_parked_ball_prob``), as VICON sees it befo
 ``--gate_deviation D`` adds the catchability gate (``BallCommandCfg.gate_max_deviation``): a throw predicted from its
 first measurement to come no closer than D m to the catch point while at a catchable height (0.75-1.4 m above the
 ground) is never reported, so the robot keeps standing; the per-throw records mark it (``gated``).
+``--hide_lost_ball SHARE`` and ``--show_ball_before_throw SHARE`` apply the option to that share of the throws only (the
+flag alone: all throws). The per-throw columns ``lost_hidden`` and ``shown_before`` say which throws got it, and the
+report splits the window after a loss (``after_loss_by_lost_ball``) and the time before the launch
+(``ball_before_throw``) by them, so one run compares both cases on the same robots.
+
+Unified (stage A) has no fall terminations, but the robot leaves its reference motion (tracking terminations
+``anchor_pos``, ``anchor_ori``, ``ee_body_pos``), and at the end of a reference clip the next cycle starts within the
+episode: the robot is moved to the new clip and a new throw is armed. A throw whose clip ends before it has an outcome
+is recorded as ``cycle_end`` (until 2026-11-24 it was merged with the next cycle's throw into one record). With
+``--after_loss_s`` the window after a loss ends at the clip end at the latest, as ``mdp.ball_lost_since`` does in
+training (the next cycle would move the robot and clear the loss), and the column ``post_loss_end`` says how it ended:
+``complete`` (ran its full length), ``fell``, ``left_reference`` (a tracking termination: in Unified, going after the
+ball shows up here), ``clip_end`` or ``time_out``. Use 3 s for Unified, the training's window.
+
+``--fixed_throws SEED`` evaluates on a fixed throw list: the startup randomization (``env_cfg.seed``) and the random
+draws of every throw (release point, aim, wait, the perception parameters of the throw, launch noise; in Unified also
+the clip, start point and reset state of every reference cycle, whose start is then drawn uniformly instead of by the
+adaptive sampling) come from SEED, robot by robot and throw by throw. The k-th throw of robot i (columns ``env``,
+``throw_index``) is then the same for every checkpoint evaluated with the same SEED, task, scenario and ``--num_envs``,
+whatever the policy did before. A seed alone does not do that: when the robots reset depends on the policy, and so does
+the order of the random stream. Pushes, tracker dropouts, measurement noise and the reset states of the Advanced tasks
+stay random (``--no_push`` gives the tightest pairing). ``scripts/rsl_rl/eval_catch_paired.py`` compares two such runs
+throw by throw.
 
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
 
@@ -71,6 +94,7 @@ the planned arrival, the same window for every throw), from the arrival to the c
 import argparse
 import csv
 import functools
+import hashlib
 import json
 import math
 import os
@@ -102,10 +126,15 @@ parser.add_argument("--hold_rules_progress", type=float, default=None,
                     help="Hold rules alone (secure_steps, hold_radius) at this curriculum progress.")
 parser.add_argument("--after_loss_s", type=float, default=None,
                     help="Keep the episode running this long after the ball is lost and measure what the robot does.")
-parser.add_argument("--hide_lost_ball", action="store_true", default=False,
-                    help="The tracker stops reporting a lost ball (below 0.4 m, or 3 m away after the planned arrival).")
-parser.add_argument("--show_ball_before_throw", action="store_true", default=False,
-                    help="Report the ball already while it waits at the release point (thrower's hand), swaying.")
+parser.add_argument("--hide_lost_ball", type=float, nargs="?", const=1.0, default=None, metavar="SHARE",
+                    help="The tracker stops reporting a lost ball (below 0.4 m, or 3 m away after the planned arrival); "
+                         "with SHARE only in that share of the throws (column lost_hidden).")
+parser.add_argument("--show_ball_before_throw", type=float, nargs="?", const=1.0, default=None, metavar="SHARE",
+                    help="Report the ball already while it waits at the release point (thrower's hand), swaying; with "
+                         "SHARE only in that share of the throws (column shown_before).")
+parser.add_argument("--fixed_throws", type=int, default=None, metavar="SEED",
+                    help="Fixed throw list: startup randomization and the random draws of every throw come from SEED, "
+                         "robot by robot and throw by throw (same throws for every checkpoint; see the docstring).")
 parser.add_argument("--gate_deviation", type=float, default=None,
                     help="Catchability gate: a throw predicted from its first measurement to come no closer than this "
                          "(m) to the catch point at a catchable height is never reported to the robot.")
@@ -232,20 +261,139 @@ def ball_lost_for(env, wait_s: float) -> torch.Tensor:
     return steps.float() * env.step_dt >= wait_s
 
 
+def loss_at_clip_end(env) -> torch.Tensor:
+    """Termination of ``--after_loss_s`` in Unified: a lost ball also ends the episode on the last step of its reference
+    clip, as ``mdp.ball_lost_since`` does in training: the next cycle would start there, move the robot to the new clip
+    and clear the loss. Reads the loss counter of ``ball_lost_for`` (term ``ball_dropped``, computed before this one)."""
+    steps = getattr(env, "_eval_lost_steps", None)
+    if steps is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    motion = env.command_manager.get_term("motion")
+    # the motion command moves to the next cycle in the command update after this check, once time_steps reaches the
+    # clip length
+    last = motion.time_steps + 1 >= motion.motion.time_step_total[motion.clip_ids]
+    return (steps > 0) & last & (env.episode_length_buf > 1)
+
+
+def _seed_of(*parts) -> int:
+    """A 63-bit seed from the parts, the same in every process (unlike Python's hash())."""
+    digest = hashlib.blake2b(":".join(str(p) for p in parts).encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "little") >> 1
+
+
+def fix_throws(ue, seed: int):
+    """``--fixed_throws``: every throw draws its random numbers from a stream of its own, seeded by (seed, robot, throw
+    index), so the k-th throw of robot i is the same whatever the policy did before.
+
+    Wraps, on the instances, the methods that draw a throw: ``BallCommand._arm_throw`` (Advanced: throw, wait,
+    perception parameters of the throw) or ``SyncedBallCommand._start_cycle`` (Unified), the launch (velocity noise;
+    Unified: catch point jitter) and in Unified ``MotionCommand._resample_command`` (clip, start point, reset state of a
+    cycle; its start bins must not adapt to the policy, ``adaptive_alpha`` 0). Each wrapped call runs robot by robot
+    inside ``torch.random.fork_rng``, so the global stream, which everything else draws from (pushes, dropouts,
+    measurement noise, resets of the Advanced tasks), continues as if nothing had been drawn. The command's
+    ``_eval_throw_index`` holds the index of each robot's current throw for the per-throw records (1 for the first)."""
+    cmd = ue.command_manager.get_term("ball_throw")
+    device = torch.device(ue.device)
+    devices = [device.index or 0] if device.type == "cuda" else []
+    cmd._eval_throw_index = torch.zeros(ue.num_envs, dtype=torch.long, device=device)
+
+    def per_robot(method, site: str, index):
+        """``method`` called robot by robot, each call seeded by (seed, site, robot, ``index(robot)``)."""
+
+        def call(env_ids, *args, **kwargs):
+            if isinstance(env_ids, slice):
+                env_ids = torch.arange(ue.num_envs, device=device)[env_ids]
+            ids = torch.as_tensor(env_ids, dtype=torch.long, device=device).flatten()
+            for k in range(len(ids)):
+                one = ids[k:k + 1]
+                i = int(one)
+                with torch.random.fork_rng(devices=devices):
+                    torch.manual_seed(_seed_of(seed, site, i, index(i)))
+                    method(one, *args, **kwargs)
+
+        return call
+
+    def current(i: int) -> int:
+        return int(cmd._eval_throw_index[i])
+
+    if hasattr(cmd, "_start_cycle"):  # Unified: one throw per reference cycle, indexed by the cycle
+        motion = ue.command_manager.get_term(cmd.cfg.motion_command_name)
+
+        def next_cycle(i: int) -> int:  # the motion command counts the cycle after drawing it
+            return int(motion.resample_count[i]) + 1
+
+        def cycle_throw(i: int) -> int:
+            cmd._eval_throw_index[i] = motion.resample_count[i]
+            return current(i)
+
+        motion._resample_command = per_robot(motion._resample_command, "cycle", next_cycle)
+        cmd._start_cycle = per_robot(cmd._start_cycle, "throw", cycle_throw)
+    else:
+
+        def next_throw(i: int) -> int:
+            cmd._eval_throw_index[i] += 1
+            return current(i)
+
+        cmd._arm_throw = per_robot(cmd._arm_throw, "throw", next_throw)
+    cmd._launch = per_robot(cmd._launch, "launch", current)
+
+
 GRAVITY = 9.81
 # per-throw records (<out>_throws.csv): parameters taken at the launch, then how the throw ended
 THROW_FIELDS = ("wait_s", "turn_wait_deg", "aim_fwd_m", "aim_lat_m", "aim_h_m", "release_dist_m", "release_az_deg",
                 "release_h_m", "apex_h_m", "flight_s", "speed_h_mps", "obs_delay_steps", "hidden_in_zone")
-# with --after_loss_s: what the robot did between the loss and the episode end (empty otherwise)
+# with --after_loss_s: what the robot did between the loss and the episode end (empty otherwise); post_loss_end: how the
+# window ended (window_end)
 POST_LOSS_COLUMNS = ("lost_as", "post_loss_s", "post_loss_fell", "post_loss_min_pelvis_m", "post_loss_max_tilt_deg",
                      "post_loss_min_hand_m", "post_loss_liftoffs", "post_loss_disp_m", "post_loss_ball_foot_m",
-                     "post_loss_end_P")
+                     "post_loss_end_P", "post_loss_end")
+# which robot, its throw index (--fixed_throws: the index into the fixed list), whether the ball was reported before the
+# launch, whether a lost ball would be hidden from the robot in this throw
+ID_COLUMNS = ("env", "throw_index", "shown_before", "lost_hidden")
 THROW_COLUMNS = ("outcome", "launched") + THROW_FIELDS + (
     "touched", "palm", "max_secured_s", "confirmed", "pushes_flight", "push_max_flight_mps", "pushes_catch",
-    "pushes_hold", "gated") + POST_LOSS_COLUMNS
+    "pushes_hold", "gated") + POST_LOSS_COLUMNS + ID_COLUMNS
 F = {name: k for k, name in enumerate(THROW_FIELDS)}
 LOSSES = ("ball_dropped", "ball_missed")  # the ball is lost (a time-out is no loss: in `hold` it ends a held catch)
 FALLS = ("bad_orientation", "base_height")
+TRACKING = ("anchor_pos", "anchor_ori", "ee_body_pos")  # Unified: the robot left its reference motion
+
+
+def window_end(why: str) -> str:
+    """How the window after a loss ended, from the termination that ended the episode: ``complete`` (it ran its full
+    length), ``fell``, ``left_reference`` (a tracking termination of Unified), ``clip_end`` (Unified: the reference clip
+    ended), else the termination's name (``time_out``; ``ball_caught``: a confirmed catch whose hold phase completed
+    after the drop)."""
+    if why == "ball_dropped":  # the term ball_lost_for of --after_loss_s
+        return "complete"
+    if why in FALLS:
+        return "fell"
+    if why in TRACKING:
+        return "left_reference"
+    if why == "loss_clip_end":
+        return "clip_end"
+    return why
+
+
+def before_launch_stats(rows: list[dict]) -> dict:
+    """For one group of throws (e.g. ball reported before the throw or not): how many were caught, and how many ended
+    before the launch, by a fall or by leaving the reference (Unified)."""
+    n = len(rows)
+    if n == 0:
+        return {"throws": 0}
+    early = [x for x in rows if not x["launched"]]
+
+    def pct(k: int) -> float:
+        return round(100 * k / n, 2)
+
+    return {
+        "throws": n,
+        "pct_caught": pct(sum(x["outcome"] == "ball_caught" for x in rows)),
+        "pct_ended_before_launch": pct(len(early)),
+        "pct_fell_before_launch": pct(sum(x["outcome"] in FALLS for x in early)),
+        "pct_left_reference_before_launch": pct(sum(x["outcome"] in TRACKING for x in early)),
+        "pct_fell_at_all": pct(sum(x["outcome"] in FALLS or x["post_loss_end"] == "fell" for x in rows)),
+    }
 
 
 def loss_stage(row: dict) -> str:
@@ -405,14 +553,41 @@ class Stats:
         self.pl_disp = torch.zeros(N, device=dev)
         self.pl_ball_foot = torch.full((N,), float("inf"), device=dev)
         self.pl_end_P = torch.zeros(N, device=dev)
+        # per throw: its index on the robot (--fixed_throws: the command's index into the list, else counted here, from
+        # 1), whether the ball was reported before the launch, whether a lost ball would be hidden from the robot
+        self.th_index = torch.zeros(N, dtype=torch.long, device=dev)
+        self.th_shown = torch.zeros(N, dtype=torch.bool, device=dev)
+        self.th_lost_hidden = torch.zeros(N, dtype=torch.bool, device=dev)
+        ccfg = self.cmd.cfg
+        self.hide_rule = ccfg.hide_lost_ball_below is not None or ccfg.hide_lost_ball_beyond is not None
+        # Unified: the reference cycle of each robot; a new cycle within the episode starts a new throw
+        self.cycle = self.motion.resample_count.clone() if self.motion is not None else None
+        self.since_start = torch.zeros(N, dtype=torch.long, device=dev)  # steps since the reset or the cycle start
+        self._start_throw(torch.arange(N, device=dev))
+
+    def _cut_stances(self, rows: torch.Tensor):
+        """End the stances of the robots in ``rows`` without a lift-off: reset or move to a new reference cycle."""
+        L = self.lists
+        cut = self.in_stance & rows[:, None]
+        if cut.any():
+            L["stance_disp"] += (self.prev_foot_xy - self.st_xy).norm(dim=-1)[cut].tolist()
+            L["stance_dyaw"] += wrap(self.prev_foot_yaw - self.st_yaw)[cut].abs().tolist()
+            L["stance_launched"] += self.st_launched[cut].tolist()
+        self.in_stance &= ~rows[:, None]
 
     def step(self):
         ue, r, cmd, acc, cnt, L = self.ue, self.r, self.cmd, self.acc, self.cnt, self.lists
         tm = ue.termination_manager
         reset = ue.episode_length_buf == 0  # reset during this step: the state is already the new episode's
-        valid = ~reset
+        # Unified: the clip ended and the next cycle started within the episode (robot moved to the new clip, new throw)
+        if self.motion is not None:
+            restart = (self.motion.resample_count != self.cycle) & ~reset
+        else:
+            restart = torch.zeros_like(reset)
+        valid = ~reset & ~restart
+        self.since_start = torch.where(valid, self.since_start + 1, torch.zeros_like(self.since_start))
         launched = cmd.launched
-        settled = valid & (ue.episode_length_buf > 15)  # skip the first 0.3 s after a reset
+        settled = valid & (self.since_start > 15)  # skip the first 0.3 s after a reset or a new cycle
 
         # ---- throws completed within an episode (Advanced-C): the command already armed the next throw
         if self.multi:
@@ -435,13 +610,17 @@ class Stats:
                     self.unfinished += int(bool(self.was_launched[i]))
                     continue
                 self._end_throw(i, why)
-            cut = self.in_stance & reset[:, None]
-            if cut.any():
-                L["stance_disp"] += (self.prev_foot_xy - self.st_xy).norm(dim=-1)[cut].tolist()
-                L["stance_dyaw"] += wrap(self.prev_foot_yaw - self.st_yaw)[cut].abs().tolist()
-                L["stance_launched"] += self.st_launched[cut].tolist()
+            self._cut_stances(reset)
             self._start_throw(ids)
-            self.in_stance[ids] = False
+        # ---- Unified: a new reference cycle started within the episode; the old cycle's throw had no outcome
+        if restart.any():
+            ids = restart.nonzero().flatten()
+            for i in ids.tolist():
+                self._end_throw(i, "cycle_end")
+            self._cut_stances(restart)
+            self._start_throw(ids)
+        if self.motion is not None:
+            self.cycle = self.motion.resample_count.clone()
         self.max_sec = torch.maximum(self.max_sec, cmd.secured_steps)
         self.ep_confirmed |= cmd.confirmed
         self.ep_hold_steps = torch.maximum(self.ep_hold_steps, cmd.steps_since_confirm)
@@ -653,16 +832,19 @@ class Stats:
             self.valid_steps += int(valid.sum())
 
     def _end_throw(self, i: int, why: str):
-        """Record the outcome of env ``i``'s current throw: ``why`` is the termination term or ``ball_caught``. With
-        ``--after_loss_s`` a lost ball stays the outcome; a fall after it is recorded in the post-loss columns."""
+        """Record the outcome of env ``i``'s current throw: ``why`` is the termination term, ``ball_caught`` or
+        ``cycle_end`` (Unified: the reference clip ended first). With ``--after_loss_s`` a lost ball stays the outcome;
+        what ended the window after it (a fall, leaving the reference, ...) is recorded in the post-loss columns."""
         L = self.lists
         post = [""] * len(POST_LOSS_COLUMNS)
+        if why == "loss_clip_end" and int(self.pl_step[i]) < 0:
+            why = "ball_dropped"  # the loss counter saw a loss this record missed (a ball that bounced back at once)
         if self.after_loss_s is not None and int(self.pl_step[i]) >= 0:
             lost_as = "ball_dropped" if bool(self.pl_dropped[i]) else "ball_missed"
             post = [lost_as, round(int(self.pl_steps[i]) * self.dt, 2), int(why in FALLS),
                     round(float(self.pl_min_pelvis[i]), 3), round(float(self.pl_max_tilt[i]), 1),
                     round(float(self.pl_min_hand[i]), 3), int(self.pl_liftoffs[i]), round(float(self.pl_disp[i]), 3),
-                    round(float(self.pl_ball_foot[i]), 3), round(float(self.pl_end_P[i]), 3)]
+                    round(float(self.pl_ball_foot[i]), 3), round(float(self.pl_end_P[i]), 3), window_end(why)]
             why = lost_as
         self.terms[why] += 1
         L["ep_max_sec"].append(int(self.max_sec[i]))
@@ -678,6 +860,7 @@ class Stats:
             + [int(bool(self.th_touch[i])), int(bool(self.th_palm[i])), round(int(self.max_sec[i]) * self.dt, 2),
                int(bool(self.ep_confirmed[i])), int(self.th_push_flight[i]), round(float(self.th_push_max[i]), 3),
                int(self.th_push_catch[i]), int(self.th_push_hold[i]), int(bool(self.th_gated[i]))] + post
+            + [i, int(self.th_index[i]), int(bool(self.th_shown[i])), int(bool(self.th_lost_hidden[i]))]
         )
 
     def _record_launch(self, ids: torch.Tensor):
@@ -709,8 +892,17 @@ class Stats:
         th[ids, F["hidden_in_zone"]] = cmd._hide_in_zone[ids].float()
 
     def _start_throw(self, ids: torch.Tensor):
-        """Reset the per-throw trackers of ``ids`` (new episode, or the next throw in a task with several)."""
-        r = self.r
+        """Reset the per-throw trackers of ``ids`` (new episode, the next throw in a task with several, or a new
+        reference cycle in Unified). The command has already drawn the new throw, so its per-throw flags are read here:
+        with several throws per episode they are overwritten before the old throw's record is written."""
+        r, cmd = self.r, self.cmd
+        if hasattr(cmd, "_eval_throw_index"):  # --fixed_throws: the index into the fixed list
+            self.th_index[ids] = cmd._eval_throw_index[ids]
+        else:
+            self.th_index[ids] += 1
+        self.th_shown[ids] = cmd._show_parked[ids]
+        hidden = cmd._hide_lost[ids]
+        self.th_lost_hidden[ids] = hidden if self.hide_rule else torch.zeros_like(hidden)
         self.max_sec[ids] = 0
         self.ep_confirmed[ids] = False
         self.ep_hold_steps[ids] = 0
@@ -769,33 +961,56 @@ class Stats:
                            "caught_pct_gated": caught(gated), "caught_pct_not_gated": caught(shown)}
         post = [x for x in rows if x["lost_as"] != ""]
         if self.after_loss_s is not None and post:
-            n = len(post)
-
-            def pct(cond):
-                return round(100 * sum(1 for x in post if cond(x)) / n, 1)
-
-            def quantile(key, q, xs):
-                v = sorted(x[key] for x in xs)
-                return round(v[min(len(v) - 1, int(q * len(v)))], 3) if v else None
-
-            fell = [x for x in post if x["post_loss_fell"]]
-            stood = [x for x in post if not x["post_loss_fell"]]
-            out["after_loss"] = {
-                "window_s": self.after_loss_s,
-                "lost_balls": n,
-                "pct_window_cut_by_time_out": pct(lambda x: not x["post_loss_fell"] and x["post_loss_s"] < self.after_loss_s - 0.1),
-                "pct_fell": pct(lambda x: x["post_loss_fell"]),
-                "fall_after_s_median": quantile("post_loss_s", 0.5, fell),
-                "pct_hand_below_0.5m": pct(lambda x: x["post_loss_min_hand_m"] < 0.5),
-                "pct_pelvis_below_0.65m": pct(lambda x: x["post_loss_min_pelvis_m"] < 0.65),
-                "pct_torso_tilt_over_30deg": pct(lambda x: x["post_loss_max_tilt_deg"] > 30.0),
-                "liftoffs_mean": round(sum(x["post_loss_liftoffs"] for x in post) / n, 2),
-                "displacement_m_median": quantile("post_loss_disp_m", 0.5, post),
-                "displacement_m_p90": quantile("post_loss_disp_m", 0.9, post),
-                "pct_ball_within_0.15m_of_a_foot": pct(lambda x: x["post_loss_ball_foot_m"] < 0.15),
-                "posture_P_at_end_mean_if_standing": round(sum(x["post_loss_end_P"] for x in stood) / max(1, len(stood)), 3),
-            }
+            out["after_loss"] = self._after_loss_stats(post)
+            visible = [x for x in post if not x["lost_hidden"]]
+            hidden = [x for x in post if x["lost_hidden"]]
+            if visible and hidden:  # --hide_lost_ball with a share: both cases on the same robots
+                out["after_loss_by_lost_ball"] = {"visible": self._after_loss_stats(visible),
+                                                  "hidden": self._after_loss_stats(hidden)}
+        shown = [x for x in rows if x["shown_before"]]
+        if shown:  # --show_ball_before_throw
+            out["ball_before_throw"] = {"shown": before_launch_stats(shown),
+                                        "not_shown": before_launch_stats([x for x in rows if not x["shown_before"]])}
         return out
+
+    def _after_loss_stats(self, post: list[dict]) -> dict:
+        """What the robots did in the windows after the losses of ``post`` (records with post-loss columns)."""
+        n = len(post)
+        if n == 0:
+            return {"window_s": self.after_loss_s, "lost_balls": 0}
+
+        def pct(cond):
+            return round(100 * sum(1 for x in post if cond(x)) / n, 1)
+
+        def quantile(key, q, xs):
+            v = sorted(x[key] for x in xs)
+            return round(v[min(len(v) - 1, int(q * len(v)))], 3) if v else None
+
+        fell = [x for x in post if x["post_loss_fell"]]
+        left = [x for x in post if x["post_loss_end"] == "left_reference"]
+        stood = [x for x in post if not x["post_loss_fell"]]
+        ends = defaultdict(int)
+        for x in post:
+            ends[x["post_loss_end"]] += 1
+        return {
+            "window_s": self.after_loss_s,
+            "lost_balls": n,
+            # ended early without a fall (Advanced: time-out; Unified: also leaving the reference or the clip end)
+            "pct_window_cut_by_time_out": pct(lambda x: not x["post_loss_fell"] and x["post_loss_s"] < self.after_loss_s - 0.1),
+            "pct_fell": pct(lambda x: x["post_loss_fell"]),
+            "fall_after_s_median": quantile("post_loss_s", 0.5, fell),
+            "pct_left_reference": pct(lambda x: x["post_loss_end"] == "left_reference"),
+            "left_reference_after_s_median": quantile("post_loss_s", 0.5, left),
+            "window_end_pct": {k: round(100 * v / n, 1) for k, v in sorted(ends.items(), key=lambda kv: -kv[1])},
+            "pct_hand_below_0.5m": pct(lambda x: x["post_loss_min_hand_m"] < 0.5),
+            "pct_pelvis_below_0.65m": pct(lambda x: x["post_loss_min_pelvis_m"] < 0.65),
+            "pct_torso_tilt_over_30deg": pct(lambda x: x["post_loss_max_tilt_deg"] > 30.0),
+            "liftoffs_mean": round(sum(x["post_loss_liftoffs"] for x in post) / n, 2),
+            "displacement_m_median": quantile("post_loss_disp_m", 0.5, post),
+            "displacement_m_p90": quantile("post_loss_disp_m", 0.9, post),
+            "pct_ball_within_0.15m_of_a_foot": pct(lambda x: x["post_loss_ball_foot_m"] < 0.15),
+            "posture_P_at_end_mean_if_standing": round(sum(x["post_loss_end_P"] for x in stood) / max(1, len(stood)), 3),
+        }
 
     def report(self, scenario: str) -> dict:
         acc, cnt, L = self.acc, self.cnt, self.lists
@@ -966,6 +1181,22 @@ def summary(R: dict) -> str:
                  f"flight: {R['pushes_during_flight']}")
     if "after_loss" in R:
         lines.append(f"[eval] after a lost ball: {R['after_loss']}")
+    if "after_loss_by_lost_ball" in R:
+        v, h = R["after_loss_by_lost_ball"]["visible"], R["after_loss_by_lost_ball"]["hidden"]
+        lines.append(
+            f"[eval] after a lost ball, visible / hidden: {v['lost_balls']} / {h['lost_balls']} losses, fell "
+            f"{v.get('pct_fell')} / {h.get('pct_fell')} %, left the reference {v.get('pct_left_reference')} / "
+            f"{h.get('pct_left_reference')} %, how the windows ended {v.get('window_end_pct')} / {h.get('window_end_pct')}"
+        )
+    if "ball_before_throw" in R:
+        s, ns = R["ball_before_throw"]["shown"], R["ball_before_throw"]["not_shown"]
+        lines.append(
+            f"[eval] ball reported before the throw / not: {s['throws']} / {ns['throws']} throws, caught "
+            f"{s.get('pct_caught')} / {ns.get('pct_caught')} %, ended before the launch {s.get('pct_ended_before_launch')}"
+            f" / {ns.get('pct_ended_before_launch')} % (fell {s.get('pct_fell_before_launch')} / "
+            f"{ns.get('pct_fell_before_launch')} %, left the reference {s.get('pct_left_reference_before_launch')} / "
+            f"{ns.get('pct_left_reference_before_launch')} %)"
+        )
     return "\n".join(lines)
 
 
@@ -981,16 +1212,27 @@ def main():
               f"{curriculum}", flush=True)
     if args_cli.no_push:
         env_cfg.events.push_robot = None
+    synced = type(env_cfg.commands.ball_throw).__name__ == "SyncedBallCommandCfg"  # Unified
     if args_cli.after_loss_s is not None:
         # a lost ball no longer ends the episode at once: it runs on for after_loss_s and then ends as the loss
         env_cfg.terminations.ball_dropped = DoneTerm(func=ball_lost_for, params={"wait_s": args_cli.after_loss_s})
         env_cfg.terminations.ball_missed = None
-    if args_cli.hide_lost_ball:
+        if synced:
+            # Unified: the window ends at the clip end at the latest (next cycle); the term comes after ball_dropped,
+            # whose loss counter it reads, and counts for the adaptive sampling where the cycle started, as a drop
+            env_cfg.terminations.loss_clip_end = DoneTerm(func=loss_at_clip_end)
+            motion_cfg = env_cfg.commands.motion
+            motion_cfg.start_bin_failure_terms = list(motion_cfg.start_bin_failure_terms) + ["loss_clip_end"]
+    if args_cli.hide_lost_ball is not None:
         env_cfg.commands.ball_throw.hide_lost_ball_below = 0.4
         env_cfg.commands.ball_throw.hide_lost_ball_beyond = 3.0
-        env_cfg.commands.ball_throw.hide_lost_ball_prob = 1.0
-    if args_cli.show_ball_before_throw:
-        env_cfg.commands.ball_throw.show_parked_ball_prob = 1.0
+        env_cfg.commands.ball_throw.hide_lost_ball_prob = args_cli.hide_lost_ball
+    if args_cli.show_ball_before_throw is not None:
+        env_cfg.commands.ball_throw.show_parked_ball_prob = args_cli.show_ball_before_throw
+    if args_cli.fixed_throws is not None:
+        env_cfg.seed = args_cli.fixed_throws  # the same startup randomization (materials, masses) for every checkpoint
+        if synced:
+            env_cfg.commands.motion.adaptive_alpha = 0.0  # cycle starts drawn uniformly, not from this policy's failures
     if args_cli.gate_deviation is not None:
         env_cfg.commands.ball_throw.gate_max_deviation = args_cli.gate_deviation
     if getattr(env_cfg.events, "push_robot", None) is not None:
@@ -1011,6 +1253,8 @@ def main():
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     try:  # an open env makes closing the app hang, also after an error
+        if args_cli.fixed_throws is not None:
+            fix_throws(env.unwrapped, args_cli.fixed_throws)  # before the first reset, which draws the first throws
         steps = args_cli.steps
         if args_cli.video:
             env = gym.wrappers.RecordVideo(
@@ -1036,7 +1280,10 @@ def main():
             R = stats.report(args_cli.scenario)
         R.update({"task": args_cli.task, "checkpoint": args_cli.checkpoint, "num_envs": args_cli.num_envs,
                   "steps": steps, "curriculum_progress": args_cli.curriculum_progress,
-                  "hold_rules_progress": args_cli.hold_rules_progress, "curriculum_values": curriculum})
+                  "hold_rules_progress": args_cli.hold_rules_progress, "curriculum_values": curriculum,
+                  "after_loss_s": args_cli.after_loss_s, "hide_lost_ball": args_cli.hide_lost_ball,
+                  "show_ball_before_throw": args_cli.show_ball_before_throw, "fixed_throws": args_cli.fixed_throws,
+                  "no_push": args_cli.no_push})
         os.makedirs(os.path.dirname(os.path.abspath(args_cli.out)), exist_ok=True)
         with open(args_cli.out + ".json", "w") as f:
             json.dump(R, f, indent=1)

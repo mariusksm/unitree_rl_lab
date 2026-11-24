@@ -28,7 +28,7 @@ AD_RANGES = {"aim_fwd_m": (0.15, 0.40), "aim_lat_m": (-0.10, 0.17), "aim_h_m": (
 AD_TOL = {"aim_fwd_m": 0.03, "aim_lat_m": 0.03, "aim_h_m": 0.01, "apex_h_m": 0.01}
 LOSSES = ("ball_dropped", "ball_missed")
 FALLS = ("bad_orientation", "base_height")
-TEXT_COLUMNS = ("outcome", "lost_as")
+TEXT_COLUMNS = ("outcome", "lost_as", "post_loss_end")
 
 
 def load(path: str) -> list[dict]:
@@ -64,7 +64,7 @@ def ranges(key: str, edges: list[float], unit: str = "", absolute: bool = False)
             label = f"{lo:g} to {hi:g}{unit}"
 
         def pred(r, lo=lo, hi=hi):
-            v = r[key]
+            v = r.get(key)
             if v is None:
                 return False
             v = abs(v) if absolute else v
@@ -76,13 +76,13 @@ def ranges(key: str, edges: list[float], unit: str = "", absolute: bool = False)
 
 def counts(key: str, top: int):
     """Bins 0, 1, ..., top - 1 and ≥ top of an integer count."""
-    bins = [(str(k), lambda r, k=k: r[key] is not None and round(r[key]) == k) for k in range(top)]
-    bins.append((f"≥ {top}", lambda r: r[key] is not None and r[key] >= top))
+    bins = [(str(k), lambda r, k=k: r.get(key) is not None and round(r[key]) == k) for k in range(top)]
+    bins.append((f"≥ {top}", lambda r: r.get(key) is not None and r[key] >= top))
     return bins
 
 
 def values(key: str, labels: dict):
-    return [(label, lambda r, v=v: r[key] is not None and round(r[key]) == v) for v, label in labels.items()]
+    return [(label, lambda r, v=v: r.get(key) is not None and round(r[key]) == v) for v, label in labels.items()]
 
 
 def inside_ad(r: dict) -> bool:
@@ -101,6 +101,7 @@ SPLITS = [
     ("horizontal ball speed (m/s)", ranges("speed_h_mps", [0, 2.5, 3.5, 4.5, INF])),
     ("perception delay (control steps)", values("obs_delay_steps", {k: str(k) for k in range(0, 8)})),
     ("ball hidden near the body by the tracker", values("hidden_in_zone", {0: "no", 1: "yes"})),
+    ("ball reported before the throw (--show_ball_before_throw)", values("shown_before", {0: "no", 1: "yes"})),
     ("pushes during the flight (launch to the planned arrival)", counts("pushes_flight", 2)),
     ("largest push during the flight (m/s)", ranges("push_max_flight_mps", [0, 0.01, 0.2, 0.4, INF])),
     ("pushes while holding (confirmed catches only)",
