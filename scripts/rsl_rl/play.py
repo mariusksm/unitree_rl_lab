@@ -86,6 +86,7 @@ def main():
         entry_point_key="play_env_cfg_entry_point",
     )
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    agent_cfg = cli_args.for_inference(agent_cfg)  # no update here: e.g. Advanced-S's masked anchor off
     # convert the pre-4.0 `policy` config for the installed rsl-rl version (as train.py does)
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, version("rsl-rl-lib"))
 

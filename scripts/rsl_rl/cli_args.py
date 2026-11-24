@@ -138,3 +138,14 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
         agent_cfg.experiment_name = task_name.lower().replace("-", "_").removesuffix("_play")
 
     return agent_cfg
+
+
+def for_inference(agent_cfg: RslRlOnPolicyRunnerCfg) -> RslRlOnPolicyRunnerCfg:
+    """Prepare the agent config of a runner that only loads and runs an actor (``play.py``, ``eval_catch.py``): it
+    never updates, so terms that only the update needs are switched off. AnchoredPPO's masked anchor (Advanced-S, chain
+    v2) needs the positions of the ball terms, which only ``train.py`` fills in; without them the runner could not be
+    built for these tasks (until 2026-11-24 the suite of S's third run failed for this reason)."""
+    algorithm = agent_cfg.algorithm
+    if getattr(algorithm, "masked_anchor_coef", 0.0) > 0.0:
+        algorithm.masked_anchor_coef = 0.0
+    return agent_cfg

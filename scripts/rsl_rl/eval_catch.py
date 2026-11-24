@@ -66,6 +66,19 @@ the order of the random stream. Pushes, tracker dropouts, measurement noise and 
 stay random (``--no_push`` gives the tightest pairing). ``scripts/rsl_rl/eval_catch_paired.py`` compares two such runs
 throw by throw.
 
+More per-throw columns (since 2026-11-24): ``both_palms`` (both palms on the ball at once); the first palm contact:
+``contact_rel_speed_mps`` (speed of the ball relative to the mean of both wrists) and ``contact_ball_speed_mps``, both in
+the control step before the contact, and ``contact_hold_dist_m`` (the ball's distance to the hold point at it), to tell
+a bounce off the palms from an inaccurate interception; ``wait_hand_h_m`` (wrists above the pelvis, mean over the wait)
+and in Unified ``wait_hand_above_ref_m`` (the largest height of a wrist above the reference wrist while waiting, the
+quantity ``ee_body_pos`` ends at 0.3 m); the startup randomization of the robot (``ball_restitution``,
+``ball_friction``, ``ball_mass_kg``; ``hand_restitution`` and ``hand_friction``, means over the shapes of both hands;
+``foot_friction``). The ball-hand contact uses the mean of the ball's and the hand's restitution (combine mode average).
+The report summarizes them as ``first_palm_contact`` (caught against lost) and ``waiting_hands``.
+
+The runner is built for inference only (``cli_args.for_inference``): AnchoredPPO's masked anchor, which needs ball
+indices that only ``train.py`` fills in, is switched off, so Advanced-S and the chain-v2 tasks can be evaluated too.
+
 All scenarios of a checkpoint plus the comparison table: ``scripts/rsl_rl/eval_catch_all.sh``.
 
 The play config throws the final distribution of the training curriculum. ``--curriculum_progress p`` uses the
@@ -350,9 +363,19 @@ POST_LOSS_COLUMNS = ("lost_as", "post_loss_s", "post_loss_fell", "post_loss_min_
 # which robot, its throw index (--fixed_throws: the index into the fixed list), whether the ball was reported before the
 # launch, whether a lost ball would be hidden from the robot in this throw
 ID_COLUMNS = ("env", "throw_index", "shown_before", "lost_hidden")
+# both palms on the ball at once; the first palm contact: speed of the ball relative to the hands (mean of both wrists)
+# and the ball's speed, both in the control step before it, and the ball's distance to the hold point at it
+CONTACT_COLUMNS = ("both_palms", "contact_rel_speed_mps", "contact_ball_speed_mps", "contact_hold_dist_m")
+# the hands while waiting for the launch: wrists above the pelvis (mean over the wait); Unified: the largest height of a
+# wrist above the reference wrist (what ee_body_pos ends at 0.3 m)
+WAIT_COLUMNS = ("wait_hand_h_m", "wait_hand_above_ref_m")
+# startup randomization of the robot (fixed for the run): the ball, the shapes of both hands (mean), both feet (mean);
+# the ball-hand contact uses the mean of the ball's and the hand's restitution (combine mode average)
+MATERIAL_COLUMNS = ("ball_restitution", "ball_friction", "ball_mass_kg", "hand_restitution", "hand_friction",
+                    "foot_friction")
 THROW_COLUMNS = ("outcome", "launched") + THROW_FIELDS + (
     "touched", "palm", "max_secured_s", "confirmed", "pushes_flight", "push_max_flight_mps", "pushes_catch",
-    "pushes_hold", "gated") + POST_LOSS_COLUMNS + ID_COLUMNS
+    "pushes_hold", "gated") + POST_LOSS_COLUMNS + ID_COLUMNS + CONTACT_COLUMNS + WAIT_COLUMNS + MATERIAL_COLUMNS
 F = {name: k for k, name in enumerate(THROW_FIELDS)}
 LOSSES = ("ball_dropped", "ball_missed")  # the ball is lost (a time-out is no loss: in `hold` it ends a held catch)
 FALLS = ("bad_orientation", "base_height")
@@ -373,6 +396,12 @@ def window_end(why: str) -> str:
     if why == "loss_clip_end":
         return "clip_end"
     return why
+
+
+def quantile_of(rows: list[dict], key: str, q: float):
+    """Quantile ``q`` of ``key`` over the records that have it (None if none has)."""
+    values = sorted(x[key] for x in rows if x[key] != "")
+    return round(values[min(len(values) - 1, int(q * len(values)))], 3) if values else None
 
 
 def before_launch_stats(rows: list[dict]) -> dict:
@@ -563,7 +592,53 @@ class Stats:
         # Unified: the reference cycle of each robot; a new cycle within the episode starts a new throw
         self.cycle = self.motion.resample_count.clone() if self.motion is not None else None
         self.since_start = torch.zeros(N, dtype=torch.long, device=dev)  # steps since the reset or the cycle start
+        # per throw (CONTACT_COLUMNS, WAIT_COLUMNS): both palms, the first palm contact (relative speed, ball speed,
+        # distance to the hold point), the velocities of the last step (before the contact), the hands while waiting
+        self.th_both = torch.zeros(N, dtype=torch.bool, device=dev)
+        self.th_contact = torch.full((N, 3), float("nan"), device=dev)
+        self.prev_rel_vel = torch.zeros(N, 3, device=dev)
+        self.prev_ball_speed = torch.zeros(N, device=dev)
+        self.th_wait_hand_sum = torch.zeros(N, device=dev)
+        self.th_wait_n = torch.zeros(N, dtype=torch.long, device=dev)
+        self.th_wait_above_ref = torch.full((N,), float("nan"), device=dev)
+        self.ref_hand = []
+        if self.motion is not None:
+            names = list(self.motion.cfg.body_names)
+            self.ref_hand = [names.index(n) for n in ("left_wrist_yaw_link", "right_wrist_yaw_link") if n in names]
+        self.materials = self._env_materials()
         self._start_throw(torch.arange(N, device=dev))
+
+    def _env_materials(self) -> dict:
+        """Startup randomization of each robot, fixed for the run (MATERIAL_COLUMNS): friction and restitution of the
+        ball and its mass, the mean friction and restitution over the shapes of both hands (``wrist_yaw_link`` with
+        the rubber hand) and the mean friction of both feet. Columns stay empty where PhysX does not tell."""
+        out = {}
+        try:
+            view = self.cmd.ball.root_physx_view
+            mat = view.get_material_properties()  # (N, shapes, 3): static friction, dynamic friction, restitution
+            out["ball_friction"], out["ball_restitution"] = mat[:, 0, 0], mat[:, 0, 2]
+            out["ball_mass_kg"] = view.get_masses()[:, 0]
+        except Exception as e:  # noqa: BLE001 - a missing column must not stop the evaluation
+            print(f"[eval] ball material not read: {e}", flush=True)
+        try:
+            r = self.r
+            view = r.root_physx_view
+            mat = view.get_material_properties()
+            # shapes of each link in link order, counted as Isaac Lab's randomize_rigid_body_material counts them
+            counts = [r._physics_sim_view.create_rigid_body_view(p).max_shapes for p in view.link_paths[0]]
+            starts = [sum(counts[:b]) for b in range(len(counts))]
+
+            def mean_over(bodies: list[str], column: int) -> torch.Tensor:
+                ids = r.find_bodies(bodies, preserve_order=True)[0]
+                shapes = [k for b in ids for k in range(starts[b], starts[b] + counts[b])]
+                return mat[:, shapes, column].mean(dim=1)
+
+            hands = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+            out["hand_friction"], out["hand_restitution"] = mean_over(hands, 0), mean_over(hands, 2)
+            out["foot_friction"] = mean_over(["left_ankle_roll_link", "right_ankle_roll_link"], 0)
+        except Exception as e:  # noqa: BLE001
+            print(f"[eval] robot materials not read: {e}", flush=True)
+        return {k: v.float().cpu() for k, v in out.items()}
 
     def _cut_stances(self, rows: torch.Tensor):
         """End the stances of the robots in ``rows`` without a lift-off: reset or move to a new reference cycle."""
@@ -645,7 +720,17 @@ class Stats:
             forces = data.force_matrix_w.unsqueeze(1)
         touching = forces.norm(dim=-1).amax(dim=1).amax(dim=1) > 1.0  # (N, filter bodies)
         self.th_touch |= live & touching.any(dim=-1)
-        self.th_palm |= live & cmd.arm_contact.any(dim=-1)
+        palm = live & cmd.arm_contact.any(dim=-1)
+        first = palm & ~self.th_palm  # first palm contact of the throw: velocities of the step before, not after it
+        if first.any():
+            self.th_contact[first, 0] = self.prev_rel_vel[first].norm(dim=-1)
+            self.th_contact[first, 1] = self.prev_ball_speed[first]
+            self.th_contact[first, 2] = cmd.hold_distance[first]
+        self.th_palm |= palm
+        self.th_both |= live & cmd.arm_contact.all(dim=-1)
+        ball_vel = cmd.ball.data.root_lin_vel_w
+        self.prev_rel_vel = ball_vel - r.data.body_lin_vel_w[:, self.hand_b].mean(dim=1)
+        self.prev_ball_speed = ball_vel.norm(dim=-1)
         self.th_gated |= live & cmd.ball_gated
         push = getattr(ue, "_eval_push", None)
         if push is not None:
@@ -709,6 +794,15 @@ class Stats:
             hand_force = sum(  # strongest contact of each hand with the other arm
                 sn.data.force_matrix_w.norm(dim=-1).flatten(start_dim=1).amax(dim=-1) for sn in self.hand_sensors
             )
+        # the hands of each throw while waiting (WAIT_COLUMNS)
+        waiting = ~launched & settled
+        wrists_above_pelvis = r.data.body_pos_w[:, self.hand_b, 2].mean(dim=1) - r.data.root_pos_w[:, 2]
+        self.th_wait_hand_sum += torch.where(waiting, wrists_above_pelvis, torch.zeros_like(wrists_above_pelvis))
+        self.th_wait_n += waiting.long()
+        if len(self.ref_hand) == 2:  # Unified: as ee_body_pos measures it (robot minus reference, height only)
+            m = self.motion
+            above = (m.robot_body_pos_w[:, self.ref_hand, 2] - m.body_pos_relative_w[:, self.ref_hand, 2]).amax(dim=1)
+            self.th_wait_above_ref = torch.where(waiting, torch.fmax(self.th_wait_above_ref, above), self.th_wait_above_ref)
         for tag, m in (("wait", ~launched & settled), ("held", sec)):
             k = int(m.sum())
             if k == 0:
@@ -861,6 +955,19 @@ class Stats:
                int(bool(self.ep_confirmed[i])), int(self.th_push_flight[i]), round(float(self.th_push_max[i]), 3),
                int(self.th_push_catch[i]), int(self.th_push_hold[i]), int(bool(self.th_gated[i]))] + post
             + [i, int(self.th_index[i]), int(bool(self.th_shown[i])), int(bool(self.th_lost_hidden[i]))]
+            + self._contact_wait_material(i)
+        )
+
+    def _contact_wait_material(self, i: int) -> list:
+        """CONTACT_COLUMNS, WAIT_COLUMNS and MATERIAL_COLUMNS of env ``i``'s current throw (empty where not known)."""
+        def num(x: float, digits: int = 3):
+            return round(x, digits) if x == x else ""  # NaN: not measured
+
+        n_wait = int(self.th_wait_n[i])
+        return (
+            [int(bool(self.th_both[i]))] + [num(x) for x in self.th_contact[i].tolist()]
+            + [num(float(self.th_wait_hand_sum[i]) / n_wait) if n_wait else "", num(float(self.th_wait_above_ref[i]))]
+            + [num(float(self.materials[k][i]), 4) if k in self.materials else "" for k in MATERIAL_COLUMNS]
         )
 
     def _record_launch(self, ids: torch.Tensor):
@@ -903,6 +1010,11 @@ class Stats:
         self.th_shown[ids] = cmd._show_parked[ids]
         hidden = cmd._hide_lost[ids]
         self.th_lost_hidden[ids] = hidden if self.hide_rule else torch.zeros_like(hidden)
+        self.th_both[ids] = False
+        self.th_contact[ids] = float("nan")
+        self.th_wait_hand_sum[ids] = 0.0
+        self.th_wait_n[ids] = 0
+        self.th_wait_above_ref[ids] = float("nan")
         self.max_sec[ids] = 0
         self.ep_confirmed[ids] = False
         self.ep_hold_steps[ids] = 0
@@ -971,6 +1083,32 @@ class Stats:
         if shown:  # --show_ball_before_throw
             out["ball_before_throw"] = {"shown": before_launch_stats(shown),
                                         "not_shown": before_launch_stats([x for x in rows if not x["shown_before"]])}
+        # the first palm contact of caught and of lost balls: did the lost ones arrive faster relative to the hands
+        # (a bounce off the palms) or farther from the hold point (an inaccurate interception)?
+        palm = [x for x in launched if x["contact_rel_speed_mps"] != ""]
+        if palm:
+            out["first_palm_contact"] = {}
+            for group, xs in (("caught", [x for x in palm if x["outcome"] == "ball_caught"]),
+                              ("lost", [x for x in palm if x["outcome"] in LOSSES])):
+                out["first_palm_contact"][group] = {
+                    "throws": len(xs),
+                    "rel_speed_mps_median": quantile_of(xs, "contact_rel_speed_mps", 0.5),
+                    "ball_speed_mps_median": quantile_of(xs, "contact_ball_speed_mps", 0.5),
+                    "hold_dist_m_median": quantile_of(xs, "contact_hold_dist_m", 0.5),
+                    "pct_both_palms": round(100 * sum(x["both_palms"] for x in xs) / len(xs), 1) if xs else None,
+                }
+        waits = [x for x in rows if x["wait_hand_h_m"] != ""]
+        if waits:
+            out["waiting_hands"] = {"throws": len(waits),
+                                    "wrists_above_pelvis_m_median": quantile_of(waits, "wait_hand_h_m", 0.5)}
+            above = [x["wait_hand_above_ref_m"] for x in waits if x["wait_hand_above_ref_m"] != ""]
+            if above:  # Unified
+                out["waiting_hands"].update({
+                    "above_reference_m_median": quantile_of(waits, "wait_hand_above_ref_m", 0.5),
+                    "above_reference_m_p90": quantile_of(waits, "wait_hand_above_ref_m", 0.9),
+                    "pct_above_reference_over_0.2m": round(100 * sum(v > 0.2 for v in above) / len(above), 1),
+                    "pct_above_reference_over_0.3m": round(100 * sum(v > 0.3 for v in above) / len(above), 1),
+                })
         return out
 
     def _after_loss_stats(self, post: list[dict]) -> dict:
@@ -1188,6 +1326,16 @@ def summary(R: dict) -> str:
             f"{v.get('pct_fell')} / {h.get('pct_fell')} %, left the reference {v.get('pct_left_reference')} / "
             f"{h.get('pct_left_reference')} %, how the windows ended {v.get('window_end_pct')} / {h.get('window_end_pct')}"
         )
+    if "first_palm_contact" in R:
+        c, lo = R["first_palm_contact"]["caught"], R["first_palm_contact"]["lost"]
+        lines.append(
+            f"[eval] first palm contact, caught / lost: {c['throws']} / {lo['throws']} throws, ball relative to the hands "
+            f"{c['rel_speed_mps_median']} / {lo['rel_speed_mps_median']} m/s, ball {c['ball_speed_mps_median']} / "
+            f"{lo['ball_speed_mps_median']} m/s, from the hold point {c['hold_dist_m_median']} / {lo['hold_dist_m_median']}"
+            f" m (medians), both palms on the ball {c['pct_both_palms']} / {lo['pct_both_palms']} %"
+        )
+    if "waiting_hands" in R:
+        lines.append(f"[eval] hands while waiting: {R['waiting_hands']}")
     if "ball_before_throw" in R:
         s, ns = R["ball_before_throw"]["shown"], R["ball_before_throw"]["not_shown"]
         lines.append(
@@ -1248,7 +1396,7 @@ def main():
         env_cfg.viewer.eye = tuple(float(x) for x in args_cli.eye.split(","))
         env_cfg.viewer.lookat = tuple(float(x) for x in args_cli.lookat.split(","))
         env_cfg.viewer.resolution = (1280, 720)
-    agent_cfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    agent_cfg = cli_args.for_inference(cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli))
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, version("rsl-rl-lib"))
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
